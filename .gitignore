@@ -1,0 +1,23 @@
+# Ignore everything by default
+*
+
+# Allow only specific directories (and their contents)
+!README.md
+!data_processing/**
+!lfmc_model/**
+
+# Still ignore unwanted stuff inside allowed dirs
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store
+**/._.DS_Store
+**/*.out
+**/*.err
+**/*.log
+**/logs/
+**/testing/
+**/old/
+
+# Ignore dotfiles EXCEPT .gitignore
+**/.*
+!.gitignore
