@@ -3,7 +3,9 @@
 
 # Allow only specific directories (and their contents)
 !README.md
+!data_processing/
 !data_processing/**
+!lfmc_model/
 !lfmc_model/**
 
 # Still ignore unwanted stuff inside allowed dirs
