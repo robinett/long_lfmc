@@ -3,9 +3,9 @@
 # parallelized in time
 
 # for all the files that we want to download
-start_month="2016-04"
-end_month="2022-11" # inclusive
-src_top_level_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_raw"
+start_month="2016-01"
+end_month="2022-12" # inclusive
+src_top_level_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_raw_from_gee_api"
 target_top_level_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_regrid"
 target_grid_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/grid/epsg5070_500m_westUS_grid.nc4"
 src_crs="EPSG:4326"

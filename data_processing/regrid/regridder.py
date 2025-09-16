@@ -82,6 +82,9 @@ def reproject_and_regrid_whole_directory(
         this_src_ds = xr.open_dataset(
             this_src_file_path
         )
+        #print(np.unique(this_src_ds['band_data'].values))
+        #print(np.where(np.isnan(this_src_ds['band_data'].values)))
+        #continue
         if fill_value != 'none':
             # fill the fill value with nans
             this_src_ds = this_src_ds.where(
@@ -236,7 +239,7 @@ def reproject_and_regrid_single_file(
         # match the target grid
         this_padded_src_chunk_reproj = this_padded_src_chunk.rio.reproject_match(
             this_target_chunk,
-            resampling=Resampling.nearest
+            resampling=Resampling.average
         )
         if plot_tests:
             print('plotting the regridded chunk')

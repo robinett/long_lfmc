@@ -9,5 +9,5 @@ python3 main.py --target_grid /scratch/users/trobinet/long_lfmc/trent_datasets/g
 Time per file: approx. 7s
 
 # example for krishna's data
-python3 main.py --target_grid /scratch/users/trobinet/long_lfmc/trent_datasets/grid/epsg5070_500m_westUS_grid.nc4 --src_dir /scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_raw --target_dir /scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_regrid --src_crs EPSG:4326 --target_crs EPSG:5070 --fill_value -9999 --chunk_buffer 750
+python3 main.py --target_grid /scratch/users/trobinet/long_lfmc/trent_datasets/grid/epsg5070_500m_westUS_grid.nc4 --src_dir /scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_raw_from_gee_api --target_dir /scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_regrid --src_crs EPSG:4326 --target_crs EPSG:5070 --fill_value -9999 --chunk_buffer 750
 time per file: approx. 10s

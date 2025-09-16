@@ -10,7 +10,7 @@ end_month="2022-01" # inclusive
 file_date_format="*{YYYY}-{MM}*"
 # do we want yearly
 # top level dir where we are organizing files from
-top_level_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_raw"
+top_level_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_raw_from_gee_api"
 # set the current and final dates
 current_date=$(date -d "$start_month-01" +%Y-%m-%d)
 final_date=$(date -d "$end_month-01 +1 month" +%Y-%m-%d) # exclusive
