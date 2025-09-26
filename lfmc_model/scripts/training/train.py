@@ -1,499 +1,791 @@
-import torch
-from torch.utils.data import TensorDataset,DataLoader
-import matplotlib.pyplot as plt
 import os
 import sys
-from tqdm import tqdm
-import sys
 import copy
+import json
+import shutil
+import tqdm
+import numpy as np
 import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from sklearn.metrics import r2_score
 
-sys.path.append(os.path.abspath(os.path.join('..','..','models','transformer')))
-sys.path.append(os.path.abspath(os.path.join('..','..','models','temporal_cnn')))
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
+sys.path.append(os.path.join(project_root,'lfmc_model','models','transformer'))
+sys.path.append(os.path.join(project_root,'lfmc_model','utils'))
 
-from transformer_model import TimeSeriesTransformer
-from temporal_cnn_model import TemporalCNN
+from transformer_model import LFMCTransformer
+import plotting
 
-def train(
-    model,train_loader,test_loader,val_loader,
-    epochs,device,save_path,
-    plot_path,scaling_factors,y_name,patience=5,
-    lr=1e-4,optimizer=None,
-    criterion=None
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.self_attn.num_heads is odd",
+    category=UserWarning,
+)
+
+def load_data(center_data_dir):
+    # load all the center data
+    X_daily = torch.load(
+        os.path.join(center_data_dir, 'X_daily.pt'),
+        weights_only=False
+    )
+    X_static = torch.load(
+        os.path.join(center_data_dir, 'X_static.pt'),
+        weights_only=False
+    )
+    Y_lfmc = torch.load(
+        os.path.join(center_data_dir, 'Y.pt'),
+        weights_only=False
+    )
+    # load the center info
+    center_info = pd.read_csv(os.path.join(center_data_dir, 'info.csv'))
+    all_center_data = [
+        X_daily, X_static, Y_lfmc, center_info
+    ]
+    return all_center_data
+
+class EarlyStopping:
+    def __init__(
+        self,
+        patience=5,
+        mae_delta=0.001,
+        pr_auc_delta=0.001,
+        best_score_delta=0.0001
+    ):
+        self.patience = patience
+        self.mae_delta = mae_delta
+        self.best_mae = float('inf')
+        self.mae_counter = 0
+        self.early_stop = False
+        self.save_model = False
+        self.first_epoch = True  # to save the first epoch model
+
+    def __call__(self,val_mae):
+        if self.first_epoch:
+            print("First epoch, saving model")
+            self.save_model = True
+            self.first_epoch = False
+            self.last_saved_mae = val_mae
+        elif val_mae < self.last_saved_mae:
+            print("New best model found!")
+            print(f"MAE improved from {self.last_saved_mae} to {val_mae}")
+            self.save_model = True
+            self.last_saved_mae = val_mae
+            self.mae_counter = 0
+        else:
+            print("No improvement in model performance.")
+            print(f"Current MAE: {val_mae}, Best MAE: {self.last_saved_mae}")
+            self.save_model = False
+            self.mae_counter += 1
+        print(
+            f"EarlyStopping counter: mae {self.mae_counter}"
+        )
+        if self.mae_counter >= self.patience:
+            self.early_stop = True
+
+def create_site_split(
+    data,                  # torch tensor (unused here)
+    data_info: pd.DataFrame,
+    desired_sample_size: int,
+    seed: int | None = 42,
 ):
-    if criterion is None:
-        criterion = torch.nn.MSELoss()
-    if optimizer is None:
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    best_test_loss = float('inf')
-    best_test_r2 = float('-inf')
-    best_test_targets = None
-    best_test_preds = None
-    train_losses = []
-    test_losses = []
-    train_r2s = []
-    test_r2s = []
-    # load the scaling factors for our model
-    counter = 0
-    for epoch in range(epochs):
-        model.train()
-        running_loss = 0.0
-        train_preds, train_targets = [], []
-        for i, (X_batch,y_batch) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")):
-            X_batch,y_batch = X_batch.to(device),y_batch.to(device)
-            optimizer.zero_grad()
-            outputs = model(X_batch)
-            loss = criterion(outputs.squeeze(), y_batch)
+    # Expect strings like "YYYY-MM-DD_lat_lon"
+    s = data_info["day_lat_lon"].astype(str)
+    # split into exactly 3 parts from the right:
+    # date, lat, lon (robust to underscores in date prefix)
+    parts = s.str.rsplit("_", n=2, expand=True)
+    if parts.shape[1] != 3:
+        raise ValueError(
+            "day_lat_lon must look like "
+            "'YYYY-MM-DD_lat_lon'"
+        )
+    parts.columns = ["date", "lat", "lon"]
+    # coerce to numeric; drop malformed rows
+    parts["lat"] = pd.to_numeric(
+        parts["lat"], errors="coerce"
+    )
+    parts["lon"] = pd.to_numeric(
+        parts["lon"], errors="coerce"
+    )
+    parts = parts.dropna(subset=["lat", "lon"])
+    if parts.empty:
+        raise ValueError(
+            "No valid lat/lon rows after parsing."
+        )
+
+    # count obs per site
+    counts = (
+        parts.groupby(["lat", "lon"])
+        .size()
+        .reset_index(name="n")
+    )
+    # shuffle sites reproducibly
+    rng = np.random.default_rng(seed)
+    idx = np.arange(len(counts))
+    rng.shuffle(idx)
+    counts = counts.iloc[idx].reset_index(drop=True)
+    # accumulate sites until we hit desired total obs
+    val_locs = []
+    total = 0
+    for _, row in counts.iterrows():
+        val_locs.append((float(row["lat"]),
+                         float(row["lon"])))
+        total += int(row["n"])
+        if total >= desired_sample_size:
+            break
+    # if desired_sample_size > total obs, just return all
+    if not val_locs:
+        # shouldn’t happen unless desired_sample_size <= 0
+        return []
+    return val_locs
+
+def run_model(
+    model,
+    loader,
+    device,
+    loss_fn=None,
+    train_model=False,
+    optimizer=None,
+    warmup_steps=0,
+    global_step=0,
+    warmup_start_lr=None,
+    warmup_end_lr=None
+):
+    pbar = tqdm.tqdm(
+        loader,
+        desc='Batch'
+    )
+    # tracking paraphanalia
+    n_samples = 0.0
+    running_loss = 0.0
+    preds = []
+    for Xd_b,Xs_b,Y_b in pbar:
+        # move data to device
+        Xd_b = Xd_b.to(device=device, dtype=torch.float32)
+        Xs_b = Xs_b.to(device=device, dtype=torch.float32)
+        Y_b = Y_b.to(device=device, dtype=torch.float32)
+        if train_model:
+            this_preds = model(Xd_b, Xs_b)
+        else:
+            with torch.no_grad():
+                this_preds = model(Xd_b, Xs_b)
+        preds.append(this_preds)
+        if loss_fn is not None:
+            loss = loss_fn(this_preds, Y_b)
+            running_loss += loss.item()
+            n_samples += Y_b.size(0)
+        if train_model:
+            if global_step < warmup_steps:
+                this_t = global_step / warmup_steps
+                lr = warmup_start_lr * ((warmup_end_lr / warmup_start_lr) ** this_t)
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr
+            optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
-            running_loss += loss.item() * X_batch.size(0)
-            train_preds.append(outputs.detach().cpu())
-            train_targets.append(y_batch.detach().cpu())
-        epoch_train_loss = running_loss / len(train_loader.dataset)
-        train_losses.append(epoch_train_loss)
-        train_preds = torch.cat(train_preds)
-        train_targets = torch.cat(train_targets)
-        epoch_train_r2 = r2_score_torch(train_targets, train_preds)
-        train_r2s.append(epoch_train_r2)
-        # Validation
-        model.eval()
-        test_loss = 0.0
-        training_loss_on_eval = 0.0
-        test_preds, test_targets = [], []
-        with torch.no_grad():
-            # let's see what our training loss is, just to see how dropout is
-            # affecting performance
-            for X_train,y_train in train_loader:
-                X_train,y_train = X_train.to(device),y_train.to(device)
-                train_outputs = model(X_train)
-                loss = criterion(train_outputs.squeeze(), y_train)
-                training_loss_on_eval += loss.item() * X_train.size(0)
-            # now get our real validation loss
-            for X_test,y_test in test_loader:
-                X_test,y_test = X_test.to(device),y_test.to(device)
-                test_outputs = model(X_test)
-                loss = criterion(test_outputs.squeeze(), y_test)
-                test_loss += loss.item() * X_test.size(0)
-                test_preds.append(test_outputs.cpu())
-                test_targets.append(y_test.cpu())
-        epoch_train_loss_on_eval = training_loss_on_eval / len(train_loader.dataset)
-        epoch_train_r2_on_eval = r2_score_torch(train_targets, train_preds)
-        epoch_test_loss = test_loss / len(test_loader.dataset)
-        test_losses.append(epoch_test_loss)
-        test_preds = torch.cat(test_preds)
-        test_targets = torch.cat(test_targets)
-        epoch_test_r2 = r2_score_torch(test_targets, test_preds)
-        test_r2s.append(epoch_test_r2)
-        print(
-            f"Train Loss: {epoch_train_loss:.4f}, "
-            f"Train R2: {epoch_train_r2:.4f}, "
-            f"Test Loss: {epoch_test_loss:.4f}, "
-            f"Test R2: {epoch_test_r2:.4f}"
-        )
-        # Check for early stopping
-        # also save the model if validation loss improves
-        if epoch_test_loss < best_test_loss:
-            best_model = copy.deepcopy(model)
-            best_test_loss = epoch_test_loss
-            torch.save(
-                model.state_dict(),
-                os.path.join(save_path, 'best_model.pth')
-            )
-            # save the best validation R2
-            best_test_r2 = epoch_test_r2
-            # convert the preds and targets back to their original scale
-            test_preds_denormalized = denormalize(
-                test_preds, y_name, scaling_factors
-            )
-            test_targets_denormalized = denormalize(
-                test_targets, y_name, scaling_factors
-            )
-            best_test_rmse = calc_rmse(
-                test_targets_denormalized,
-                test_preds_denormalized
-            )
-            best_test_bias = calc_bias(
-                test_targets_denormalized,
-                test_preds_denormalized
-            )
-            best_test_targets = copy.deepcopy(test_targets)
-            best_test_preds = copy.deepcopy(test_preds)
-            best_test_targets_denormalized = copy.deepcopy(
-                test_targets_denormalized
-            )
-            best_test_preds_denormalized = copy.deepcopy(
-                test_preds_denormalized
-            )
-            print(f"Saved best model at epoch {epoch+1}")
-            counter = 0
-        else:
-            counter += 1
-            if counter >= patience:
-                print(f"Early stopping at epoch {epoch+1}")
-                break
-        print(f"Counter: {counter}/{patience}")
-    # plot losses and R2 after training
-    fig,ax1 = plt.subplots(figsize=(10,6))
-    # plot losses
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('Loss', color='tab:blue')
-    ax1.plot(train_losses, label='Train Loss', color='tab:blue')
-    ax1.plot(test_losses, label='Test Loss', color='tab:orange')
-    ax1.tick_params(axis='y', labelcolor='tab:blue')
-    # plot R2 scores
-    ax2 = ax1.twinx()
-    ax2.set_ylabel('R2 Score', color='tab:green')
-    ax2.plot(train_r2s, label='Train R2', color='tab:green', linestyle='--')
-    ax2.plot(test_r2s, label='Test R2', color='tab:red', linestyle='--')
-    ax2.tick_params(axis='y', labelcolor='tab:green')
-    lines_1,labels_1 = ax1.get_legend_handles_labels()
-    lines_2,labels_2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc='center right')
-    plt.savefig(
-        os.path.join(plot_path, 'training_plot.png'),
-        bbox_inches='tight'
-    )
-    # plot testing preds vs. target for our best model
-    plot_obs_pred(
-        best_test_targets_denormalized,
-        best_test_preds_denormalized,
-        best_test_r2,
-        best_test_loss,
-        best_test_rmse,
-        best_test_bias,
-        os.path.join(plot_path, 'best_test_preds_vs_targets.png')
-    )
-    # evaluate on the validation set 
-    # now get our real validation loss
-    best_model.eval()
-    val_loss = 0.0
-    val_preds, val_targets = [], []
-    with torch.no_grad():
-        for X_val,y_val in val_loader:
-            X_val,y_val = X_val.to(device),y_val.to(device)
-            val_outputs = best_model(X_val)
-            loss = criterion(val_outputs.squeeze(), y_val)
-            val_loss += loss.item() * X_val.size(0)
-            val_preds.append(val_outputs.cpu())
-            val_targets.append(y_val.cpu())
-        total_val_loss = val_loss / len(val_loader.dataset)
-        val_preds = torch.cat(val_preds)
-        val_targets = torch.cat(val_targets)
-        val_r2 = r2_score_torch(val_targets, val_preds)
-        val_preds_denormalized = denormalize(
-            val_preds, y_name, scaling_factors
-        )
-        val_targets_denormalized = denormalize(
-            val_targets, y_name, scaling_factors
-        )
-        val_rmse = calc_rmse(
-            val_targets_denormalized,
-            val_preds_denormalized
-        )
-        val_bias = calc_bias(
-            val_targets_denormalized,
-            val_preds_denormalized
-        )
-    # plot validation preds vs. target for our best model
-    plot_obs_pred(
-        val_targets_denormalized,
-        val_preds_denormalized,
-        val_r2,
-        total_val_loss,
-        val_rmse,
-        val_bias,
-        os.path.join(plot_path, 'best_val_preds_vs_targets.png')
+            global_step += 1
+    # calculate running loss
+    if loss_fn is not None and n_samples > 0:
+        running_loss /= n_samples
+    else:
+        running_loss = None
+    if len(preds) > 0:
+        preds = torch.cat(preds, dim=0).detach().cpu().numpy()
+    else:
+        preds = None
+    return(
+        model, running_loss, preds, global_step
     )
 
-def plot_obs_pred(
-    targets, preds, r2, loss, rmse, bias,
-    fname
+def train_fold_k(
+    model,
+    save_dir,
+    data,
+    fold_test_locs,
+    var_names,
+    device,
+    optimizer,
+    scheduler,
+    early_stopping,
+    batch_size,
+    max_epochs,
+    warmup_steps,
+    warmup_start_lr,
+    val_split,
+    plot_distributions=False
 ):
-    # plot validation preds vs. target for our best model
-    plt.figure(figsize=(10,6))
-    plt.scatter(
-        targets,
-        preds,
-        alpha=0.5
+    this_fold_num = fold_test_locs[0]
+    this_locs = np.array(fold_test_locs[1])
+    fold_save_dir = os.path.join(
+        save_dir,
+        f'fold_{this_fold_num}'
     )
-    plt.plot(
-        [
-            targets.min(),
-            targets.max()
-        ],
-        [
-            targets.min(),
-            targets.max()
-        ],
-        color='red', linestyle='--', label='One-to-One Line'
-    )
-    plt.xlabel('True Values')
-    plt.ylabel('Predicted Values')
-    plt.text(
-        0.05, 0.95,
-        f'Best Test R2: {r2:.4f}',
-        transform=plt.gca().transAxes,
-        fontsize=12, verticalalignment='top'
-    )
-    plt.text(
-        0.05, 0.90,
-        f'Best Test Loss: {loss:.4f}',
-        transform=plt.gca().transAxes,
-        fontsize=12, verticalalignment='top'
-    )
-    plt.text(
-        0.05, 0.85,
-        f'Best Test RMSE: {rmse:.4f}',
-        transform=plt.gca().transAxes,
-        fontsize=12, verticalalignment='top'
-    )
-    plt.text(
-        0.05, 0.80,
-        f'Best Test Bias: {bias:.4f}',
-        transform=plt.gca().transAxes,
-        fontsize=12, verticalalignment='top'
-    )
-    plt.legend()
-    plt.savefig(
-        os.path.join(fname),
-        bbox_inches='tight'
-    )
-
-def r2_score_torch(y_true, y_pred):
-    # Flatten y_pred if needed
-    if y_pred.dim() > 1 and y_pred.shape[1] == 1:
-        y_pred = y_pred.squeeze(1)  # remove the singleton dim
-    ss_res = torch.sum((y_true - y_pred) ** 2)
-    ss_tot = torch.sum((y_true - torch.mean(y_true)) ** 2)
-    r2 = 1 - ss_res / ss_tot
-    return r2.item()  # returns a Python float
-
-def calc_rmse(y_true, y_pred):
-    """
-    Calculate the Root Mean Square Error (RMSE) between true and predicted values.
-    """
-    if y_pred.dim() > 1 and y_pred.shape[1] == 1:
-        y_pred = y_pred.squeeze(1)  # remove the singleton dim
-    rmse = torch.sqrt(torch.mean((y_true - y_pred) ** 2))
-    return rmse.item()  # returns a Python float
-
-def calc_bias(y_true, y_pred):
-    """
-    Calculate the bias between true and predicted values.
-    Bias is defined as the mean of the differences between true and predicted values.
-    """
-    if y_pred.dim() > 1 and y_pred.shape[1] == 1:
-        y_pred = y_pred.squeeze(1)  # remove the singleton dim
-    bias = torch.mean(y_true - y_pred)
-    return bias.item()  # returns a Python float
-
-def denormalize(tensor, feature_name, stats_df):
-    row = stats_df.loc[feature_name]
-    mean = row['mean']
-    std = row['std']
-    return tensor * std + mean
-
-
-if __name__ == "__main__":
-    # fill in here
-    # things that we need to autofill the names to load the datasets
-    model_type = 'transformer'
-    split_type = 'spatial'
-    start_date = '20030101'
-    end_date = '20231231'
-    y_name = 'Insitu'
-    x_name = 'ModisDaymetStaticLatlon'
-    obs_name = 'lfmc'
-    # dataset that we are using for training and testing
-    gen_dataset_fname = (
-        '/scratch/users/trobinet/long_lfmc/'
-        'trent_datasets/lfmc_model/data/splits/'
-        '{model_type}_{split_type}_{dataset_type}_'
-        '{start_date}_{end_date}_y_{y_name}_x_{x_name}.npy'
-    ).format(
-        model_type=model_type,
-        split_type=split_type,
-        dataset_type='{dataset_type}',
-        start_date=start_date,
-        end_date=end_date,
-        y_name=y_name,
-        x_name=x_name
-    )
-    train_dataset_fname = gen_dataset_fname.format(
-        dataset_type='train'
-    )
-    test_dataset_fname = gen_dataset_fname.format(
-        dataset_type='test'
-    )
-    val_dataset_fname = gen_dataset_fname.format(
-        dataset_type='val'
-    )
-    # filename for the scaling factors
-    scale_df_fname = (
-        '/scratch/users/trobinet/long_lfmc/'
-        'trent_datasets/lfmc_model/data/norm_df/'
-        '{model_type}_{split_type}_'
-        '{start_date}_{end_date}_y_{y_name}_x_{x_name}.csv'
-    ).format(
-        model_type=model_type,
-        split_type=split_type,
-        start_date=start_date,
-        end_date=end_date,
-        y_name=y_name,
-        x_name=x_name
-    )
-    # what type of model are we training here?
-    # epochs to train for
-    epochs = 200
-    # patience (early stopping, number of epochs with no improvement)
-    patience = 10
-    # batch size for training
-    batch_size = 64
-    # transformer hyperparameters
-    d_model = 32
-    nhead = 2
-    num_layers = 2
-    dim_feedforward = d_model * 2
-    dropout = 0.2
-    lr = 1e-4
-    # temporal CNN hyperparameters
-    #d_model = 32
-    #num_layers = 3
-    #kernel_size = 5
-    #dilation_base = 2
-    #dropout = 0.2
-    #lr = 1e-4
-    # format names based on user input
-    input_name = (
-        '_'.join(
-            train_dataset_fname.split('/')[-1].split('.')[0].split('_')[0:2]
-        ) + '_' + '_'.join(
-            train_dataset_fname.split('/')[-1].split('.')[0].split('_')[3:]
+    if not os.path.exists(fold_save_dir):
+        os.makedirs(fold_save_dir)
+    # split out the test data
+    daily_data = data[0]
+    static_data = data[1]
+    lfmc_insitu = data[2]
+    info = data[3]
+    point_labels = info['day_lat_lon'].astype(str)
+    parts = point_labels.str.rsplit("_", n=2, expand=True)
+    parts.columns = ["date", "lat", "lon"]
+    if parts.shape[1] != 3:
+        raise ValueError(
+            "day_lat_lon must look like "
+            "'YYYY-MM-DD_lat_lon'"
         )
+    idx = []
+    fold_test_lats = this_locs[:,0]
+    fold_test_lons = this_locs[:,1]
+    for i in range(len(parts)):
+        this_lat = float(parts.iloc[i]['lat'])
+        this_lon = float(parts.iloc[i]['lon'])
+        if this_lat in fold_test_lats and this_lon in fold_test_lons:
+            idx.append(i)
+    test_data_mask = np.array([False]*len(info))
+    test_data_mask[idx] = True
+    test_daily_data = daily_data[test_data_mask]
+    test_static_data = static_data[test_data_mask]
+    test_lfmc_insitu = lfmc_insitu[test_data_mask]
+    test_info = info[test_data_mask]
+    remaining_daily_data = daily_data[~test_data_mask]
+    remaining_static_data = static_data[~test_data_mask]
+    remaining_lfmc_insitu = lfmc_insitu[~test_data_mask]
+    remaining_info = info[~test_data_mask]
+    # split out the validation data from the remaining data
+    # select sites to remove until we reach the val_split proportion
+    total_obs = len(remaining_lfmc_insitu)
+    desired_val_obs = int(total_obs * val_split)
+    val_locs = create_site_split(
+        remaining_daily_data,
+        remaining_info,
+        desired_val_obs
     )
-    if model_type == 'transformer':
-        specific_name = (
-            f"{input_name}_d{d_model}_n{nhead}_l{num_layers}_"
-            f"df{dim_feedforward}_dr{dropout}_bs{batch_size}"
-            f"_lr{lr}_ep{epochs}"
+    val_locs = np.array(val_locs)
+    val_lats = val_locs[:,0]
+    val_lons = val_locs[:,1]
+    # --- 1) Parse lat/lon from remaining_info['day_lat_lon'] ---
+    # day_lat_lon format: 'YYYY-MM-DD_<lat>_<lon>'
+    parts = remaining_info['day_lat_lon'].str.rsplit('_', n=2, expand=True)
+    # columns: [date, lat, lon]
+    info_lats = parts[1].astype(float).to_numpy()
+    info_lons = parts[2].astype(float).to_numpy()
+    # --- 2) Build (N,2) and (M,2) pairs on the same device/dtype as your tensors ---
+    # choose a reference tensor to inherit device/dtype
+    dtype = remaining_daily_data.dtype
+    info_pairs = torch.tensor(
+        np.column_stack([info_lats, info_lons]),
+        dtype=dtype, device=device
+    )  # (N, 2)
+    val_pairs = torch.tensor(
+        np.column_stack([val_lats, val_lons]),
+        dtype=dtype, device=device
+    ).reshape(-1, 2)  # (M, 2)
+    # --- 3) Membership mask: info (lat,lon) belongs to ANY of the given val pairs ---
+    # use small atol to avoid float jitter
+    atol = torch.tensor(1e-6, dtype=dtype, device=device)
+    # broadcast compare: (N,1,2) vs (1,M,2) -> (N,M,2)
+    diff = (info_pairs[:, None, :] - val_pairs[None, :, :]).abs()
+    match_nm2 = diff <= atol
+    # row matches any val pair if BOTH lat and lon match for some column m
+    val_mask = match_nm2.all(dim=2).any(dim=1)  # (N,) bool
+    val_mask_cpu = val_mask.detach().cpu().numpy()
+    # --- 4) Split remaining_info (DataFrame) ---
+    val_info   = remaining_info.iloc[val_mask.detach().cpu().numpy()]
+    train_info = remaining_info.iloc[(~val_mask).detach().cpu().numpy()]
+    # --- 5) Split all aligned tensors ---
+    # If you have multiple tensors, put them in a dict for convenience:
+    tensors = {
+        "daily":  remaining_daily_data,
+        "static": remaining_static_data,
+        "lfmc":   remaining_lfmc_insitu,
+        # add more here if needed, all must be (N, ...) and aligned to remaining_info
+    }
+    val_tensors   = {k: v[val_mask_cpu]   for k, v in tensors.items()}
+    train_tensors = {k: v[~val_mask_cpu]  for k, v in tensors.items()}
+    # (Optionally expose individual variables as before)
+    val_daily_data   = val_tensors["daily"]
+    val_static_data  = val_tensors["static"]
+    val_lfmc_insitu  = val_tensors["lfmc"]
+    train_daily_data  = train_tensors["daily"]
+    train_static_data = train_tensors["static"]
+    train_lfmc_insitu = train_tensors["lfmc"]
+    train_lfmc_insitu = train_lfmc_insitu.squeeze()
+    val_lfmc_insitu = val_lfmc_insitu.squeeze()
+    test_lfmc_insitu = test_lfmc_insitu.squeeze()
+    # --- 6) Quick sanity print ---
+    print(f"Total rows: {len(info)} | "
+          f"Test: {int(test_data_mask.sum())} | "
+          f"Val: {int(val_mask.sum())} | "
+          f"Train: {int((~val_mask).sum())}")
+    if plot_distributions:
+        print('Plotting feature distributions for train/val/test splits')
+        plot_save_dir = os.path.join(fold_save_dir, 'plots')
+        daily_to_plot = [
+            train_daily_data,
+            val_daily_data,
+            test_daily_data
+        ]
+        static_to_plot = [
+            train_static_data,
+            val_static_data,
+            test_static_data
+        ]
+        lfmc_to_plot = [
+            train_lfmc_insitu,
+            val_lfmc_insitu,
+            test_lfmc_insitu
+        ]
+        plot_feature_distributions(
+            daily_to_plot,
+            static_to_plot,
+            lfmc_to_plot,
+            var_names,
+            plot_save_dir
         )
-    elif model_type == 'temporal_cnn':
-        specific_name = (
-            f"{input_name}_d{d_model}_l{num_layers}_"
-            f"ks{kernel_size}_db{dilation_base}_dr{dropout}_bs{batch_size}"
-            f"_lr{lr}_ep{epochs}"
-        )
-    # path to save checkpoints and model
-    checkpoint_path = (
-        '/scratch/users/trobinet/long_lfmc/'
-        'trent_datasets/lfmc_model/checkpoints/'
-        f'{specific_name}/'
-    )
-    # path to save plots
-    plot_path = (
-        '/scratch/users/trobinet/long_lfmc/'
-        'trent_datasets/lfmc_model/outputs/viz/'
-        f'{specific_name}/'
-    )
-    print('Starting training process')
-    # load dataset
-    print(f"Loading train dataset from {train_dataset_fname}")
-    train_data = torch.load(train_dataset_fname)
-    train_X = train_data['X']
-    train_y = train_data['y']
-    print(f"Loading test dataset from {test_dataset_fname}")
-    test_data = torch.load(test_dataset_fname)
-    test_X = test_data['X']
-    test_y = test_data['y']
-    print(f"Loading validation dataset from {val_dataset_fname}")
-    val_data = torch.load(val_dataset_fname)
-    val_X = val_data['X']
-    val_y = val_data['y']
-    print(
-        f"Train dataset loaded with shape {train_X.shape} for X and"
-        f"{train_y.shape} for y"
-    )
-    print(
-        f"Test dataset loaded with shape {test_X.shape} for X and"
-        f"{test_y.shape} for y"
-    )
-    print(
-        f"Validation dataset loaded with shape {val_X.shape} for X and"
-        f"{val_y.shape} for y"
-    )
-    print('loading scaling factors from {}'.format(scale_df_fname))
-    # load the scaling factors
-    scaling_factors = pd.read_csv(scale_df_fname)
-    scaling_factors.set_index('feature', inplace=True)
-    # set random seed for reproducibility
-    torch.manual_seed(0)
+    print('Normalizing the data')
+    train_daily_mean = np.nanmean(train_daily_data, axis=(0,1))
+    train_daily_std = np.nanstd(train_daily_data, axis=(0,1))
+    train_static_mean = np.nanmean(train_static_data, axis=(0,1))
+    train_static_std = np.nanstd(train_static_data, axis=(0,1))
+    y_mean = np.nanmean(train_lfmc_insitu)
+    y_std = np.nanstd(train_lfmc_insitu)
+    for v,var in enumerate(var_names['daily_vars']):
+        if (
+            '_sin' in var or
+            '_cos' in var or
+            'lag' in var
+        ):
+            continue
+        train_daily_data[:,:,v] = (train_daily_data[:,:,v] - train_daily_mean[v]) / train_daily_std[v]
+        val_daily_data[:,:,v] = (val_daily_data[:,:,v] - train_daily_mean[v]) / train_daily_std[v]
+        test_daily_data[:,:,v] = (test_daily_data[:,:,v] - train_daily_mean[v]) / train_daily_std[v]
+    for v,var in enumerate(var_names['static_vars']):
+        if (
+            '_sin' in var or
+            '_cos' in var or
+            'lag' in var
+        ):
+            continue
+        train_static_data[:,:,v] = (train_static_data[:,:,v] - train_static_mean[v]) / train_static_std[v]
+        val_static_data[:,:,v] = (val_static_data[:,:,v] - train_static_mean[v]) / train_static_std[v]
+        test_static_data[:,:,v] = (test_static_data[:,:,v] - train_static_mean[v]) / train_static_std[v]
+    train_lfmc_insitu = (train_lfmc_insitu - y_mean) / y_std
+    val_lfmc_insitu = (val_lfmc_insitu - y_mean) / y_std
+    test_lfmc_insitu = (test_lfmc_insitu - y_mean) / y_std
+    # save the normalization parameters for later use
+    norm_params = {
+        'train_daily_mean': train_daily_mean.tolist(),
+        'train_daily_std': train_daily_std.tolist(),
+        'train_static_mean': train_static_mean.tolist(),
+        'train_static_std': train_static_std.tolist(),
+        'y_mean': y_mean.tolist(),
+        'y_std': y_std.tolist()
+    }
+    # save the normalization parameters to disk
+    with open(os.path.join(fold_save_dir, 'norm_params.json'), 'w') as f:
+        json.dump(norm_params, f)
+    # create the datasets and dataloaders
     train_dataset = TensorDataset(
-        train_X, train_y
+        train_daily_data,
+        train_static_data,
+        train_lfmc_insitu
     )
-    test_dataset = TensorDataset(
-        test_X, test_y
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        pin_memory=True
     )
     val_dataset = TensorDataset(
-        val_X, val_y
-    )
-    # compute some statistics on our train and test; might explain these wildly
-    # different values in training and testing?
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True
-    )
-    test_loader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False
+        val_daily_data,
+        val_static_data,
+        val_lfmc_insitu
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        pin_memory=True
     )
-    # instantiate model
-    print("Instantiating model")
-    #if not torch.cuda.is_available():
-    #    raise RuntimeError("CUDA is not available. Please run on a GPU.")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    if model_type == 'transformer':
-        model = TimeSeriesTransformer(
-            input_dim=train_X.shape[2],
+    test_dataset = TensorDataset(
+        test_daily_data,
+        test_static_data,
+        test_lfmc_insitu
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        pin_memory=True
+    )
+    # set up the loss functions
+    criterion = nn.MSELoss()
+    # make sure that we have the warmup end lr
+    warmup_end_lr = optimizer.param_groups[0]['lr']
+    # set up the things that we need to track
+    train_loss = []
+    train_loss_d = []
+    train_loss_p = []
+    val_loss = []
+    val_loss_d = []
+    val_loss_p = []
+    global_step = 0
+    for epoch in range(1,max_epochs):
+        print(f'Fold {this_fold_num}, Epoch {epoch}/{max_epochs}')
+        model.train()
+        (
+            model,
+            this_train_loss,
+            this_train_preds,
+            global_step
+        ) = run_model(
+            model,
+            train_loader,
+            device,
+            criterion,
+            train_model=True,
+            optimizer=optimizer,
+            warmup_steps=warmup_steps,
+            global_step=global_step,
+            warmup_start_lr=warmup_start_lr,
+            warmup_end_lr=warmup_end_lr
+        )
+        train_loss.append(this_train_loss)
+        print(f'Training loss: {this_train_loss:.4f}')
+        scheduler.step()
+        # run the validation
+        model.eval()
+        (
+            model,
+            this_val_loss,
+            this_val_preds,
+            _
+        ) = run_model(
+            model,
+            val_loader,
+            device,
+            criterion,
+            train_model=False
+        )
+        val_loss.append(this_val_loss)
+        print(f'Validation loss: {this_val_loss:.4f}')
+        # calculate metrics of interes
+        # MAE
+        # denorm our preds and truths
+        this_val_preds_denorm = this_val_preds * y_std + y_mean
+        val_lfmc_insitu_denorm = val_lfmc_insitu.numpy() * y_std + y_mean
+        val_mae = np.mean(np.abs(this_val_preds_denorm - val_lfmc_insitu_denorm))
+        print(f'Validation MAE: {val_mae:.4f}')
+        # R2
+        val_r2 = r2_score(val_lfmc_insitu_denorm, this_val_preds_denorm)
+        print(f'Validation R2: {val_r2:.4f}')
+        # check early stopping
+        early_stopping(val_mae)
+        if early_stopping.save_model:
+            print('New best model, saving...')
+            model_save_path = os.path.join(
+                fold_save_dir,
+                f'model_epoch{epoch}.pt'
+            )
+            torch.save(model.state_dict(), model_save_path)
+            best_epoch = copy.deepcopy(epoch)
+        if early_stopping.early_stop:
+            print('Early stopping triggered, ending training')
+            break
+    # re-load the best model and compute test statistics
+    print('Training Complete, loading best model for testing')
+    state = torch.load(
+        os.path.join(
+            fold_save_dir,
+            f'model_epoch{best_epoch}.pt'
+        ),
+        weights_only=False,
+        map_location=device
+        
+    )
+    model.load_state_dict(state)
+    model = model.to(device)
+    model.eval()
+    # re-run val so we save the best metrics
+    print('re-running val with best model')
+    (
+        model,
+        val_loss,
+        val_preds,
+        _
+    ) = run_model(
+        model,
+        val_loader,
+        device,
+        criterion,
+        train_model=False
+    )
+    # denorm
+    val_preds_denorm = val_preds * y_std + y_mean
+    val_lfmc_insitu_denorm = val_lfmc_insitu.numpy() * y_std + y_mean
+    val_mae = np.mean(np.abs(val_preds_denorm - val_lfmc_insitu_denorm))
+    val_r2 = r2_score(val_lfmc_insitu_denorm, val_preds_denorm)
+    print(f'Validation Loss: {val_loss:.4f}, Validation MAE: {val_mae:.4f}, Validation R2: {val_r2:.4f}')
+    # run the test
+    print('running test with best model')
+    (
+        _,
+        test_loss,
+        test_preds,
+        _
+    ) = run_model(
+        model,
+        test_loader,
+        device,
+        criterion,
+        train_model=False
+    )
+    # denorm
+    if test_preds is None:
+        test_preds_denorm = np.array([])
+        test_lfmc_insitu_denorm = np.array([])
+        test_mae = np.nan
+        test_r2 = np.nan
+    else:
+        test_preds_denorm = test_preds * y_std + y_mean
+        test_lfmc_insitu_denorm = test_lfmc_insitu.numpy() * y_std + y_mean
+        test_mae = np.mean(np.abs(test_preds_denorm - test_lfmc_insitu_denorm))
+        test_r2 = r2_score(test_lfmc_insitu_denorm, test_preds_denorm)
+        print(f'Test Loss: {test_loss:.4f}, Test MAE: {test_mae:.4f}, Test R2: {test_r2:.4f}')
+    # save the outputs
+    torch.save(
+        {
+            'loss':train_loss
+        },
+        os.path.join(fold_save_dir,'train_outputs.pth')
+    )
+    torch.save(
+        {
+            'loss':val_loss,
+            'preds':val_preds_denorm,
+            'true':val_lfmc_insitu_denorm
+        },
+        os.path.join(fold_save_dir,'val_outputs.pth')
+    )
+    if test_preds is not None:
+        torch.save(
+            {
+                'loss':test_loss,
+                'preds':test_preds_denorm,
+                'true':test_lfmc_insitu_denorm
+            },
+            os.path.join(fold_save_dir,'test_outputs.pth')
+        )
+    train_info.to_csv(
+        os.path.join(fold_save_dir,'train_info.csv'),
+        index=False
+    )
+    val_info.to_csv(
+        os.path.join(fold_save_dir,'val_info.csv'),
+        index=False
+    )
+    test_info.to_csv(
+        os.path.join(fold_save_dir,'test_info.csv'),
+        index=False
+    )
+
+
+def main():
+    torch.manual_seed(42)
+    np.random.seed(42)
+    # configs
+    # directories, etc.
+    input_data_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs'
+    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs'
+    # training settings
+    batch_size = 128
+    max_epochs = 100
+    lr = 1e-4
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device.type != 'cuda':
+        print('WARNING: CUDA not available, using CPU. This will be slow!')
+    warmup_steps = 200
+    base_lr = lr
+    warmup_start_lr = 1e-6
+    val_split = 0.15
+    adam_weight_decay = 1e-2
+    patience = 8
+    # model hyperparameters (go back to the github and get what I deleted here)
+    d_model = 32
+    nhead = 1
+    num_layers = 2
+    dim_feedforward = 64
+    dropout = 0.1
+    # load the data
+    datasets = load_data(input_data_dir)
+    var_names = json.load(
+        open(os.path.join(input_data_dir, 'var_names.json'), 'r')
+    )
+    # get the input dims that we are working with to build the model
+    short_input_dim = datasets[0].shape[-1]
+    static_input_dim = datasets[1].shape[-1]
+    # set up the save directories
+    this_model_name = (
+        f'transformer_dm{d_model}_nh{nhead}_nl{num_layers}_df{dim_feedforward}'
+        f'_do{dropout}_bs{batch_size}_lr{lr}_warmup{warmup_steps}'
+        f'_wd{adam_weight_decay}'
+    )
+    full_save_dir = os.path.join(save_dir, this_model_name)
+    #if os.path.exists(full_save_dir):
+    #    print(
+    #        f"WARNING: {full_save_dir} already exists "
+    #        "and will be overwritten!"
+    #    )
+    #    resp = input("Do you want to continue? [y/N]: ").strip().lower()
+    #    if resp == "y":
+    #        shutil.rmtree(full_save_dir)
+    #    else:
+    #        print("Aborting to avoid overwrite.")
+    #        sys.exit(1)
+    if os.path.exists(full_save_dir):
+        shutil.rmtree(full_save_dir)
+    os.makedirs(full_save_dir)
+    # build the folds by location
+    daily_data = datasets[0]
+    info = datasets[3]
+    n_folds = 5
+    total_obs = daily_data.shape[0]
+    desired_obs_per_fold = total_obs / n_folds
+    fold_locs = {}
+    for fold in range(n_folds):
+        this_locs = create_site_split(
+            daily_data,
+            info,
+            desired_obs_per_fold
+        )
+        fold_locs[fold + 1] = this_locs
+    # save this fold info
+    with open(os.path.join(full_save_dir, 'fold_info.json'), 'w') as f:
+        json.dump(fold_locs, f)
+    # train this fold
+    for fold, locs in enumerate(fold_locs.items()):
+        print(f'Training fold {fold+1}/{n_folds} with {len(locs[1])} locations held out for testing')
+        # build the model
+        model = LFMCTransformer(
+            short_input_dim=short_input_dim,
+            static_input_dim=static_input_dim,
             d_model=d_model,
             nhead=nhead,
             num_layers=num_layers,
             dim_feedforward=dim_feedforward,
-            dropout=dropout
+            dropout=dropout,
+            num_queries=2
         ).to(device)
-    elif model_type == 'temporal_cnn':
-        model = TemporalCNN(
-            input_dim=train_X.shape[2],
-            d_model=d_model,
-            num_layers=num_layers,
-            kernel_size=kernel_size,
-            dilation_base=dilation_base,
-            dropout=dropout
-        ).to(device)
-    else:
-        raise ValueError(f"Model type {model_type} is not supported.")
-    # set up directory to save checkpoints and model
-    os.makedirs(checkpoint_path, exist_ok=True)
-    # set up directory to save plots
-    os.makedirs(plot_path, exist_ok=True)
-    print(f"Model will be saved to {checkpoint_path}")
-    print(f"Plots will be saved to {plot_path}")
-    print(f"Training on {device}")
-    # train model
-    train(
-        model,
-        train_loader,
-        test_loader,
-        val_loader,
-        epochs,
-        device,
-        checkpoint_path,
-        plot_path,
-        scaling_factors,
-        obs_name,
-        patience=patience,
+        # build the optimizer
+        decay, no_decay = [], []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue  # frozen weights
+            if (
+                ('bias' in name) or
+                ('norm' in name.lower()) or
+                ('bn' in name.lower())
+            ):
+                no_decay.append(param)
+            else:
+                decay.append(param)
+        optimizer = torch.optim.AdamW(
+            [
+                {'params': decay, 'weight_decay': adam_weight_decay},
+                {'params': no_decay, 'weight_decay': 0.0}
+            ],
+            lr=lr
+        )
+        # build the scheduler
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=25,
+            eta_min=1e-6
+        )
+        # build early stopping
+        early_stopping = EarlyStopping(patience=patience)
+        # train on this fold
+        train_fold_k(
+            model,
+            full_save_dir,
+            datasets,
+            locs,
+            var_names,
+            device,
+            optimizer,
+            scheduler,
+            early_stopping,
+            batch_size,
+            max_epochs,
+            warmup_steps,
+            warmup_start_lr,
+            val_split
+        )
+    # one final version of the model trained on all the data
+    print('Training final model on all data')
+    model = LFMCTransformer(
+        short_input_dim=short_input_dim,
+        static_input_dim=static_input_dim,
+        d_model=d_model,   
+        nhead=nhead,
+        num_layers=num_layers,
+        dim_feedforward=dim_feedforward,
+        dropout=dropout,
+        num_queries=2
+    ).to(device)
+    # build the optimizer
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue  # frozen weights
+        if (
+            ('bias' in name) or
+            ('norm' in name.lower()) or
+            ('bn' in name.lower())
+        ):
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    optimizer = torch.optim.AdamW(
+        [
+            {'params': decay, 'weight_decay': adam_weight_decay},
+            {'params': no_decay, 'weight_decay': 0.0}
+        ],
         lr=lr
     )
+    # build the scheduler
+    scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=25,
+        eta_min=1e-6
+    )
+    # build early stopping
+    early_stopping = EarlyStopping(patience=patience)
+    # train on this fold
+    locs = (9998, [(-9998.0,-9998.0)])  # dummy value to indicate training on all data
+    train_fold_k(
+        model,
+        full_save_dir,
+        datasets,
+        locs,
+        var_names,
+        device,
+        optimizer,
+        scheduler,
+        early_stopping,
+        batch_size,
+        max_epochs,
+        warmup_steps,
+        warmup_start_lr,
+        val_split
+    )
 
+            
 
+if __name__ == "__main__":
+    main()

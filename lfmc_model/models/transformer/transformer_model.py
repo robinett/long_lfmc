@@ -69,82 +69,53 @@ class FiLMConditioner(nn.Module):
         return gamma, beta
 
 class LFMCTransformer(nn.Module):
-    def __init__(
-        self,
-        short_input_dim: int,
-        static_input_dim: int,
-        d_model: int = 64,
-        nhead: int = 4,
-        num_layers: int = 3,
-        dim_feedforward: int = 128,
-        dropout: float = 0.1,
-        num_queries: int = 2,
-    ):
+    def __init__(self, short_input_dim, static_input_dim,
+                 d_model=64, nhead=4, num_layers=3,
+                 dim_feedforward=128, dropout=0.1,
+                 num_queries=2):
         super().__init__()
-        # project input to d_model
-        self.short_proj = nn.Linear(
-            short_input_dim, d_model
-        )
-        self.static_proj = nn.Linear(
-            static_input_dim, d_model
-        )
-        # transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
+        self.short_proj  = nn.Linear(short_input_dim, d_model)
+        self.static_proj = nn.Linear(static_input_dim,  d_model)
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=nhead,
             dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True
+            dropout=dropout, batch_first=True
         )
         self.encoder = nn.TransformerEncoder(
-            encoder_layer=encoder_layer,
-            num_layers=num_layers
+            encoder_layer=enc_layer, num_layers=num_layers
         )
-        # positional encoding
-        self.pos_enc = SinusoidalPositionalEncoding(d_model=d_model)
-        # FiLM conditioner
+        self.pos_enc  = SinusoidalPositionalEncoding(d_model)
         self.film_cond = FiLMConditioner(
-            in_dim=static_input_dim, d_model=d_model,
-            hidden=64
+            in_dim=static_input_dim, d_model=d_model, hidden=64
         )
-        # attention pooling
         self.pooler = MultiheadAttnPool(
-            d_model=d_model,
-            nhead=nhead,
-            num_queries=num_queries,
-            dropout=dropout
+            d_model=d_model, nhead=nhead,
+            num_queries=num_queries, dropout=dropout
         )
-        # head
         self.head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.ReLU(),
             nn.Linear(d_model // 2, 1)
         )
-    def forward(
-        self,
-        short_history, # [B, T_short, D_short]
-        static_features # [B, D_static]
-    ):
-        # project our static vector
-        s_vec = self.static_proj(static_features).unsqueeze(1)  # [B, 1, d]
-        # project short history
-        x_tok = self.short_proj(short_history)                       # [B, T, d]
-        # project our static history
-        s_tok = self.static_proj(static_features).unsqueeze(1)  # [B, 1, d]
-        # FiLM conditioning
-        gamma, beta = self.film_cond(static_features)  # [B,d], [B,d]
-        x_tok = gamma.unsqueeze(1) * x_tok + beta.unsqueeze(1)
-        # prepend static token and encode
-        x_seq = torch.cat([s_tok, x_tok], dim=1)  # [B, T+1, d]
-        # positional encoding
-        x_seq = self.pos_enc(x_seq)                # [B, T+1, d]
-        # transformer encoding
-        x_enc = self.encoder(x_seq)              # [B, T+1, d]
-        # aggreatee with attention pooling
-        x_met = x_enc[:,1:,:]  # remove static token
-        h_met = self.pooler(x_met)               # [B, d]
-        h_stat = x_enc[:,0,:]  # static token
-        h = h_met + h_stat               # [B, d]
-        # head
-        logits_pred = self.head(h)                    # [B, 1]
-        return logits_pred
+    def forward(self, short_history, static_features):
+        # static_features: [B, 1, static_input_dim]
+        static_features = static_features.squeeze(1)   # [B, static_input_dim]
+        # Project
+        x_tok = self.short_proj(short_history)         # [B,T,d]
+        s_tok = self.static_proj(static_features)      # [B,d]
+        s_tok = s_tok.unsqueeze(1)                     # [B,1,d]
+        # FiLM: stable residual scaling
+        gamma, beta = self.film_cond(static_features)  # [B,d],[B,d]
+        gamma = 0.5 * torch.tanh(gamma)                # bound
+        x_tok = (1 + gamma).unsqueeze(1) * x_tok \
+                + beta.unsqueeze(1)                    # [B,T,d]
+        # Pack sequence (static token first)
+        x_seq = torch.cat([s_tok, x_tok], dim=1)       # [B,T+1,d]
+        x_seq = self.pos_enc(x_seq)
+        x_enc = self.encoder(x_seq)                    # [B,T+1,d]
+        # Pool (met tokens) + add static token
+        h_met  = self.pooler(x_enc[:, 1:, :])          # [B,d]
+        h_stat = x_enc[:, 0, :]                        # [B,d]
+        h = h_met + h_stat
+        y = self.head(h).squeeze(-1)                   # [B]
+        return y

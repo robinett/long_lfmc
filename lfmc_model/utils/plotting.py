@@ -51,3 +51,31 @@ def plot_multiple_timeseries_from_df(
     plt.xticks(rotation=45)
     plt.savefig(save_name,bbox_inches='tight')
     plt.close()
+
+def pred_obs_scatter(
+    preds,
+    obs,
+    plot_path,
+    mae=None,
+    rmse=None,
+    r2=None
+):
+    plt.figure(figsize=(6, 6))
+    plt.scatter(obs, preds, alpha=0.5)
+    max_val = max(np.max(obs), np.max(preds))
+    min_val = min(np.min(obs), np.min(preds))
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='1:1 Line')
+    plt.xlabel('Observed')
+    plt.ylabel('Predicted')
+    plt.title('Predicted vs Observed')
+    plt.xlim(min_val, max_val)
+    plt.ylim(min_val, max_val)
+    plt.legend()
+    if mae is not None:
+        plt.text(0.05, 0.95, f'MAE: {mae:.3f}', transform=plt.gca().transAxes, verticalalignment='top')
+    if rmse is not None:
+        plt.text(0.05, 0.90, f'RMSE: {rmse:.3f}', transform=plt.gca().transAxes, verticalalignment='top')
+    if r2 is not None:
+        plt.text(0.05, 0.85, f'R²: {r2:.3f}', transform=plt.gca().transAxes, verticalalignment='top')
+    plt.savefig(plot_path, bbox_inches='tight', dpi=300)
+    plt.close()

@@ -13,654 +13,487 @@ import copy
 from datetime import timedelta
 import os
 import ast
+import fnmatch
+from typing import Optional, Tuple, List, Dict
+import json
 
 # append up one dir to path
 sys.path.append(sys.path[0] + '/../..')
 
 from utils import plotting  # Assuming utils is a module with plotting function
 
-def build_training_dataset(
-    csv_names,
+def _detect_reason_columns(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
+    base = {
+        c: re.split(r"_lag_\d+\D*$", c)[0]  # strip one lag tail
+        for c in df.columns
+    }
+    retrieved_cols = [c for c, b in base.items() if b.startswith("retrieved")]
+    filled_cols    = [c for c, b in base.items() if b.endswith("_filled")]
+    return retrieved_cols, filled_cols
+
+def drop_nans_with_reasons(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    retrieved_cols, filled_cols = _detect_reason_columns(df)
+
+    nan_mask = df.isna().any(axis=1)
+    nan_rows = df.loc[nan_mask]
+
+    # masks within rows we’re dropping
+    if retrieved_cols:
+        retrieved_nan = nan_rows[retrieved_cols].isna().any(axis=1)
+    else:
+        retrieved_nan = pd.Series(False, index=nan_rows.index, dtype=bool)
+
+    if filled_cols:
+        filled_nan = nan_rows[filled_cols].isna().any(axis=1)
+    else:
+        filled_nan = pd.Series(False, index=nan_rows.index, dtype=bool)
+
+    both_nan  = retrieved_nan & filled_nan
+    only_ret  = retrieved_nan & ~filled_nan
+    only_fill = filled_nan & ~retrieved_nan
+
+    # "other" = NaNs outside retrieved/filled columns
+    reason_cols = sorted(set(retrieved_cols) | set(filled_cols))
+    if reason_cols:
+        other_nan = ~retrieved_nan & ~filled_nan & nan_rows.drop(columns=reason_cols).isna().any(axis=1)
+    else:
+        # no retrieved/filled columns at all → everything is "other"
+        other_nan = pd.Series(True, index=nan_rows.index, dtype=bool)
+
+    total            = int(nan_mask.sum())
+    only_ret_count   = int(only_ret.sum())
+    only_fill_count  = int(only_fill.sum())
+    both_count       = int(both_nan.sum())
+    other_count      = int(other_nan.sum())
+    retrieved_count  = only_ret_count + both_count
+    filled_count     = only_fill_count + both_count
+
+    # invariants with the explicit "other" bucket
+    assert total == only_ret_count + only_fill_count + both_count + other_count
+    assert retrieved_count == only_ret_count + both_count
+    assert filled_count    == only_fill_count + both_count
+
+    kept = df.loc[~nan_mask]
+
+    counts = {
+        "total_nan_rows": total,
+        "retrieved": retrieved_count,
+        "filled": filled_count,
+        "both": both_count,
+        "only_retrieved": only_ret_count,
+        "only_filled": only_fill_count,
+        "other": other_count,
+    }
+    return kept, counts
+
+def init_nan_totals() -> Dict[str, int]:
+    return {
+        "files_processed": 0,
+        "total_nan_rows": 0,
+        "retrieved": 0,
+        "filled": 0,
+        "both": 0,
+        "only_retrieved": 0,
+        "only_filled": 0,
+        "other": 0,
+    }
+
+def accumulate_nan_counts(
+    totals: Dict[str, int],
+    counts: Dict[str, int]
+) -> Dict[str, int]:
+    keys = [
+        "total_nan_rows",
+        "retrieved",
+        "filled",
+        "both",
+        "only_retrieved",
+        "only_filled",
+        "other",
+    ]
+    for k in keys:
+        totals[k] = totals.get(k, 0) + int(counts.get(k, 0))
+    totals["files_processed"] = totals.get("files_processed", 0) + 1
+    return totals
+
+def _unwrap_scalarish(x):
+    """Unwrap list/array or strip brackets around strings like "[0.123]".
+    Returns original value (possibly still string) if not clearly numeric.
+    """
+    if isinstance(x, (list, tuple, np.ndarray)):
+        return x[0] if len(x) else np.nan
+    if isinstance(x, str):
+        s = x.strip()
+        if s.startswith("[") and s.endswith("]"):
+            s = s[1:-1].strip()
+        if s.lower() in {"", "nan", "none", "null"}:
+            return np.nan
+        return s
+    return x
+
+def _looks_numeric(val) -> bool:
+    """True if value is numeric or a numeric string."""
+    if pd.isna(val):
+        return True
+    if isinstance(val, (int, float, np.number)):
+        return True
+    if isinstance(val, str):
+        pattern = re.compile(
+            r"""^\s*
+                (?:[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)
+                \s*$
+            """,
+            re.VERBOSE,
+        )
+        return bool(pattern.match(val))
+    return False
+
+def load_and_clean_csv(
+    path: str,
+    date_col: str = "date",
+    numeric_threshold: float = 0.90,
+    force_numeric_cols: Optional[list[str]] = None,
+) -> pd.DataFrame:
+    """
+    Read CSV, normalize scalar-ish cells, and convert only columns that are
+    predominantly numeric (>= numeric_threshold) to float. Preserves
+    categorical/text columns.
+    """
+    df = pd.read_csv(path, parse_dates=[date_col])
+
+    # Normalize scalar-ish cells
+    for col in df.columns:
+        if col == date_col:
+            continue
+        df[col] = df[col].map(_unwrap_scalarish)
+
+    # Detect numeric-like columns
+    numeric_like_cols = []
+    for col in df.columns:
+        if col == date_col:
+            continue
+        s = df[col]
+        sample = s.sample(min(len(s), 5000), random_state=0) if len(s) > 5000 else s
+        frac_numeric = np.mean([_looks_numeric(v) for v in sample])
+        if frac_numeric >= numeric_threshold:
+            numeric_like_cols.append(col)
+
+    if force_numeric_cols:
+        numeric_like_cols = sorted(set(numeric_like_cols).union(force_numeric_cols))
+
+    # Convert selected columns to numeric
+    for col in numeric_like_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
+
+def filter_lag_columns(
+    df,
+    day_lags
+):
+    day_suffixes = [f'_lag_{day}d' for day in day_lags]
+    matched_suffixes = set()
+    def keep_column(col: str):
+        match = re.search(r'lag_\d+[dh]',col)
+        if match:
+            for suffix in day_suffixes:
+                if col.endswith(suffix):
+                    matched_suffixes.add(suffix)
+                    return True
+            return False
+        return True # non-lag columns are kept
+    cols_to_keep = [col for col in df.columns if keep_column(col)]    
+    unmatched_suffixes = set(day_suffixes) - matched_suffixes
+    if unmatched_suffixes:
+        raise ValueError(f"Unmatched lag suffixes: {unmatched_suffixes}")
+    return df[cols_to_keep]    
+
+#def df_to_tensor(
+#    df: pd.DataFrame,
+#    base_vars,
+#    lag_suffix
+#) -> torch.Tensor:
+#    """
+#    (same as before) returns a tensor of shape (N, seq_len, len(base_vars))
+#    """
+#    first = base_vars[0]
+#    if lag_suffix is None:
+#        auto_pat = re.compile(rf'^{re.escape(first)}_lag_\d+(\D+)$')
+#        suffixes = {m.group(1) for col in df.columns if (m := auto_pat.match(col))}
+#        if not suffixes:
+#            raise ValueError(f"No lag columns for {first} to detect suffix")
+#        if len(suffixes) > 1:
+#            raise ValueError(f"Multiple suffixes {suffixes} for {first}")
+#        lag_suffix = suffixes.pop()
+#    # find all lag indices
+#    pat0 = re.compile(rf'^{re.escape(first)}_lag_(\d+){re.escape(lag_suffix)}$')
+#    lags = sorted(int(m.group(1)) for col in df.columns if (m := pat0.match(col)))
+#    if not lags:
+#        raise ValueError(f"No columns matching {first}_lag_<N>{lag_suffix}")
+#    arrays = []
+#    for var in base_vars:
+#        pat = re.compile(rf'^{re.escape(var)}_lag_(\d+){re.escape(lag_suffix)}$')
+#        found = {int(m.group(1)): col for col in df.columns if (m := pat.match(col))}
+#        if set(found) != set(lags):
+#            raise ValueError(f"{var} has lags {sorted(found)} but expected {lags}")
+#        cols = [found[i] for i in lags]
+#        arrays.append(df[cols].values[..., None])
+#    print(arrays)
+#    return torch.from_numpy(np.concatenate(arrays, axis=-1)).float()
+
+def _coerce_numeric_block(df_block: pd.DataFrame) -> np.ndarray:
+    """Coerce a DataFrame block to float32 numpy (handles object dtypes)."""
+    def _to_scalar(x):
+        if isinstance(x, (list, tuple, np.ndarray)):
+            return x[0] if len(x) else np.nan
+        if isinstance(x, str):
+            s = x.strip()
+            if s.startswith('[') and s.endswith(']'):
+                s = s[1:-1].strip()
+            if s.lower() in {'nan', 'none', ''}:
+                return np.nan
+            try:
+                return float(s)
+            except ValueError:
+                return np.nan
+        return x
+    clean = df_block.map(_to_scalar)
+    clean = clean.apply(pd.to_numeric, errors="coerce")
+    return clean.to_numpy(dtype=np.float32)
+
+def df_to_tensor(
+    df: pd.DataFrame,
+    base_vars,
+    lag_suffix=None,
+    static_broadcast_to: int | None = None,
+) -> torch.Tensor:
+    """
+    Convert a DataFrame to a tensor of shape (N, seq_len, V).
+    - If lag columns for the first var exist (e.g., var_lag_0d), stacks by lag.
+    - Else treats columns as static (no lag) and returns seq_len=1,
+      or broadcasts to seq_len=static_broadcast_to if provided.
+    """
+    # Normalize base names in case caller passed something like "srad_lag_0d"
+    bases = [re.sub(r'_lag_\d+\D*$', '', v) for v in base_vars]
+    first = bases[0]
+
+    # Try lagged path: detect suffix if not provided
+    if lag_suffix is None:
+        auto_pat = re.compile(rf'^{re.escape(first)}_lag_\d+(\D+)$')
+        suffixes = {m.group(1) for col in df.columns if (m := auto_pat.match(col))}
+        # Note: absence of lag suffix means either static OR lag with empty suffix.
+        # If exactly one suffix found, use it; else treat as "no lag columns".
+        use_lag = len(suffixes) == 1
+        if use_lag:
+            lag_suffix = suffixes.pop()
+        else:
+            lag_suffix = None
+    else:
+        use_lag = True  # caller explicitly provided one
+
+    if use_lag and lag_suffix is not None:
+        # Discover lag indices from the first base
+        pat0 = re.compile(rf'^{re.escape(first)}_lag_(\d+){re.escape(lag_suffix)}$')
+        lags = sorted(int(m.group(1)) for col in df.columns if (m := pat0.match(col)))
+        if not lags:
+            use_lag = False  # fall back to static if no actual lag columns found
+
+    if use_lag and lag_suffix is not None:
+        arrays = []
+        expected = set(lags)
+        for var_in, base in zip(base_vars, bases):
+            pat = re.compile(rf'^{re.escape(base)}_lag_(\d+){re.escape(lag_suffix)}$')
+            found = {int(m.group(1)): col for col in df.columns if (m := pat.match(col))}
+            if set(found) != expected:
+                missing = sorted(expected - set(found))
+                extra   = sorted(set(found) - expected)
+                raise ValueError(
+                    f"'{var_in}' (base '{base}') has lags {sorted(found)} but expected {lags}. "
+                    f"Missing: {missing}, Extra: {extra}"
+                )
+            cols = [found[i] for i in lags]                # (seq_len)
+            block = _coerce_numeric_block(df[cols])        # (N, seq_len)
+            arrays.append(block[..., None])                # (N, seq_len, 1)
+        out = np.concatenate(arrays, axis=-1)             # (N, seq_len, V)
+        return torch.from_numpy(out).float()
+
+    # Static path: require exact columns by base name
+    missing_static = [c for c in bases if c not in df.columns]
+    if missing_static:
+        raise ValueError(f"Static columns missing: {missing_static}")
+
+    block = _coerce_numeric_block(df[bases])              # (N, V)
+    block = block[:, None, :]                             # (N, 1, V)
+
+    if static_broadcast_to is not None and static_broadcast_to > 1:
+        block = np.repeat(block, repeats=static_broadcast_to, axis=1)  # (N, T, V)
+
+    return torch.from_numpy(block).float()
+
+def build_inputs(
+    csvs,
     first_label_date,
     last_label_date,
     static_features,
     dynamic_features,
+    info_features,
     target_col,
-    lag_days_keep,
-    val_minor_mid_major_split=None, # Example split percentages: (0.05, 0.05, 0.05)
-    train_split=0.8,
-    split_type='random',
-    plot_distributions=None,
-    acceptable_target_range=(30,500), # Example range for LFMC, adjust
+    lag_days,
+    save_dir,
     model_name='transformer',
-    train_on_filled=False,
-    filled_cols = [],
-    filled_cols_labs = []
+    acceptable_lfmc_range=(30,500), # Example range for LFMC, adjust
 ):
-    '''
-    Function that takes a directory of csv files (with same features as columns,
-    each row as a label) and builds a train/test dataset for a temporal
-    transformer.
-    '''
-    # combine all of the csvs into one dataframe
-    print("Combining CSV files...")
-    df = combine_csvs(
-        csv_names,
-        first_label_date,
-        last_label_date
-    )
-    # eliminate unreasonably high and low values
-    # remove rows that have target values outside of the acceptable range
-    num_rows_before = len(df.index)
-    print("Removing rows with target values outside of acceptable range...")
-    df = df[
-        (df[target_col] >= acceptable_target_range[0]) &
-        (df[target_col] <= acceptable_target_range[1])
-    ].reset_index(drop=True)
-    num_rows_after = len(df.index)
-    print(
-        'Number of rows removed due to target value range: '
-        '{}'.format(num_rows_before - num_rows_after)
-    )
-    # first things first: remove the validation set. This ensure that  it will
-    # be the same across all of our different model setups
-    if val_minor_mid_major_split is not None:
-        print("Isolating validation set...")
-        (
-            val_df,
-            remaining_df,
-            low_fill_vals,
-            med_fill_vals,
-            high_fill_vals
-        ) = val_spatial_split(
+    totals = init_nan_totals()
+    for c,csv in enumerate(csvs):
+        print(f'Processing CSV {c+1}/{len(csvs)}: {csv}')
+        #df = pd.read_csv(csv, parse_dates=['date'])
+        df = load_and_clean_csv(csv)
+        df = filter_lag_columns(
             df,
-            minor_mid_major_split,
-            filled_cols,
-            filled_cols_labs,
-            plot_distributions=plot_distributions
+            lag_days
         )
-    else:
-        remaining_df = df.copy()
-    # remove non-specified lag days
-    print("Removing non-specified lag days...")
-    allowed_suffixes = {f"_day_minus_{lag}" for lag in lag_days_keep}
-    cols_to_keep = [
-        col for col in remaining_df.columns
-        if (
-            (any(col.endswith(suffix) for suffix in allowed_suffixes)) or
-            (col in static_features) or
-            (col == target_col) or
-            (col in ['latitude', 'longitude', 'date'])
+        # keep only the columns corresponding to any of our passed features
+        required_cols = (
+            static_features +
+            info_features +
+            target_col +
+            [f'{var}_lag_{day}d' for var in dynamic_features for day in lag_days]
         )
-    ]
-    remaining_df = remaining_df[cols_to_keep]
-    val_df = val_df[cols_to_keep] if val_df is not None else None
-    # remove rows that have nan values
-    if val_df is not None:
-        print(f"Total number of val labels: {len(val_df.index)}")
-    print(f"Total number of non-val labels: {len(remaining_df.index)}")
-    #print(f"Total number of features: {len(remaining_df.columns)}")
-    # hard coding in here that statistics on Krishna's data are not allowed to
-    # have nans
-    num_val_before_drop = len(val_df.index) if val_df is not None else 0
-    num_non_val_before_drop = len(remaining_df.index)
-    if 'retrieved_lfmc_mean' in remaining_df.columns:
-        retrieved_cols = val_df.columns[
-            val_df.columns.str.contains(
-                'retrieved', case=False, regex=False
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f'Missing columns in {csv}: {missing_cols}')
+        df = df[required_cols + ['date']]
+        # get rid of any columns outside of the acceptable lfmc range
+        df = df[(df['lfmc'] >= acceptable_lfmc_range[0]) & (df['lfmc'] <= acceptable_lfmc_range[1])]
+        # get rid of any rows with nans
+        df, nan_counts = drop_nans_with_reasons(df)
+        totals = accumulate_nan_counts(totals,nan_counts)
+        #base_feature_name = {
+        #    col: col.split('_lag_')[0] if '_lag_' in col else col
+        #    for col in df.columns
+        #}
+        #retrieved_cols = [
+        #    col for col, base in base_feature_name.items()
+        #    if base.startswith('retrieved')
+        #]
+        #filled_cols = [
+        #    col for col, base in base_feature_name.items()
+        #    if base.endswith('_filled')
+        #]
+        #nan_row_mask = df.isna().any(axis=1)
+        #total_nan_rows = int(nan_row_mask.sum())
+        #if total_nan_rows:
+        #    nan_rows = df.loc[nan_row_mask]
+        #    retrieved_nan_rows = (
+        #        nan_rows[retrieved_cols].isna().any(axis=1)
+        #        if retrieved_cols else pd.Series(False, index=nan_rows.index)
+        #    )
+        #    filled_nan_rows = (
+        #        nan_rows[filled_cols].isna().any(axis=1)
+        #        if filled_cols else pd.Series(False, index=nan_rows.index)
+        #    )
+        #    retrieved_count = int(retrieved_nan_rows.sum())
+        #    filled_count = int(filled_nan_rows.sum())
+        #    both_count = int((retrieved_nan_rows & filled_nan_rows).sum())
+        #    total_removed += total_nan_rows
+        #    total_removed_modis += filled_count
+        #    total_removed_retrieved += retrieved_count
+        #    total_removed_both += both_count
+        #    print(
+        #        'Dropping {total} rows due to NaNs '
+        #        '(retrieved static: {retrieved}, filled MODIS: {filled}, both: {both})'.format(
+        #            total=total_nan_rows,
+        #            retrieved=retrieved_count,
+        #            filled=filled_count,
+        #            both=both_count
+        #        )
+        #    )
+        #    df = df.loc[~nan_row_mask]
+        # separate out our different dataframes
+        print('Separating variables')
+        all_vars = df.columns.tolist()
+        all_daily_vars = []
+        for d_var in dynamic_features:
+            d_var_fmt = f'{d_var}_lag_*d'
+            this_daily_vars = fnmatch.filter(
+                all_vars,
+                d_var_fmt
             )
-        ]
-        val_df = val_df.dropna(subset=retrieved_cols) if val_df is not None else None
-        remaining_df = remaining_df.dropna(subset=retrieved_cols)
-        num_val_after_drop = len(val_df.index) if val_df is not None else 0
-        num_non_val_after_drop = len(remaining_df.index)
-        print(
-            'Number of val labels with no Krishna stats: '
-            '{}'.format(num_val_before_drop - num_val_after_drop)
-        )
-        print(
-            'Number of non-val labels with no Krishna stats: '
-            '{}'.format(num_non_val_before_drop - num_non_val_after_drop)
-        )
-    num_obs_before_drop = len(remaining_df.index)
-    remaining_df = remaining_df.dropna()
-    num_obs_after_drop = len(remaining_df.index)
-    print(
-        'Number of non-val labels that couldnt be gap filled:'
-        ' {}'.format(num_obs_before_drop - num_obs_after_drop)
-    )
-    val_df = val_df.dropna() if val_df is not None else None
-    # isolate our validation set. this will tell us how good we are at
-    # extrapolating to new locations that are a) heavily gap-filled, b) semi
-    # gap-filled, or c) only minorly gap filled.
-    # each of these should be about 5% of the data
-    actual_dynamic_features = []
-    for feature in dynamic_features:
-        this_feature_give = feature + '_day_minus_'
-        this_col = remaining_df.columns[
-                remaining_df.columns.str.contains(
-                    this_feature_give, case=False, regex=False
-                )
-            ]
-        if len(this_col) > 0:
-            for adf in this_col:
-                actual_dynamic_features.append(adf)
-    cols_to_use = set(static_features + actual_dynamic_features + [target_col])
-    cols_dont_use = set(remaining_df.columns) - cols_to_use
-    # now that these dfs have been processed, only keep the columns that we are
-    # actually going to use as features/labels
-    # if we don't want to train with filled data, get rid of that now
-    num_remain_obs_with_filled = len(remaining_df.index)
-    if not train_on_filled:
-        print("Removing filled data from remaining dataset...")
-        # get the rows that have 1 or 2 in any of filled col labs
-        true_filled_cols_labs = remaining_df.columns[
-            remaining_df.columns.str.contains(
-                'filled', case=False, regex=False
+            all_daily_vars.extend(this_daily_vars)
+        all_static_vars = static_features
+        all_info_vars = info_features
+        all_target_vars = target_col
+        # sort
+        daily_df = df[all_daily_vars]
+        static_df = df[all_static_vars]
+        info_df = df[all_info_vars]
+        target_df = df[all_target_vars]
+        # convert to tensors
+        print('Converting to tensors')
+        # if this is the first csv, initialize tensors
+        if c == 0:
+            X_daily = df_to_tensor(
+                daily_df,
+                dynamic_features,
+                'd'
             )
-        ]
-        filled_mask = remaining_df[true_filled_cols_labs].isin([1, 2]).any(axis=1)
-        # remove these rows from the remaining_df
-        remaining_df = remaining_df[~filled_mask].reset_index(drop=True)
-    num_remain_obs_with_filled_after = len(remaining_df.index)
-    print(
-        'Number of non-val labels removed becuase of fill data: '
-        '{}'.format(num_remain_obs_with_filled - num_remain_obs_with_filled_after)
-    )
-    # perform the train/test split on the remaining data
-    # this can be:
-        # 1. Random split. Lables are split completely randomly
-        # 2. Temporal split. Labels are split based on time, with training data
-        #    occuring before the test data.
-        # 3. Spatial split. Labels are split based on spatial location, with
-        #    all locations in the test set not appearing in the training set.
-    print("Performing train/test split...")
-    split_dict = {
-        'random': random_split(remaining_df, train_split),
-        'temporal': temporal_split(remaining_df, train_split),
-        'spatial': train_test_spatial_split(remaining_df, train_split)
-    }
-    if split_type not in split_dict:
-        raise ValueError(
-            f"Split type {split_type} not recognized. "
-            "Must be one of: " + ", ".join(split_dict.keys())
-        )
-    train_df, test_df, crit_1, crit_2 = split_dict[split_type]
-    site_assignments = {
-        'train':(
-            set(zip(train_df['latitude'], train_df['longitude']))
-        ),
-        'test': (
-            set(zip(test_df['latitude'], test_df['longitude']))
-        ),
-        'val_low': set(low_fill_vals) if low_fill_vals else None,
-        'val_mid': set(med_fill_vals) if med_fill_vals else None,
-        'val_high': set(high_fill_vals) if high_fill_vals else None
-    }
-    # if random, crit_1 and crit_2 are not used
-    # if temporal, crit_1 is the date of the split and crit_2 not used
-    # if spatial, crit_1 is the training locations and crit_2 is the test locations
-    # remove the columns that we don't want to use
-    print("Removing unused columns...")
-    train_df = train_df.drop(columns=cols_dont_use)
-    test_df = test_df.drop(columns=cols_dont_use)
-    if val_df is not None:
-        val_df = val_df.drop(columns=cols_dont_use)
-    # normalize the train set across all features + label
-    # one mean and std for each feature counting all lag days
-    print("Normalizing train set...")
-    train_df,feature_norm_df = normalize_dataset_across_lag_days(
-        train_df,
-        static_features,
-        target_col
-    )
-    # apply the same normalization to the test set
-    print("Normalizing test set...")
-    for col in test_df.columns:
-        mean = feature_norm_df.loc[
-            feature_norm_df['feature'] == col, 'mean'
-        ].values[0]
-        std = feature_norm_df.loc[
-            feature_norm_df['feature'] == col, 'std'
-        ].values[0]
-        test_df[col] = (test_df[col] - mean) / std
-    if val_df is not None:
-        print("Normalizing Validation set...")
-        for col in val_df.columns:
-            mean = feature_norm_df.loc[
-                feature_norm_df['feature'] == col, 'mean'
-            ].values[0]
-            std = feature_norm_df.loc[
-                feature_norm_df['feature'] == col, 'std'
-            ].values[0]
-            val_df[col] = (val_df[col] - mean) / std
-    # plot the distributions of the features and labels across train and test sets
-    if plot_distributions not in (None, False):
-        # make sure that our plotting location exists
-        os.makedirs(plot_distributions, exist_ok=True)
-        # get column names independent of lag
-        base_to_cols = get_lag_base_to_cols(train_df.columns)
-        # loop over lag-independent column names
-        for base_name, cols in base_to_cols.items():
-            print('plotting train/test distribution for: {}'.format(base_name))
-            # get the train values for this column across all lag days
-            all_train_vals = np.array(pd.concat(
-                [train_df[col] for col in cols], axis=0
-            ))
-            # get the train values for this column across all lag days
-            all_test_vals = np.array(pd.concat(
-                [test_df[col] for col in cols], axis=0
-            ))
-            # if we are plotting the validation set, get those values too
-            if val_df is not None:
-                all_val_vals = np.array(pd.concat(
-                    [val_df[col] for col in cols], axis=0
-                ))
-            # call kde plot for these features across lag days
-            this_fname = os.path.join(
-                plot_distributions,
-                f"{base_name}_distribution.png"
+            X_static = df_to_tensor(
+                static_df,
+                static_features,
+                None
             )
-            plotting.kde_plot(
-                (
-                    [all_train_vals, all_test_vals] +
-                    ([all_val_vals] if val_df is not None else [])
-                ),
-                ['train', 'test'] + (['val'] if val_df is not None else []),
-                this_fname,
-                xlabel=base_name,
-                ylabel='Density'
+            Y = df_to_tensor(
+                target_df,
+                target_col,
+                None
             )
-    # get the X and y tensors for the transformer
-    print("Creating train tensors...")
-    train_X, train_y = get_X_y_from_df(
-        train_df,
-        static_features,
-        target_col,
-        np.array(lag_days_keep, dtype=np.float32),
-        model_name
-    )
-    print("Creating test tensors...")
-    test_X, test_y = get_X_y_from_df(
-        test_df,
-        static_features,
-        target_col,
-        np.array(lag_days_keep, dtype=np.float32),
-        model_name
-    )
-    if val_df is not None:
-        print("Creating validation tensors...")
-        val_X, val_y = get_X_y_from_df(
-            val_df,
-            static_features,
-            target_col,
-            np.array(lag_days_keep, dtype=np.float32),
-            model_name
-        )
-    print('Train features shape: {}'.format(train_X.shape))
-    print('Train labels shape: {}'.format(train_y.shape))
-    print('Test features shape: {}'.format(test_X.shape))
-    print('Test labels shape: {}'.format(test_y.shape))
-    # if we have a validation set, get the X and y tensors for it
-    if val_df is not None:
-        print('Validation features shape: {}'.format(val_X.shape))
-        print('Validation labels shape: {}'.format(val_y.shape))
-    # return the tensors
-    to_return = (
-        train_X,train_y,
-        test_X,test_y,
-        val_X,val_y,
-        feature_norm_df,
-        site_assignments
-    )
-    return to_return
-
-def combine_csvs(csvs, start_date, end_date):
-    # create one df from all of the csv paths
-    created_final = False
-    # get all the csv paths
-    csv_paths = glob.glob(csvs)
-    csv_paths.sort()
-    for c,csv in enumerate(csv_paths):
-        print(f"Processing CSV {c+1}/{len(csv_paths)}: {csv}")
-        this_csv_start_str = csv.split('_')[-2]
-        this_csv_end_str = csv.split('_')[-1].split('.')[0]
-        this_csv_start = datetime.date(
-            int(this_csv_start_str[:4]),
-            int(this_csv_start_str[4:6]),
-            int(this_csv_start_str[6:])
-        )
-        this_csv_end = datetime.date(
-            int(this_csv_end_str[:4]),
-            int(this_csv_end_str[4:6]),
-            int(this_csv_end_str[6:])
-        )
-        # check if the csv is within the date range
-        # we want to use if at all overlaps with my desired date range
-        use_csv = (
-            ((this_csv_start >= start_date) and (this_csv_start <= end_date)) or
-            ((this_csv_end >= start_date) and (this_csv_end <= end_date)) or
-            ((this_csv_start <= start_date) and (this_csv_end >= end_date)) or
-            ((this_csv_start <= start_date) and (this_csv_end >= start_date)) or
-            ((this_csv_start <= end_date) and (this_csv_end >= end_date))
-        )
-        if use_csv:
-            this_df = pd.read_csv(csv)
-            suspicious_cols = [
-                col for col in this_df.columns
-                if this_df[col].dropna().astype(str).head(50).map(is_list_like_string).any()
-            ]
-            for col in suspicious_cols:
-                this_df[col] = this_df[col].astype(str).map(parse_list_first)
-            # eliminate any rows that are outside of the date range
-            dates_str = this_df['date']
-            dates = pd.to_datetime(dates_str, format='%Y-%m-%d')
-            conforming_dates = (
-                (dates >= pd.Timestamp(start_date)) &
-                (dates <= pd.Timestamp(end_date))
-            )
-            # get the index of the conforming dates
-            conforming_dates_idx = conforming_dates[conforming_dates].index
-            # filter the dataframe to only include conforming dates
-            this_df_use = this_df.iloc[conforming_dates_idx]
-            # check if we have created the final dataframe yet
-            if not created_final:
-                all_df = copy.deepcopy(this_df_use)
-                created_final = True
-            else:
-                # append to the final dataframe
-                all_df = pd.concat([all_df, this_df_use], ignore_index=True)
-    return all_df
-
-def parse_list_first(val):
-    if isinstance(val, str) and val.startswith("[") and val.endswith("]"):
-        try:
-            # Handle known edge case where val is "[nan]"
-            if val.lower() == "[nan]":
-                return np.nan
-            parsed = ast.literal_eval(val)
-            return parsed[0] if parsed else np.nan
-        except:
-            return np.nan
-    return val
-
-def is_list_like_string(val):
-    if not isinstance(val, str):
-        return False
-    val = val.strip()
-    return val.startswith("[") and val.endswith("]")
-
-def random_split(df, train_split):
-    # randomly split the dataframe into train and test sets
-    train_size = int(len(df) * train_split)
-    train_df = df.sample(n=train_size, random_state=42)
-    test_df = df.drop(train_df.index)
-    crit_1 = None  # not used in random split
-    crit_2 = None  # not used in random split
-    return train_df, test_df, crit_1, crit_2
-
-def temporal_split(df, train_split, split_type='percent'):
-    df = df.sort_values(by='date')
-    # split the dataframe into train and test sets based on date
-    if split_type == 'percent':
-        date_counts = df['date'].value_counts().sort_index()
-        cum_counts = date_counts.cumsum()
-        total_rows = len(df)
-        split_row_target = int(total_rows * train_split)
-        split_date = cum_counts[cum_counts >= split_row_target].index[0]
-    elif split_type == 'date':
-        # split based on a specific date
-        split_date = pd.Timestamp(train_split)
-    else:
-        raise ValueError("split_type must be 'percent' or 'date'")
-    train_df = df[df['date'] < split_date]
-    test_df = df[df['date'] >= split_date]
-    crit_1 = train_df['date'].max()  # last date in training set
-    crit_2 = None  # not used in temporal split
-    return train_df, test_df, crit_1, crit_2
-
-def train_test_spatial_split(df, train_split):
-    latlon_series = list(zip(df['latitude'], df['longitude']))
-    latlon_counts = Counter(latlon_series)
-    sorted_locations = list(latlon_counts.keys())
-    # randomize the locations to ensure randomness in selection
-    np.random.shuffle(sorted_locations)
-    cumulative = 0
-    train_locs = []
-    total_rows = len(df)
-    target_rows = int(total_rows * train_split)
-    for loc in sorted_locations:
-        if cumulative >= target_rows:
-            break
-        train_locs.append(loc)
-        cumulative += latlon_counts[loc]
-    # covert to set for efficient lookup
-    train_locs_set = set(train_locs)
-    # get our train/test
-    mask = [loc in train_locs_set for loc in latlon_series]
-    train_df = df[mask]
-    test_df = df[[not m for m in mask]]
-    test_locs = list(set(latlon_series) - train_locs_set)
-    crit_1 = train_locs_set  # training locations
-    crit_2 = set(test_locs)  # test locations
-    return train_df, test_df, crit_1, crit_2
-
-def val_spatial_split(
-    df, minor_mid_major_split,filled_cols,filled_cols_labs,
-    plot_distributions=None
-):
-    minor = minor_mid_major_split[0]
-    mid = minor_mid_major_split[1]
-    major = minor_mid_major_split[2]
-    # get the locations
-    latlon_series = list(zip(df['latitude'], df['longitude']))
-    latlon_counts = Counter(latlon_series)
-    sorted_locations = list(latlon_counts.keys())
-    # randomize the locations to ensure randomness in selection
-    np.random.shuffle(sorted_locations)
-    cumulative = np.zeros(3, dtype=int)
-    val_locs = [[], [], []]  # minor, mid, major
-    total_rows = len(df)
-    target_rows = np.array([
-        int(total_rows * minor),
-        int(total_rows * mid),
-        int(total_rows * major)
-    ])
-    # how many modis observations are at each of our sites?
-    cols = df.columns
-    num_fill_inps_per_obs = 0
-    for c in cols:
-        for f in filled_cols:
-            if f in c:
-                num_fill_inps_per_obs += 1
-    all_filled_perc = np.zeros(len(sorted_locations), dtype=float)
-    for l,loc in enumerate(sorted_locations):
-        # the true number of possible filled obs will be the number of filled cols
-        # times the number of observations at this location
-        loc_count = latlon_counts[loc]
-        num_possible_filled_obs = loc_count * num_fill_inps_per_obs
-        # get all of the columns for this location
-        loc_mask = [l == loc for l in latlon_series]
-        loc_df = df[loc_mask]
-        # check how many modis observations are filled
-        filled_count = 0
-        for filled_col in filled_cols_labs:
-            true_filled_col_labs = loc_df.columns[
-                loc_df.columns.str.contains(
-                    filled_col, case=False, regex=False
-                )
-            ]
-            this_site_filled_col = loc_df[true_filled_col_labs].values
-            # count how many are equal to 1
-            filled_count += np.sum(this_site_filled_col == 1)
-        filled_percent = filled_count / num_possible_filled_obs
-        all_filled_perc[l] = filled_percent
-        if filled_percent < 0.02 and cumulative[0] < target_rows[0]:
-            # minor gap filled
-            val_locs[0].append(loc)
-            cumulative[0] += loc_count
-        elif filled_percent >= 0.02 and filled_percent < 0.05 and cumulative[1] < target_rows[1]:
-            # mid gap filled
-            val_locs[1].append(loc)
-            cumulative[1] += loc_count
-        elif filled_percent >= 0.05 and cumulative[2] < target_rows[2]:
-            # major gap filled
-            val_locs[2].append(loc)
-            cumulative[2] += loc_count
-    # put val locs into a dataframe and remove from the original df
-    val_locs_set = set(val_locs[0] + val_locs[1] + val_locs[2])
-    val_mask = np.array(
-        [loc in val_locs_set for loc in latlon_series]
-    )
-    val_df = df[val_mask].reset_index(drop=True)
-    # remove the validation locations from the original dataframe
-    df = df[~val_mask].reset_index(drop=True)
-    # plot hte distribution of filled perc
-    if plot_distributions not in (None, False):
-        # plot the filled perc distribution
-        plotting.kde_plot(
-            [all_filled_perc],
-            ['filled_percent'],
-            os.path.join(plot_distributions, 'filled_percent_distribution.png'),
-            xlabel='Filled Percent',
-            ylabel='Density'
-        )
-    # return the validation dataframe and the original dataframe
-    return val_df, df, val_locs[0], val_locs[1], val_locs[2]
-
-def normalize_dataset_across_lag_days(df, static_features, target_col):
-    df_norm = df.copy()
-    stats = []
-    base_to_cols = get_lag_base_to_cols(df.columns)
-    # normalize each group
-    for base, cols in base_to_cols.items():
-        # combine values across lagged cols (if any) to compute mean and std
-        all_vals = None
-        for c,col in enumerate(cols):
-            if c == 0:
-                all_vals = df[col].values
-            else:
-                all_vals = np.concatenate((all_vals, df[col].values))
-        mean = all_vals.mean()
-        std = all_vals.std(ddof=0)
-        std = std if std != 0 else 1 # avoid division by zero
-        # normalize each column in the group
-        for col in cols:
-            df_norm[col] = (df[col] - mean) / std
-            stats.append({
-                'feature': col,
-                'mean': mean,
-                'std': std
-            })
-    # convert stats to a DataFrame
-    stats_df = pd.DataFrame(stats)
-    return df_norm, stats_df
-
-def get_lag_base_to_cols(feature_cols):
-    # group based on variable
-    base_to_cols = {}
-    for col in feature_cols:
-        match = re.match(r'(.+)_day_minus_\d+$', col)
-        if match:
-            base = match.group(1)
-            base_to_cols.setdefault(base, []).append(col)
+            all_info_df = copy.deepcopy(info_df)
         else:
-            base_to_cols[col] = [col]  # static features or non-lagged features
-    return base_to_cols
-
-def extract_day_include(columns, static_features):
-    day_include = set()
-    for col in columns:
-        if any(col.startswith(p) for p in static_features):
-            continue
-        match = re.search(r"_(\d+)$", col)
-        day = int(match.group(1)) if match else 0
-        day_include.add(day)
-    return sorted(day_include)
-
-
-def get_lag_day(col):
-    match = re.search(r'day_minus_(\d+)', col)
-    return int(match.group(1)) if match else -1  # static or non-lagged
-
-def get_X_y_from_df(
-    df,
-    static_features,
-    target_col,
-    time_lag_vector,
-    model_name
-):
-    # extract directly from the df the lagged days that we will be including
-    all_cols = df.columns
-    if target_col is not None:
-        feature_names = all_cols.drop(target_col)
-    else:
-        feature_names = all_cols
-    day_include = extract_day_include(feature_names, static_features)
-    # now get the list of our dynamic features
-    exclude_cols = set(static_features + [target_col])
-    dynamic_cols = [
-        col for col in feature_names if col not in exclude_cols
-    ]
-    grouped = defaultdict(list)
-    for col in dynamic_cols:
-        prefix = col.split('_day_minus_')[0] if '_day_minus_' in col else col
-        grouped[prefix].append(col)
-    lagged_features = []
-    for var,col in grouped.items():
-        sorted_cols = sorted(col, key=get_lag_day)
-        lagged_features.extend(sorted_cols)
-    seq_len = len(day_include)
-    # create the tensors
-    samples = []
-    targets = []
-    # get the base features
-    base_lagged_features = set()
-    for feat in lagged_features:
-        if "_day_minus_" in feat:
-            base = feat.split("_day_minus_")[0]
-            base_lagged_features.add(base)
-    base_lagged_features = sorted(base_lagged_features)
-    for i,(idx,row) in enumerate(df.iterrows()):
-        if i%1000 == 0:
-            print(f"Creating tensor for df row {i} of {len(df)}")
-        # create the input tensor
-        lagged_vals = []
-        for lag_day in day_include:
-            step_features = []
-            for base_feat in base_lagged_features:
-                feat = f"{base_feat}_day_minus_{lag_day}"
-                val = row[feat]
-                step_features.append(val)
-            lagged_vals.append(step_features)
-        lagged_vals = np.array(lagged_vals, dtype=np.float32)
-        # add static features
-        static_vals = row[static_features].values.astype(np.float32)
-        static_vals_rep = np.repeat(
-            static_vals[np.newaxis, :], seq_len, axis=0
-        )
-        if model_name == 'transformer':
-            time_lag_vector_norm = time_lag_vector / np.max(time_lag_vector)
-            time_lag_feature = time_lag_vector_norm[:, np.newaxis]
-            sample_features = np.concatenate(
-                [lagged_vals, static_vals_rep, time_lag_feature], axis=1
+            X_daily = torch.cat(
+                (X_daily, df_to_tensor(
+                    daily_df,
+                    dynamic_features,
+                    'd'
+                )),
+                dim=0
             )
-        elif model_name == 'temporal_cnn':
-            sample_features = np.concatenate(
-                [lagged_vals, static_vals_rep], axis=1
+            X_static = torch.cat(
+                (X_static, df_to_tensor(
+                    static_df,
+                    static_features,
+                    None
+                )),
+                dim=0
             )
-        else:
-            raise ValueError(f"Model name {model_name} not recognized.")
-        samples.append(sample_features)
-        if target_col is not None:
-            targets.append(row[target_col])
-    # convert to tensors
-    X = torch.tensor(np.array(samples), dtype=torch.float32)
-    if target_col is None:
-        y = None
-    else:
-        y = torch.tensor(np.array(targets), dtype=torch.float32)
-    return X, y
+            Y = torch.cat(
+                (Y, df_to_tensor(
+                    target_df,
+                    target_col,
+                    None
+                )),
+                dim=0
+            )
+            all_info_df = pd.concat(
+                [all_info_df, info_df],
+                ignore_index=True
+            )
+    print(f'Total rows removed due to NaNs: {totals["total_nan_rows"]}')
+    print(f'  of which due to filled MODIS: {totals["filled"]}')
+    print(f'  of which due to retrieved static: {totals["retrieved"]}')
+    print(f'  of which due to both: {totals["both"]}')
+    print(f'  of which are solely retrieved static: {totals["only_retrieved"]}')
+    print(f'  of which are solely filled MODIS: {totals["only_filled"]}')
+    print(f'  of which are other: {totals["other"]}')
+    print(f'X_daily shape: {X_daily.shape}')
+    print(f'X_static shape: {X_static.shape}')
+    print(f'Y shape: {Y.shape}')
+    print(f'info_df shape: {all_info_df.shape}')
+    # save to disk
+    print('Saving tensors to disk')
+    torch.save(X_daily,os.path.join(save_dir,'X_daily.pt'))
+    torch.save(X_static,os.path.join(save_dir,'X_static.pt'))
+    torch.save(Y,os.path.join(save_dir,'Y.pt'))
+    all_info_df.to_csv(os.path.join(save_dir,'info.csv'),index=False)
 
 
 if __name__ == "__main__":
@@ -669,22 +502,24 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     # fill in follwing necessary information for producing the correct dataset
+    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs'
     csv_names = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/compiled/'
         'y_Insitu_X_ModisfilledDaymetStaticKrishnastatsWeatherstats_30days/'
         'compiled_data_*.csv'
     )
+    csv_names = sorted(glob.glob(csv_names))
     first_label_date = datetime.date(2003, 1, 1)
     last_label_date = datetime.date(2023, 12, 31)
     static_features = [
         'slope','elevation','canopy_height','forest_cover',
-        'clay','sand','latitude','longitude'
+        'clay','sand','latitude','longitude',
         #'retrieved_lfmc_mean',
         #'retrieved_lfmc_std','retrieved_lfmc_min','retrieved_lfmc_max',
         #'retrieved_lfmc_djf_mean','retrieved_lfmc_mam_mean',
         #'retrieved_lfmc_jja_mean','retrieved_lfmc_son_mean'
     ]
-    lagged_features = [
+    dynamic_features = [
         'srad','prcp','swe','tmax','tmin','vp',
         'Nadir_Reflectance_Band1_filled',
         'Nadir_Reflectance_Band2_filled',
@@ -693,150 +528,38 @@ if __name__ == "__main__":
         'Nadir_Reflectance_Band5_filled',
         'Nadir_Reflectance_Band6_filled',
         'Nadir_Reflectance_Band7_filled'
-        'days_since_rain','max_precip_14_days',
-        'rolling_precip_14_days','max_temp_14_days',
-        'rolling_temp_14_days','max_vp_14_days',
-        'rolling_vp_14_days'
+        #'days_since_rain','max_precip_14_days',
+        #'rolling_precip_14_days','max_temp_14_days',
+        #'rolling_temp_14_days','max_vp_14_days',
+        #'rolling_vp_14_days'
     ]
-    target_col = 'lfmc'
-    filled_cols = [
-        'Nadir_Reflectance_Band1_filled',
-        'Nadir_Reflectance_Band2_filled',
-        'Nadir_Reflectance_Band3_filled',
-        'Nadir_Reflectance_Band4_filled',
-        'Nadir_Reflectance_Band5_filled',
-        'Nadir_Reflectance_Band6_filled',
-        'Nadir_Reflectance_Band7_filled'
+    target_col = ['lfmc']
+    info_features = [
+        'day_lat_lon','source'
     ]
-    filled_cols_labs = [
-        'filled_1',
-        'filled_2',
-        'filled_3',
-        'filled_4',
-        'filled_5',
-        'filled_6',
-        'filled_7'
-    ]
-    #lag_days_keep = [
-    #    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
-    #    11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-    #    21, 22, 23, 24, 25, 26, 27, 28, 29, 30
-    #]
-    lag_days_keep = [
+    # save the variable names for later use
+    var_names = {
+        'daily_vars': dynamic_features,
+        'static_vars': static_features,
+        'info_vars': info_features,
+        'lfmc_vars': target_col
+    }
+    with open(os.path.join(save_dir,'var_names.json'),'w') as f:
+        json.dump(var_names,f)
+    lag_days = [
         0,1,2,3,4,7,10,15,20,25,30
     ]
-    # percent of data that goes to validation set
-    # minor, mid, major split
-    # minor is sites with < 1% gap filled, mid is sites with 1-5% gap filled,
-    # major is sites with > 5% gap filled
-    # generally set to mirror distribution in gap filling across all data
-    minor_mid_major_split = (0.05, 0.04, 0.01) # ex: (0.07, 0.02, 0.01) or None
-    train_split = 0.85
-    split_type = 'spatial'
-    model_name = 'transformer'
-    features_name = 'ModisDaymetStaticLatlonWeatherstats'
-    labels_name = 'Insitu'
-    lag_days_name = 'intermittent' # full or intermittent
-    start_date_name = first_label_date.strftime('%Y%m%d')
-    end_date_name = last_label_date.strftime('%Y%m%d')
-    train_on_filled = False  # whether to train on filled data only
-    gen_file_out = (
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/'
-        'splits/{model_name}_{split_type}_{dataset_type}_{start_date_name}_{end_date_name}_'
-        'y_{labels_name}_x_{features_name}.npy'
+    acceptable_lfmc_range = (30, 500)  # Example range for LFMC, adjust as needed
+    build_inputs(
+        csvs=csv_names,
+        first_label_date=first_label_date,
+        last_label_date=last_label_date,
+        static_features=static_features,
+        dynamic_features=dynamic_features,
+        info_features=info_features,
+        target_col=target_col,
+        lag_days=lag_days,
+        save_dir=save_dir,
+        model_name='transformer',
+        acceptable_lfmc_range=acceptable_lfmc_range
     )
-    gen_file_out_filled = gen_file_out.format(
-        model_name=model_name,
-        split_type=split_type,
-        dataset_type='{dataset_type}',
-        start_date_name=start_date_name,
-        end_date_name=end_date_name,
-        labels_name=labels_name,
-        features_name=features_name
-    )
-    train_file_out = gen_file_out_filled.format(dataset_type='train')
-    test_file_out = gen_file_out_filled.format(dataset_type='test')
-    val_file_out = gen_file_out_filled.format(dataset_type='val')
-    plot_distributions = (
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/outputs/viz/'
-        'distributions/{model_name}_{split_type}_'
-        '{start_date_name}_{end_date_name}_y_{labels_name}_x_{features_name}'.format(
-            model_name=model_name,
-            split_type=split_type,
-            start_date_name=start_date_name,
-            end_date_name=end_date_name,
-            labels_name=labels_name,
-            features_name=features_name
-        )
-    )
-    #plot_distributions = False
-    norm_df_out = (
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/'
-        'norm_df/{model_name}_{split_type}_'
-        '{start_date_name}_{end_date_name}_y_{labels_name}_x_{features_name}.csv'
-    )
-    norm_df_out = norm_df_out.format(
-        model_name=model_name,
-        split_type=split_type,
-        start_date_name=start_date_name,
-        end_date_name=end_date_name,
-        labels_name=labels_name,
-        features_name=features_name
-    )
-    site_locs_out = (
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/'
-        'site_assignments/{model_name}_{split_type}_'
-        '{start_date_name}_{end_date_name}_y_{labels_name}_x_{features_name}.pickle'
-    )
-    site_locs_out = site_locs_out.format(
-        model_name=model_name,
-        split_type=split_type,
-        start_date_name=start_date_name,
-        end_date_name=end_date_name,
-        labels_name=labels_name,
-        features_name=features_name
-    )
-    # make sure the output directories exist
-    os.makedirs(os.path.dirname(train_file_out), exist_ok=True)
-    os.makedirs(os.path.dirname(test_file_out), exist_ok=True)
-    os.makedirs(os.path.dirname(val_file_out), exist_ok=True)
-    os.makedirs(os.path.dirname(norm_df_out), exist_ok=True)
-    os.makedirs(os.path.dirname(site_locs_out), exist_ok=True)
-    if plot_distributions is not False:
-        os.makedirs(plot_distributions, exist_ok=True)
-    (
-        train_X,train_y,
-        test_X,test_Y,
-        val_X,val_y,
-        norm_df,
-        site_assignments
-    ) = build_training_dataset(
-        csv_names,
-        first_label_date,
-        last_label_date,
-        static_features,
-        lagged_features,
-        target_col,
-        lag_days_keep,
-        val_minor_mid_major_split=minor_mid_major_split,
-        train_split=train_split,
-        split_type=split_type,
-        plot_distributions=plot_distributions,
-        model_name=model_name,
-        train_on_filled=train_on_filled,
-        filled_cols=filled_cols,
-        filled_cols_labs=filled_cols_labs
-    )
-    torch.save({"X": train_X, "y": train_y}, train_file_out)
-    torch.save({"X": test_X, "y": test_Y}, test_file_out)
-    if val_X is not None and val_y is not None:
-        torch.save({"X": val_X, "y": val_y}, val_file_out)
-    norm_df.to_csv(norm_df_out, index=False)
-    with open(site_locs_out, 'wb') as f:
-        pickle.dump(site_assignments, f, protocol=pickle.HIGHEST_PROTOCOL)
-    print(f"Train dataset saved to {train_file_out}")
-    print(f"Test dataset saved to {test_file_out}")
-    if val_X is not None and val_y is not None:
-        print(f"Validation dataset saved to {val_file_out}")
-    print(f"Normalization statistics saved to {norm_df_out}")
-    print(f"Site assignments saved to {site_locs_out}")

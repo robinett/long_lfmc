@@ -273,7 +273,7 @@ def compile_data(
                         )
                         # how many days is this from our current date?
                         days_from_today = (match_date_dtm.date() - day).days
-                        this_key_name = '{var}_day_minus_{days_from_today}'.format(
+                        this_key_name = '{var}_lag_{days_from_today}d'.format(
                             var=var, days_from_today=days_from_today
                         )
                         # add the data to the dictionary

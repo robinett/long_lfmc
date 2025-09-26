@@ -4,7 +4,7 @@
 
 # for all the files that we want to download
 start_month="2003-04-01"
-end_month="2004-02-28" # inclusive
+end_month="2023-12-31" # inclusive
 # delta between each request submitted
 month_delta=0
 year_delta=1
