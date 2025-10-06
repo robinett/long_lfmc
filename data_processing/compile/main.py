@@ -30,41 +30,50 @@ def main():
     # get all the information that we need for the features and labels
     features = {
         'dirs':{
-            'daymet_prcp':os.path.join(
+            #'daymet_prcp':os.path.join(
+            #    scratch_dir,
+            #    'daymet/daymet_regrid/prcp/{year:04d}/{month:02d}',
+            #    'prcp_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
+            #),
+            #'daymet_srad':os.path.join(
+            #    scratch_dir,
+            #    'daymet/daymet_regrid/srad/{year:04d}/{month:02d}',
+            #    'srad_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
+            #),
+            #'daymet_swe':os.path.join(
+            #    scratch_dir,
+            #    'daymet/daymet_regrid/swe/{year:04d}/{month:02d}',
+            #    'swe_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
+            #),
+            #'daymet_tmax':os.path.join(
+            #    scratch_dir,
+            #    'daymet/daymet_regrid/tmax/{year:04d}/{month:02d}',
+            #    'tmax_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
+            #),
+            #'daymet_tmin':os.path.join(
+            #    scratch_dir,
+            #    'daymet/daymet_regrid/tmin/{year:04d}/{month:02d}',
+            #    'tmin_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
+            #),
+            #'daymet_vpd':os.path.join(
+            #    scratch_dir,
+            #    'daymet/daymet_regrid/vp/{year:04d}/{month:02d}',
+            #    'vp_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
+            #),
+            'daymet':os.path.join(
                 scratch_dir,
-                'daymet/daymet_regrid/prcp/{year:04d}/{month:02d}',
-                'prcp_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
+                'daymet/daymet_all_vars.zarr'
             ),
-            'daymet_srad':os.path.join(
-                scratch_dir,
-                'daymet/daymet_regrid/srad/{year:04d}/{month:02d}',
-                'srad_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
-            ),
-            'daymet_swe':os.path.join(
-                scratch_dir,
-                'daymet/daymet_regrid/swe/{year:04d}/{month:02d}',
-                'swe_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
-            ),
-            'daymet_tmax':os.path.join(
-                scratch_dir,
-                'daymet/daymet_regrid/tmax/{year:04d}/{month:02d}',
-                'tmax_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
-            ),
-            'daymet_tmin':os.path.join(
-                scratch_dir,
-                'daymet/daymet_regrid/tmin/{year:04d}/{month:02d}',
-                'tmin_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
-            ),
-            'daymet_vpd':os.path.join(
-                scratch_dir,
-                'daymet/daymet_regrid/vp/{year:04d}/{month:02d}',
-                'vp_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
-            ),
+            #'modis':os.path.join(
+            #    scratch_dir,
+            #    'modis/modis_regridded_gapfilled/quality_1/interpolated',
+            #    '{year:04d}/{month:02d}',
+            #    'modis_filled_{year:04d}{month:02d}{day:02d}.nc4'
+            #),
             'modis':os.path.join(
                 scratch_dir,
                 'modis/modis_regridded_gapfilled/quality_1/interpolated',
-                '{year:04d}/{month:02d}',
-                'modis_filled_{year:04d}{month:02d}{day:02d}.nc4'
+                'modis_all_vars.zarr'
             ),
             'static':os.path.join(
                 scratch_dir,
@@ -74,19 +83,22 @@ def main():
                 scratch_dir,
                 'krishna/stats/krishna_lfmc_statistics.nc4'
             ),
-            'daymet_stats':os.path.join(
-                scratch_dir,
-                'daymet/stats/{year:04d}/{month:02d}/'
-                'stats_{year:04d}_{month:02d}_{day:02d}_regridded.nc'
-            ),
         },
         'vars':{
-            'daymet_prcp': ['prcp'],
-            'daymet_srad': ['srad'],
-            'daymet_swe': ['swe'],
-            'daymet_tmax': ['tmax'],
-            'daymet_tmin': ['tmin'],
-            'daymet_vpd': ['vp'],
+            #'daymet_prcp': ['prcp'],
+            #'daymet_srad': ['srad'],
+            #'daymet_swe': ['swe'],
+            #'daymet_tmax': ['tmax'],
+            #'daymet_tmin': ['tmin'],
+            #'daymet_vpd': ['vp'],
+            'daymet':[
+                'prcp',
+                'srad',
+                'swe',
+                'tmax',
+                'tmin',
+                'vp'
+            ],
             'modis': [
                 'Nadir_Reflectance_Band1_filled',
                 'Nadir_Reflectance_Band2_filled',
@@ -121,28 +133,19 @@ def main():
                 'retrieved_lfmc_jja_mean',
                 'retrieved_lfmc_son_mean'
             ],
-            'daymet_stats':[
-                'days_since_rain',
-                'max_precip_14_days',
-                'rolling_precip_14_days',
-                'max_temp_14_days',
-                'rolling_temp_14_days',
-                'min_watervp_14_days',
-                'rolling_watervp_14_days'
-            ]
         },
         'type':{
-            'daymet_dayl':'spatial_temporal',
-            'daymet_prcp':'spatial_temporal',
-            'daymet_srad':'spatial_temporal',
-            'daymet_swe':'spatial_temporal',
-            'daymet_tmax':'spatial_temporal',
-            'daymet_tmin':'spatial_temporal',
-            'daymet_vpd':'spatial_temporal',
+            #'daymet_dayl':'spatial_temporal',
+            #'daymet_prcp':'spatial_temporal',
+            #'daymet_srad':'spatial_temporal',
+            #'daymet_swe':'spatial_temporal',
+            #'daymet_tmax':'spatial_temporal',
+            #'daymet_tmin':'spatial_temporal',
+            #'daymet_vpd':'spatial_temporal',
+            'daymet':'spatial_temporal',
             'modis':'spatial_temporal',
             'static':'spatial_static',
             'krishna_stats':'spatial_static',
-            'daymet_stats':'spatial_temporal'
         }
     }
     # labels must be a csv with a "date"/"lat"/"lon" column and then a columns
@@ -152,12 +155,19 @@ def main():
             'nfmd':os.path.join(
                 scratch_dir,
                 'nfmd/nfmd_processed.csv'
+            ),
+            'rs':os.path.join(
+                scratch_dir,
+                'krishna/krishna_lfmc_samples.csv'
             )
         },
         'vars':{
-            'nfmd':['lfmc']
+            'nfmd':['lfmc'],
+            'rs':['lfmc']
         }
     }
+    # number of random samples to include from RS data
+    num_samples_if_available = 15000
     # what does should be included? 0 is current day, 1 is previous day, 5 is 5
     # days before, etc.
     # this is only relevant for transformer
@@ -167,7 +177,7 @@ def main():
         21, 22, 23, 24, 25, 26, 27, 28, 29, 30
     ]
     inputs_outputs = (
-        'y_Insitu_X_ModisfilledDaymetStaticKrishnastatsWeatherstats_30days'
+        'y_Insitu_X_ModisfilledDaymetStaticKrishnastatsWeatherstats_30days_testing'
     )
     out_dir = os.path.join(
         scratch_dir,
@@ -184,7 +194,8 @@ def main():
         features,
         labels,
         days_to_include,
-        out_fname
+        out_fname,
+        num_rs_samples = num_samples_if_available
     )
 
 

@@ -27,31 +27,31 @@ def main(krishna_files_path,krishna_plots_path,save_stats_path):
     for f,file in enumerate(all_krishna_files):
         print('adding file {} to dataset'.format(file))
         print('file {} of {}'.format(f+1,len(all_krishna_files)))
-        da = xr.open_dataarray(file, engine='netcdf4')
-        da = da.expand_dims(time=[all_krishna_dates[f]])
+        ds = xr.open_dataset(file, engine='netcdf4')
+        ds = ds.expand_dims(time=[all_krishna_dates[f]])
         if combined_ds is None:
-            combined_ds = da
+            combined_ds = ds
         else:
             combined_ds = xr.concat(
-                [combined_ds, da],
+                [combined_ds, ds],
                 dim='time'
             )
     # compute our statistics of interest on this dataset
     print('computing statistics on dataset')
     print('computing num_obs')
     stats_ds = xr.Dataset({
-        'num_obs': combined_ds.count(dim='time'),
+        'num_obs': combined_ds['band_data'].count(dim='time'),
     })
     print('computing mean')
-    stats_ds['retrieved_lfmc_mean'] = combined_ds.mean(dim='time', skipna=True)
+    stats_ds['retrieved_lfmc_mean'] = combined_ds['band_data'].mean(dim='time', skipna=True)
     print('computing std')
-    stats_ds['retrieved_lfmc_std'] = combined_ds.std(dim='time', skipna=True)
+    stats_ds['retrieved_lfmc_std'] = combined_ds['band_data'].std(dim='time', skipna=True)
     print('computing min')
-    stats_ds['retrieved_lfmc_min'] = combined_ds.min(dim='time', skipna=True)
+    stats_ds['retrieved_lfmc_min'] = combined_ds['band_data'].min(dim='time', skipna=True)
     print('computing max')
-    stats_ds['retrieved_lfmc_max'] = combined_ds.max(dim='time', skipna=True)  
+    stats_ds['retrieved_lfmc_max'] = combined_ds['band_data'].max(dim='time', skipna=True)
     # computing seasonal means
-    seasonal_means = combined_ds.groupby('time.season').mean(dim='time', skipna=True)
+    seasonal_means = combined_ds['band_data'].groupby('time.season').mean(dim='time', skipna=True)
     for season in seasonal_means['season'].values:
         var_name = 'retrieved_lfmc_' + season.lower() + '_mean'
         stats_ds[var_name] = seasonal_means.sel(season=season)

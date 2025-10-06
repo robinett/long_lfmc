@@ -102,6 +102,9 @@ def reproject_and_regrid_whole_directory(
             target_dir_last_ext=target_dir_last_ext,
             chunk_buffer=chunk_buffer
         )
+        # make sure that we have a crs written to the output
+        if 'crs' not in this_regridded_ds.coords:
+            this_regridded_ds.rio.write_crs(target_crs, inplace=True)
         if sfp == 0:
             print('regridded ds from first file:')
             print(this_regridded_ds)
@@ -146,6 +149,14 @@ def reproject_and_regrid_whole_directory(
         this_base,this_ext = os.path.splitext(os.path.basename(
             this_src_file_path
         ))
+        if this_ext in ['.tif','.tiff','.img','.hdf','.hdf4','.hdf5','.h5']:
+            this_ext = '.nc4'
+        elif this_ext in ['.nc','.nc4','.ncdf']:
+            pass
+        else:
+            print('unrecognized file extension: {}'.format(this_ext))
+            print('exiting')
+            sys.exit()
         this_fname = f"{this_base}_regridded{this_ext}"
         target_save_fname = os.path.join(
             target_save_full_dir,
@@ -155,6 +166,7 @@ def reproject_and_regrid_whole_directory(
             this_regridded_ds,
             target_save_fname
         )
+    
 def reproject_and_regrid_single_file(
     target_grid,
     this_src_ds,

@@ -51,70 +51,57 @@ class EarlyStopping:
     def __init__(
         self,
         patience=5,
-        mae_delta=0.001,
+        rmse_delta=0.001,
         pr_auc_delta=0.001,
         best_score_delta=0.0001
     ):
         self.patience = patience
-        self.mae_delta = mae_delta
-        self.best_mae = float('inf')
-        self.mae_counter = 0
+        self.rmse_delta = rmse_delta
+        self.best_rmse = float('inf')
+        self.rmse_counter = 0
         self.early_stop = False
         self.save_model = False
         self.first_epoch = True  # to save the first epoch model
 
-    def __call__(self,val_mae):
+    def __call__(self,val_rmse):
         if self.first_epoch:
             print("First epoch, saving model")
             self.save_model = True
             self.first_epoch = False
-            self.last_saved_mae = val_mae
-        elif val_mae < self.last_saved_mae:
+            self.last_saved_rmse = val_rmse
+        elif val_rmse < self.last_saved_rmse - self.rmse_delta:
             print("New best model found!")
-            print(f"MAE improved from {self.last_saved_mae} to {val_mae}")
+            print(f"RMSE improved from {self.last_saved_rmse} to {val_rmse}")
             self.save_model = True
-            self.last_saved_mae = val_mae
-            self.mae_counter = 0
+            self.last_saved_rmse = val_rmse
+            self.rmse_counter = 0
         else:
             print("No improvement in model performance.")
-            print(f"Current MAE: {val_mae}, Best MAE: {self.last_saved_mae}")
+            print(f"Current RMSE: {val_rmse}, Best RMSE: {self.last_saved_rmse}")
             self.save_model = False
-            self.mae_counter += 1
+            self.rmse_counter += 1
         print(
-            f"EarlyStopping counter: mae {self.mae_counter}"
+            f"EarlyStopping counter: rmse {self.rmse_counter}"
         )
-        if self.mae_counter >= self.patience:
+        if self.rmse_counter >= self.patience:
             self.early_stop = True
 
 def create_site_split(
-    data,                  # torch tensor (unused here)
     data_info: pd.DataFrame,
     desired_sample_size: int,
-    seed: int | None = 42,
+    seed=42,
+    used_sites=None,
 ):
-    # Expect strings like "YYYY-MM-DD_lat_lon"
-    s = data_info["day_lat_lon"].astype(str)
-    # split into exactly 3 parts from the right:
-    # date, lat, lon (robust to underscores in date prefix)
-    parts = s.str.rsplit("_", n=2, expand=True)
-    if parts.shape[1] != 3:
-        raise ValueError(
-            "day_lat_lon must look like "
-            "'YYYY-MM-DD_lat_lon'"
-        )
-    parts.columns = ["date", "lat", "lon"]
-    # coerce to numeric; drop malformed rows
-    parts["lat"] = pd.to_numeric(
-        parts["lat"], errors="coerce"
-    )
-    parts["lon"] = pd.to_numeric(
-        parts["lon"], errors="coerce"
-    )
+    # only create for in-situ sites
+    data_info = data_info[data_info['source'] == 'nfmd']
+    # use explicit date/latitude/longitude columns
+    parts = data_info[["date", "latitude", "longitude"]].copy()
+    parts = parts.rename(columns={"latitude": "lat", "longitude": "lon"})
+    parts["lat"] = pd.to_numeric(parts["lat"], errors="coerce")
+    parts["lon"] = pd.to_numeric(parts["lon"], errors="coerce")
     parts = parts.dropna(subset=["lat", "lon"])
     if parts.empty:
-        raise ValueError(
-            "No valid lat/lon rows after parsing."
-        )
+        raise ValueError("No valid lat/lon rows after parsing.")
 
     # count obs per site
     counts = (
@@ -122,23 +109,36 @@ def create_site_split(
         .size()
         .reset_index(name="n")
     )
+
+    # filter out used_sites if provided
+    if used_sites is not None and len(used_sites) > 0:
+        counts = counts[
+            ~counts.apply(
+                lambda r: (float(r["lat"]), float(r["lon"])) in used_sites,
+                axis=1
+            )
+        ].reset_index(drop=True)
+
+    if counts.empty:
+        return []
+
     # shuffle sites reproducibly
     rng = np.random.default_rng(seed)
     idx = np.arange(len(counts))
     rng.shuffle(idx)
     counts = counts.iloc[idx].reset_index(drop=True)
+
     # accumulate sites until we hit desired total obs
     val_locs = []
     total = 0
     for _, row in counts.iterrows():
-        val_locs.append((float(row["lat"]),
-                         float(row["lon"])))
+        val_locs.append((float(row["lat"]), float(row["lon"])))
         total += int(row["n"])
         if total >= desired_sample_size:
             break
-    # if desired_sample_size > total obs, just return all
+
+    # if we couldn't meet desired_sample_size, just return all
     if not val_locs:
-        # shouldn’t happen unless desired_sample_size <= 0
         return []
     return val_locs
 
@@ -230,17 +230,11 @@ def train_fold_k(
     static_data = data[1]
     lfmc_insitu = data[2]
     info = data[3]
-    point_labels = info['day_lat_lon'].astype(str)
-    parts = point_labels.str.rsplit("_", n=2, expand=True)
-    parts.columns = ["date", "lat", "lon"]
-    if parts.shape[1] != 3:
-        raise ValueError(
-            "day_lat_lon must look like "
-            "'YYYY-MM-DD_lat_lon'"
-        )
+    parts = info[['date', 'latitude', 'longitude']].copy()
+    parts = parts.rename(columns={'latitude': 'lat', 'longitude': 'lon'})
     idx = []
-    fold_test_lats = this_locs[:,0]
-    fold_test_lons = this_locs[:,1]
+    fold_test_lats = this_locs[:, 0]
+    fold_test_lons = this_locs[:, 1]
     for i in range(len(parts)):
         this_lat = float(parts.iloc[i]['lat'])
         this_lon = float(parts.iloc[i]['lon'])
@@ -261,7 +255,6 @@ def train_fold_k(
     total_obs = len(remaining_lfmc_insitu)
     desired_val_obs = int(total_obs * val_split)
     val_locs = create_site_split(
-        remaining_daily_data,
         remaining_info,
         desired_val_obs
     )
@@ -270,10 +263,11 @@ def train_fold_k(
     val_lons = val_locs[:,1]
     # --- 1) Parse lat/lon from remaining_info['day_lat_lon'] ---
     # day_lat_lon format: 'YYYY-MM-DD_<lat>_<lon>'
-    parts = remaining_info['day_lat_lon'].str.rsplit('_', n=2, expand=True)
+    parts = remaining_info[['date', 'latitude', 'longitude']].copy()
+    parts = parts.rename(columns={'latitude': 'lat', 'longitude': 'lon'})
     # columns: [date, lat, lon]
-    info_lats = parts[1].astype(float).to_numpy()
-    info_lons = parts[2].astype(float).to_numpy()
+    info_lats = parts['lat'].astype(float).to_numpy()
+    info_lons = parts['lon'].astype(float).to_numpy()
     # --- 2) Build (N,2) and (M,2) pairs on the same device/dtype as your tensors ---
     # choose a reference tensor to inherit device/dtype
     dtype = remaining_daily_data.dtype
@@ -484,8 +478,10 @@ def train_fold_k(
         # R2
         val_r2 = r2_score(val_lfmc_insitu_denorm, this_val_preds_denorm)
         print(f'Validation R2: {val_r2:.4f}')
+        val_rmse = np.sqrt(np.mean((this_val_preds_denorm - val_lfmc_insitu_denorm) ** 2))
+        print(f'Validation RMSE: {val_rmse:.4f}')
         # check early stopping
-        early_stopping(val_mae)
+        early_stopping(val_rmse)
         if early_stopping.save_model:
             print('New best model, saving...')
             model_save_path = os.path.join(
@@ -530,7 +526,8 @@ def train_fold_k(
     val_lfmc_insitu_denorm = val_lfmc_insitu.numpy() * y_std + y_mean
     val_mae = np.mean(np.abs(val_preds_denorm - val_lfmc_insitu_denorm))
     val_r2 = r2_score(val_lfmc_insitu_denorm, val_preds_denorm)
-    print(f'Validation Loss: {val_loss:.4f}, Validation MAE: {val_mae:.4f}, Validation R2: {val_r2:.4f}')
+    val_rmse = np.sqrt(np.mean((val_preds_denorm - val_lfmc_insitu_denorm) ** 2))
+    print(f'Validation Loss: {val_loss:.4f}, Validation MAE: {val_mae:.4f}, Validation R2: {val_r2:.4f}, Validation RMSE: {val_rmse:.4f}')
     # run the test
     print('running test with best model')
     (
@@ -551,12 +548,14 @@ def train_fold_k(
         test_lfmc_insitu_denorm = np.array([])
         test_mae = np.nan
         test_r2 = np.nan
+        test_rmse = np.nan
     else:
         test_preds_denorm = test_preds * y_std + y_mean
         test_lfmc_insitu_denorm = test_lfmc_insitu.numpy() * y_std + y_mean
         test_mae = np.mean(np.abs(test_preds_denorm - test_lfmc_insitu_denorm))
         test_r2 = r2_score(test_lfmc_insitu_denorm, test_preds_denorm)
-        print(f'Test Loss: {test_loss:.4f}, Test MAE: {test_mae:.4f}, Test R2: {test_r2:.4f}')
+        test_rmse = np.sqrt(np.mean((test_preds_denorm - test_lfmc_insitu_denorm) ** 2))
+        print(f'Test Loss: {test_loss:.4f}, Test MAE: {test_mae:.4f}, Test R2: {test_r2:.4f}, Test RMSE: {test_rmse:.4f}')
     # save the outputs
     torch.save(
         {
@@ -657,13 +656,15 @@ def main():
     total_obs = daily_data.shape[0]
     desired_obs_per_fold = total_obs / n_folds
     fold_locs = {}
+    used_sites = []
     for fold in range(n_folds):
         this_locs = create_site_split(
-            daily_data,
             info,
-            desired_obs_per_fold
+            desired_obs_per_fold,
+            used_sites=used_sites
         )
         fold_locs[fold + 1] = this_locs
+        used_sites.extend(this_locs)
     # save this fold info
     with open(os.path.join(full_save_dir, 'fold_info.json'), 'w') as f:
         json.dump(fold_locs, f)

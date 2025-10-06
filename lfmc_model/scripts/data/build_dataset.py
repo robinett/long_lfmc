@@ -16,6 +16,8 @@ import ast
 import fnmatch
 from typing import Optional, Tuple, List, Dict
 import json
+import xarray as xr
+import rioxarray as rxr
 
 # append up one dir to path
 sys.path.append(sys.path[0] + '/../..')
@@ -31,7 +33,26 @@ def _detect_reason_columns(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
     filled_cols    = [c for c, b in base.items() if b.endswith("_filled")]
     return retrieved_cols, filled_cols
 
-def drop_nans_with_reasons(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int]]:
+def drop_nans_with_reasons(
+    df: pd.DataFrame
+) -> Tuple[pd.DataFrame, Dict[str, int], Dict[str, pd.DataFrame]]:
+    """
+    Drops any row with ≥1 NaN. Returns:
+      kept_df: rows with no NaNs anywhere
+      counts:  totals per drop reason (same keys as before + a few helpers)
+      dropped: dataframes for each reason bucket
+
+    Buckets (mutually exclusive, sum to total_nan_rows):
+      - only_retrieved
+      - only_filled
+      - both
+      - other   (NaNs outside retrieved/filled cols)
+
+    Convenience (overlapping) views also included:
+      - retrieved_any = only_retrieved ∪ both
+      - filled_any    = only_filled ∪ both
+      - any_nan       = all dropped rows
+    """
     retrieved_cols, filled_cols = _detect_reason_columns(df)
 
     nan_mask = df.isna().any(axis=1)
@@ -55,7 +76,8 @@ def drop_nans_with_reasons(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, in
     # "other" = NaNs outside retrieved/filled columns
     reason_cols = sorted(set(retrieved_cols) | set(filled_cols))
     if reason_cols:
-        other_nan = ~retrieved_nan & ~filled_nan & nan_rows.drop(columns=reason_cols).isna().any(axis=1)
+        other_nan = (~retrieved_nan & ~filled_nan &
+                     nan_rows.drop(columns=reason_cols).isna().any(axis=1))
     else:
         # no retrieved/filled columns at all → everything is "other"
         other_nan = pd.Series(True, index=nan_rows.index, dtype=bool)
@@ -84,7 +106,20 @@ def drop_nans_with_reasons(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, in
         "only_filled": only_fill_count,
         "other": other_count,
     }
-    return kept, counts
+
+    # Build the dropped DataFrame views
+    dropped = {
+        "only_retrieved": nan_rows.loc[only_ret].copy(),
+        "only_filled":    nan_rows.loc[only_fill].copy(),
+        "both":           nan_rows.loc[both_nan].copy(),
+        "other":          nan_rows.loc[other_nan].copy(),
+        # convenience (overlapping) views:
+        "retrieved_any":  nan_rows.loc[only_ret | both_nan].copy(),
+        "filled_any":     nan_rows.loc[only_fill | both_nan].copy(),
+        "any_nan":        nan_rows.copy(),
+    }
+
+    return kept, counts, dropped
 
 def init_nan_totals() -> Dict[str, int]:
     return {
@@ -159,7 +194,18 @@ def load_and_clean_csv(
     predominantly numeric (>= numeric_threshold) to float. Preserves
     categorical/text columns.
     """
-    df = pd.read_csv(path, parse_dates=[date_col])
+    df = pd.read_csv(
+        path,
+        parse_dates=[date_col],
+        dtype={
+            "category": "string",
+            "sub_category": "string",
+            "sample_status": "string",
+            "site_name": "string",
+            "fuel_type": "string",
+            "method": "string",
+        }
+    )
 
     # Normalize scalar-ish cells
     for col in df.columns:
@@ -208,39 +254,6 @@ def filter_lag_columns(
         raise ValueError(f"Unmatched lag suffixes: {unmatched_suffixes}")
     return df[cols_to_keep]    
 
-#def df_to_tensor(
-#    df: pd.DataFrame,
-#    base_vars,
-#    lag_suffix
-#) -> torch.Tensor:
-#    """
-#    (same as before) returns a tensor of shape (N, seq_len, len(base_vars))
-#    """
-#    first = base_vars[0]
-#    if lag_suffix is None:
-#        auto_pat = re.compile(rf'^{re.escape(first)}_lag_\d+(\D+)$')
-#        suffixes = {m.group(1) for col in df.columns if (m := auto_pat.match(col))}
-#        if not suffixes:
-#            raise ValueError(f"No lag columns for {first} to detect suffix")
-#        if len(suffixes) > 1:
-#            raise ValueError(f"Multiple suffixes {suffixes} for {first}")
-#        lag_suffix = suffixes.pop()
-#    # find all lag indices
-#    pat0 = re.compile(rf'^{re.escape(first)}_lag_(\d+){re.escape(lag_suffix)}$')
-#    lags = sorted(int(m.group(1)) for col in df.columns if (m := pat0.match(col)))
-#    if not lags:
-#        raise ValueError(f"No columns matching {first}_lag_<N>{lag_suffix}")
-#    arrays = []
-#    for var in base_vars:
-#        pat = re.compile(rf'^{re.escape(var)}_lag_(\d+){re.escape(lag_suffix)}$')
-#        found = {int(m.group(1)): col for col in df.columns if (m := pat.match(col))}
-#        if set(found) != set(lags):
-#            raise ValueError(f"{var} has lags {sorted(found)} but expected {lags}")
-#        cols = [found[i] for i in lags]
-#        arrays.append(df[cols].values[..., None])
-#    print(arrays)
-#    return torch.from_numpy(np.concatenate(arrays, axis=-1)).float()
-
 def _coerce_numeric_block(df_block: pd.DataFrame) -> np.ndarray:
     """Coerce a DataFrame block to float32 numpy (handles object dtypes)."""
     def _to_scalar(x):
@@ -265,7 +278,7 @@ def df_to_tensor(
     df: pd.DataFrame,
     base_vars,
     lag_suffix=None,
-    static_broadcast_to: int | None = None,
+    static_broadcast_to=None
 ) -> torch.Tensor:
     """
     Convert a DataFrame to a tensor of shape (N, seq_len, V).
@@ -342,6 +355,8 @@ def build_inputs(
     save_dir,
     model_name='transformer',
     acceptable_lfmc_range=(30,500), # Example range for LFMC, adjust
+    num_rs_samples=0.0, # will include num_nfmd_samples * factor random samples from RS data
+    make_plots=False
 ):
     totals = init_nan_totals()
     for c,csv in enumerate(csvs):
@@ -362,53 +377,47 @@ def build_inputs(
         missing_cols = [col for col in required_cols if col not in df.columns]
         if missing_cols:
             raise ValueError(f'Missing columns in {csv}: {missing_cols}')
-        df = df[required_cols + ['date']]
+        # make sure that this is a unique list
+        required_cols = list(dict.fromkeys(required_cols))
+        df = df[required_cols]
         # get rid of any columns outside of the acceptable lfmc range
         df = df[(df['lfmc'] >= acceptable_lfmc_range[0]) & (df['lfmc'] <= acceptable_lfmc_range[1])]
         # get rid of any rows with nans
-        df, nan_counts = drop_nans_with_reasons(df)
+        df, nan_counts, dropped_dfs = drop_nans_with_reasons(df)
         totals = accumulate_nan_counts(totals,nan_counts)
-        #base_feature_name = {
-        #    col: col.split('_lag_')[0] if '_lag_' in col else col
-        #    for col in df.columns
-        #}
-        #retrieved_cols = [
-        #    col for col, base in base_feature_name.items()
-        #    if base.startswith('retrieved')
-        #]
-        #filled_cols = [
-        #    col for col, base in base_feature_name.items()
-        #    if base.endswith('_filled')
-        #]
-        #nan_row_mask = df.isna().any(axis=1)
-        #total_nan_rows = int(nan_row_mask.sum())
-        #if total_nan_rows:
-        #    nan_rows = df.loc[nan_row_mask]
-        #    retrieved_nan_rows = (
-        #        nan_rows[retrieved_cols].isna().any(axis=1)
-        #        if retrieved_cols else pd.Series(False, index=nan_rows.index)
-        #    )
-        #    filled_nan_rows = (
-        #        nan_rows[filled_cols].isna().any(axis=1)
-        #        if filled_cols else pd.Series(False, index=nan_rows.index)
-        #    )
-        #    retrieved_count = int(retrieved_nan_rows.sum())
-        #    filled_count = int(filled_nan_rows.sum())
-        #    both_count = int((retrieved_nan_rows & filled_nan_rows).sum())
-        #    total_removed += total_nan_rows
-        #    total_removed_modis += filled_count
-        #    total_removed_retrieved += retrieved_count
-        #    total_removed_both += both_count
-        #    print(
-        #        'Dropping {total} rows due to NaNs '
-        #        '(retrieved static: {retrieved}, filled MODIS: {filled}, both: {both})'.format(
-        #            total=total_nan_rows,
-        #            retrieved=retrieved_count,
-        #            filled=filled_count,
-        #            both=both_count
-        #        )
-        #    )
-        #    df = df.loc[~nan_row_mask]
+        # make the plots diagnosing why rows were dropped, if desired
+        if make_plots:
+            dropped_for_retrieval = dropped_dfs['retrieved_any']
+            # accumulate location and date
+            if c == 0:
+                dropped_dates = dropped_for_retrieval['date'].dt.date.tolist()
+                dropped_lats = dropped_for_retrieval['latitude'].tolist()
+                dropped_lons = dropped_for_retrieval['longitude'].tolist()
+            else:
+                dropped_dates.extend(dropped_for_retrieval['date'].dt.date.tolist())
+                dropped_lats.extend(dropped_for_retrieval['latitude'].tolist())
+                dropped_lons.extend(dropped_for_retrieval['longitude'].tolist())
+        # add in the remote sensing samples according to the specified factor
+        # get the number of insitu samples
+        in_situ_df = df[df['source'] == 'nfmd']
+        num_insitu_samples = in_situ_df.shape[0]
+        source_labels = np.ones(len(in_situ_df), dtype=int)
+        # sample from the rs dataframe
+        rs_df = df[df['source'] == 'rs']
+        if num_rs_samples > len(rs_df):
+            print(
+                f"Warning: requested {num_rs_samples} samples from remote sensing"
+                f" data, but only {len(rs_df)} available."
+            )
+            print("Using all available samples.")
+            this_num_rs_samples = len(rs_df)
+        else:
+            this_num_rs_samples = int(num_rs_samples)
+        rs_samples = rs_df.sample(n=this_num_rs_samples, random_state=42)
+        df = pd.concat([in_situ_df, rs_samples], ignore_index=True)
+        source_labels = np.concatenate(
+            [source_labels, np.zeros(len(rs_samples), dtype=int)]
+        )
         # separate out our different dataframes
         print('Separating variables')
         all_vars = df.columns.tolist()
@@ -447,6 +456,7 @@ def build_inputs(
                 target_col,
                 None
             )
+            source = torch.from_numpy(source_labels)
             all_info_df = copy.deepcopy(info_df)
         else:
             X_daily = torch.cat(
@@ -473,10 +483,81 @@ def build_inputs(
                 )),
                 dim=0
             )
+            source = torch.cat(
+                (source, torch.from_numpy(source_labels)),
+                dim=0
+            )
             all_info_df = pd.concat(
                 [all_info_df, info_df],
                 ignore_index=True
             )
+        print('current all info df:')
+        print(all_info_df)
+    # check why we are dropping data for Krishna's retrievals, if requested
+    if make_plots:
+        # for testing
+        dropped_dates = dropped_dates
+        dropped_lats = dropped_lats
+        dropped_lons = dropped_lons
+        # first we need to load up globcover
+        cover_da = rxr.open_rasterio(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/globcover/'
+            'GLOBCOVER_L4_200901_200912_V2.3.tif'
+        )
+        cover_keys_df = pd.read_excel(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/globcover/'
+            'Globcover2009_Legend.xls'
+        )
+        value_to_label = dict(zip(cover_keys_df['Value'], cover_keys_df['Label']))
+        # get the value for the first lat/lon just so that we can see what the data looks liek
+        if 'band' in cover_da.dims and len(cover_da['band']) == 1:
+            cover_da = cover_da.squeeze('band', drop=True)
+        points = np.arange(len(dropped_lons))
+        vals_da = cover_da.interp(
+            x=xr.DataArray(dropped_lons, dims="points"),
+            y=xr.DataArray(dropped_lats, dims="points"),
+            method="nearest"
+        )
+        all_cover_vals = vals_da.values
+        meaningful_labels = [value_to_label[v] for v in all_cover_vals]
+        # count the different labels
+        label_counts = Counter(meaningful_labels)
+        labels,counts = zip(*label_counts.items())
+        # bar plot of the labels
+        plotting.bar_plot(
+            labels,
+            counts,
+            'Land Cover Types',
+            'Frequency',
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/plots/dropped_retrieved_landcover.png'
+        )
+        # plot the distribution of dates by month
+        months = [d.month for d in dropped_dates]
+        month_counts = Counter(months)
+        values = [month_counts.get(i, 0) for i in range(1, 13)]
+        month_labels = [
+            'Jan','Feb','Mar','Apr','May','Jun',
+            'Jul','Aug','Sep','Oct','Nov','Dec'
+        ]
+        plotting.bar_plot(
+            month_labels,
+            values,
+            'Month',
+            'Frequency',
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/plots/dropped_retrieved_months.png'
+        )
+        # plot a map of all the dropped points
+        # get the unique list of points and their counts
+        point_tuples = list(zip(dropped_lats,dropped_lons))
+        point_counts = Counter(point_tuples)
+        unique_lats,unique_lons = zip(*point_counts.keys())
+        counts = list(point_counts.values())
+        plotting.map_points(
+            unique_lons,
+            unique_lats,
+            counts,
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/plots/dropped_retrieved_map.png'
+        )
     print(f'Total rows removed due to NaNs: {totals["total_nan_rows"]}')
     print(f'  of which due to filled MODIS: {totals["filled"]}')
     print(f'  of which due to retrieved static: {totals["retrieved"]}')
@@ -484,6 +565,9 @@ def build_inputs(
     print(f'  of which are solely retrieved static: {totals["only_retrieved"]}')
     print(f'  of which are solely filled MODIS: {totals["only_filled"]}')
     print(f'  of which are other: {totals["other"]}')
+    frac_insitu = (source == 1).sum().item() / len(source)
+    frac_rs = (source == 0).sum().item() / len(source)
+    print(f'In final dataset, fraction insitu: {frac_insitu:.3f}, fraction rs: {frac_rs:.3f}')
     print(f'X_daily shape: {X_daily.shape}')
     print(f'X_static shape: {X_static.shape}')
     print(f'Y shape: {Y.shape}')
@@ -493,8 +577,8 @@ def build_inputs(
     torch.save(X_daily,os.path.join(save_dir,'X_daily.pt'))
     torch.save(X_static,os.path.join(save_dir,'X_static.pt'))
     torch.save(Y,os.path.join(save_dir,'Y.pt'))
+    torch.save(source,os.path.join(save_dir,'source.pt'))
     all_info_df.to_csv(os.path.join(save_dir,'info.csv'),index=False)
-
 
 if __name__ == "__main__":
     # set random seed for reproducibility
@@ -505,7 +589,7 @@ if __name__ == "__main__":
     save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs'
     csv_names = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/compiled/'
-        'y_Insitu_X_ModisfilledDaymetStaticKrishnastatsWeatherstats_30days/'
+        'y_InsituRs_X_ModisfilledDaymetStaticKrishnastatsWeatherstats_30days/'
         'compiled_data_*.csv'
     )
     csv_names = sorted(glob.glob(csv_names))
@@ -534,8 +618,15 @@ if __name__ == "__main__":
         #'rolling_vp_14_days'
     ]
     target_col = ['lfmc']
+    num_rs_samples = 0
+    #num_rs_samples = 3000.0
+    #num_rs_samples = 6000.0
+    #num_rs_samples = 1000000.0
     info_features = [
-        'day_lat_lon','source'
+        'date',
+        'latitude',
+        'longitude',
+        'source'
     ]
     # save the variable names for later use
     var_names = {
@@ -561,5 +652,7 @@ if __name__ == "__main__":
         lag_days=lag_days,
         save_dir=save_dir,
         model_name='transformer',
-        acceptable_lfmc_range=acceptable_lfmc_range
+        acceptable_lfmc_range=acceptable_lfmc_range,
+        num_rs_samples=num_rs_samples,
+        make_plots=False
     )

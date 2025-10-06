@@ -13,7 +13,11 @@ def main():
         '/scratch/users/trobinet/long_lfmc/trent_datasets/nfmd/'
         'Site_Metadata.csv'
     )
-    start = datetime.datetime(203, 1, 1)
+    nlcd_raw_fname = (
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/nlcd/'
+        'nlcd_2003_2023.zarr'
+    )
+    start = datetime.datetime(2003, 1, 1)
     end = datetime.datetime(2023, 12, 31)
     nfmd_process_fname = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/nfmd/'
@@ -29,6 +33,7 @@ def main():
     process_nfmd.process(
         orig_csv_fname,
         nfmd_loc_fname,
+        nlcd_raw_fname,
         start,
         end,
         bound_box,
