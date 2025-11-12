@@ -10,18 +10,9 @@ def date_from_path(p):
     date_re = re.compile(r"(\d{4}-\d{2}-\d{2})")
     return np.datetime64(date_re.search(p).group(1))
 
-def preprocess(ds, path=None):
-    # rename 'band_data' -> 'lfmc'
-    ds = ds.rename({"band_data": "lfmc"})
-    # attach time from filename
-    if path is not None:
-        t = date_from_path(path)
-        t = np.datetime64(t,'ns')
-        ds = ds.expand_dims({"time": [t]})
-    return ds
-
-def sample_lfmc_by_pixels_non_nan(
+def sample_by_pixels_non_nan(
     ds: xr.Dataset,
+    var_to_sample,
     num_to_sample: int = 1_000_000,
     seed: int = 42,
     pixel_batch_size: int = 10_000,   # number of pixels to evaluate per batch
@@ -33,16 +24,16 @@ def sample_lfmc_by_pixels_non_nan(
     collected exactly `num_to_sample` non-NaN observations (truncating the last pixel
     if needed). Counts only non-NaN entries toward the total.
 
-    Returns a shuffled pandas.DataFrame with columns:
+    Returns a pandas.DataFrame with columns:
         ['date', 'latitude', 'longitude', 'lfmc']
     """
     # Ensure consistent dimension order
-    da = ds["lfmc"].transpose("time", "y", "x")
+    da = ds[var_to_sample].transpose("time", "y", "x")
     T, Y, X = (int(da.sizes[d]) for d in ("time", "y", "x"))
     total_pixels = Y * X
 
     if num_to_sample <= 0:
-        return pd.DataFrame(columns=["date", "latitude", "longitude", "lfmc"])
+        return pd.DataFrame(columns=["date", "latitude", "longitude", var_to_sample])
 
     rng = np.random.default_rng(seed)
     time_vals_full = ds["time"].values
@@ -58,7 +49,7 @@ def sample_lfmc_by_pixels_non_nan(
     dates_buf = []
     lats_buf  = []
     lons_buf  = []
-    lfmc_buf  = []
+    var_buf  = []
 
     # Draw safety
     # This caps how many pixel *draws* we're willing to try
@@ -129,7 +120,7 @@ def sample_lfmc_by_pixels_non_nan(
                 continue
 
             # Values and times for this pixel
-            lfmc_p = vals[t_valid, p]
+            var_p = vals[t_valid, p]
             dates_p = time_vals_full[t_valid]
 
             # Lat/Lon for this pixel (scalar each, repeat to match t_valid)
@@ -141,16 +132,16 @@ def sample_lfmc_by_pixels_non_nan(
             if t_valid.size > remain:
                 # Truncate this last pixel to hit target exactly
                 t_valid = t_valid[:remain]
-                lfmc_p = lfmc_p[:remain]
+                var_p = var_p[:remain]
                 dates_p = dates_p[:remain]
 
             dates_buf.append(dates_p)
-            lfmc_buf.append(lfmc_p)
+            var_buf.append(var_p)
             # Repeat scalars per valid time
-            lats_buf.append(np.full_like(lfmc_p, fill_value=lat_p, dtype=float))
-            lons_buf.append(np.full_like(lfmc_p, fill_value=lon_p, dtype=float))
+            lats_buf.append(np.full_like(var_p, fill_value=lat_p, dtype=float))
+            lons_buf.append(np.full_like(var_p, fill_value=lon_p, dtype=float))
 
-            total_kept += lfmc_p.size
+            total_kept += var_p.size
             selected_pixels.add(pix_flat)
 
             if total_kept >= num_to_sample:
@@ -161,7 +152,7 @@ def sample_lfmc_by_pixels_non_nan(
         "date":      np.concatenate(dates_buf),
         "latitude":  np.concatenate(lats_buf),
         "longitude": np.concatenate(lons_buf),
-        "lfmc":      np.concatenate(lfmc_buf),
+        var_to_sample:  np.concatenate(var_buf),
     })
     assert len(out) == num_to_sample, (len(out), num_to_sample)
     return out
@@ -169,27 +160,19 @@ def sample_lfmc_by_pixels_non_nan(
 
 def main():
     # glob pattern to pick up everything
-    paths = sorted(
-        glob.glob("/scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_regrid/*/*/*.nc4")
+    sar_ds = xr.open_zarr(
+        "/scratch/users/trobinet/long_lfmc/trent_datasets/sar/sar_formatted.zarr",
+        chunks="auto",
     )
-    # build dataset lazily with Dask
-    print("Opening datasets...")
-    for p,pth in enumerate(paths):
-        print(f'Opening dataset {p+1} of {len(paths)}: {pth}')
-        this_ds = xr.open_dataset(
-            pth,
-            engine='netcdf4',
+    vars_to_sample = ['VV', 'VH', 'vv_minus_vh']
+    for var in vars_to_sample:
+        print(f"Sampling {var}...")
+        sampled_sar = sample_by_pixels_non_nan(sar_ds, var, num_to_sample=100_000, seed=42)
+        var_fmt = var.lower()
+        sampled_sar.to_csv(
+            f"/scratch/users/trobinet/long_lfmc/trent_datasets/sar/sampled/{var_fmt}_samples.csv",
+            index=False
         )
-        this_ds = preprocess(this_ds, path=pth)
-        if p == 0:
-            ds = this_ds
-        else:
-            ds = xr.concat([ds, this_ds], dim="time")
-    sampled_lfmc = sample_lfmc_by_pixels_non_nan(ds, num_to_sample=1_000_000, seed=42)
-    sampled_lfmc.to_csv(
-        "/scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_lfmc_samples.csv",
-        index=False
-    )
 
 if __name__ == "__main__":
     main()

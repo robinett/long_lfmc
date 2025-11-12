@@ -20,6 +20,7 @@ sys.path.append(os.path.join(project_root,'lfmc_model','utils'))
 
 from transformer_model import LFMCTransformer
 from transformer_model_multitask import LFMCTransformer as LFMCTransformerMultiTask
+from transformer_multitask_longclimate import LFMCTransformer as LFMCTransformerMultiTaskLongClimate
 import plotting
 
 import warnings
@@ -67,7 +68,8 @@ def fuse_gaussians(mu_i, logv_i, mu_r, logv_r,
 
 def mask_location_data_fast(
     keep_locs,            # np.array (K,2) [lat, lon] in degrees
-    daily_data,           # torch.Tensor [N, ...]
+    short_data,
+    long_data,           # torch.Tensor [N, ...]
     static_data,          # torch.Tensor [N, ...]
     lfmc_insitu,          # torch.Tensor [N, ...]
     source,               # torch.Tensor [N]
@@ -80,8 +82,8 @@ def mask_location_data_fast(
     if len(info) == 0 or len(keep_locs) == 0:
         # nothing to keep or nothing to act on → everything is remaining
         empty = slice(0, 0)
-        return (daily_data[empty], static_data[empty], lfmc_insitu[empty], source[empty], info.iloc[:0],
-                daily_data, static_data, lfmc_insitu, source, info)
+        return (short_data[empty], long_data[empty], static_data[empty], lfmc_insitu[empty], source[empty], info.iloc[:0],
+                short_data, long_data, static_data, lfmc_insitu, source, info)
 
     # Prepare coordinates
     all_lats = np.asarray(info["latitude"], dtype=float)
@@ -118,85 +120,23 @@ def mask_location_data_fast(
     m_rem  = torch.from_numpy(mask_remaining)
 
     # Slice outputs
-    kept_daily_data   = daily_data[m_kept]
+    kept_short_data   = short_data[m_kept]
+    kept_long_data    = long_data[m_kept]
     kept_static_data  = static_data[m_kept]
     kept_lfmc_insitu  = lfmc_insitu[m_kept]
     kept_source       = source[m_kept]
     kept_info         = info.loc[mask_kept]
 
-    remaining_daily_data   = daily_data[m_rem]
+    remaining_short_data   = short_data[m_rem]
+    remaining_long_data    = long_data[m_rem]
     remaining_static_data  = static_data[m_rem]
     remaining_lfmc_insitu  = lfmc_insitu[m_rem]
     remaining_source       = source[m_rem]
     remaining_info         = info.loc[mask_remaining]
 
     return (
-        kept_daily_data, kept_static_data, kept_lfmc_insitu, kept_source, kept_info,
-        remaining_daily_data, remaining_static_data, remaining_lfmc_insitu, remaining_source, remaining_info
-    )
-
-
-def mask_location_data(
-    test_locs,
-    daily_data,
-    static_data,
-    lfmc_insitu,
-    source,
-    info,
-    rs_masking_radius_m=600.0
-):
-    all_lats = info["latitude"].astype(float).to_numpy()
-    all_lons = info["longitude"].astype(float).to_numpy()
-    # ensure source is a numpy array of ints
-    source_np = source.numpy().astype(int)
-    fold_test_lats = np.asarray(test_locs[:,0])
-    fold_test_lons = np.asarray(test_locs[:,1])
-    # radius of the earth in meters
-    R = 6371000.0
-    # check points within 250m
-    lat1 = np.deg2rad(all_lats)[:, None]
-    lon1 = np.deg2rad(all_lons)[:, None]
-    lat2 = np.deg2rad(fold_test_lats)[None, :]
-    lon2 = np.deg2rad(fold_test_lons)[None, :]
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = (
-        np.sin(dlat / 2.0) ** 2 +
-        np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
-    )
-    c = 2.0 * np.arcsin(np.sqrt(a))
-    dist_m = R * c
-    min_dist_m = np.min(dist_m, axis=1)
-    within_masking_dist = min_dist_m <= rs_masking_radius_m
-    # build indices
-    test_idx = np.nonzero(within_masking_dist & (source_np == 1))[0].tolist()
-    delete_idx = np.nonzero(within_masking_dist & (source_np == 0))[0].tolist()
-    N = len(info)
-    mask_test = np.zeros(N, dtype=bool)
-    mask_delete = np.zeros(N, dtype=bool)
-    mask_test[test_idx] = True
-    mask_delete[delete_idx] = True
-    mask_keep = ~(mask_test | mask_delete)
-    m_test = torch.as_tensor(
-        mask_test,
-        dtype=torch.bool,
-    )  m_keep = torch.as_tensor(
-        mask_keep,
-        dtype=torch.bool,
-    )
-    test_daily_data = daily_data[m_test]
-    test_static_data = static_data[m_test]
-    test_lfmc_insitu = lfmc_insitu[m_test]
-    test_source = source[m_test]
-    test_info = info.iloc[mask_test]
-    remaining_daily_data = daily_data[m_keep]
-    remaining_static_data = static_data[m_keep]
-    remaining_lfmc_insitu = lfmc_insitu[m_keep]
-    remaining_source = source[m_keep]
-    remaining_info = info.iloc[mask_keep]
-    return (
-        test_daily_data, test_static_data, test_lfmc_insitu, test_source, test_info,
-        remaining_daily_data, remaining_static_data, remaining_lfmc_insitu, remaining_source, remaining_info
+        kept_short_data, kept_long_data, kept_static_data, kept_lfmc_insitu, kept_source, kept_info,
+        remaining_short_data, remaining_long_data, remaining_static_data, remaining_lfmc_insitu, remaining_source, remaining_info
     )
 
 class GaussianNLLLoss(nn.Module):
@@ -246,8 +186,12 @@ class GaussianNLLLoss(nn.Module):
 
 def load_data(center_data_dir):
     # load all the center data
-    X_daily = torch.load(
-        os.path.join(center_data_dir, 'X_daily.pt'),
+    X_short = torch.load(
+        os.path.join(center_data_dir, 'X_short.pt'),
+        weights_only=False
+    )
+    X_long = torch.load(
+        os.path.join(center_data_dir, 'X_long.pt'),
         weights_only=False
     )
     X_static = torch.load(
@@ -265,7 +209,7 @@ def load_data(center_data_dir):
     # load the center info
     center_info = pd.read_csv(os.path.join(center_data_dir, 'info.csv'))
     all_center_data = [
-        X_daily, X_static, Y_lfmc, source, center_info
+        X_short, X_long, X_static, Y_lfmc, source, center_info
     ]
     return all_center_data
 
@@ -434,19 +378,20 @@ def run_model(
     out_logv_rs = []
     out_true_i = []
     out_true_rs = []
-    for Xd_b,Xs_b,Y_b,insitu_b in pbar:
+    for Xsh_b,Xl_b,Xst_b,Y_b,insitu_b in pbar:
         # move data to device
-        Xd_b = Xd_b.to(device=device, dtype=torch.float32)
-        Xs_b = Xs_b.to(device=device, dtype=torch.float32)
+        Xsh_b = Xsh_b.to(device=device, dtype=torch.float32)
+        Xl_b = Xl_b.to(device=device, dtype=torch.float32)
+        Xst_b = Xst_b.to(device=device, dtype=torch.float32)
         Y_b = Y_b.to(device=device, dtype=torch.float32)
         insitu_b = insitu_b.to(device=device, dtype=torch.float32)
         Y_b = Y_b.view(-1)
         insitu_b = insitu_b.view(-1)
         if train_model:
-            preds = model(Xd_b, Xs_b)
+            preds = model(Xsh_b, Xl_b, Xst_b)
         else:
             with torch.no_grad():
-                preds = model(Xd_b, Xs_b)
+                preds = model(Xsh_b, Xl_b, Xst_b)
         mu_i_b = preds['mu_insitu']
         logv_i_b = preds['log_var_insitu']
         #logv_i_b = torch.zeros_like(mu_i_b)  # homoscedastic for insitu
@@ -491,7 +436,10 @@ def run_model(
         running_loss = running_loss_insitu + running_loss_rs * lambda_rs
         running_loss /= (n_i_tot + lambda_rs * n_rs_tot)
         running_loss_insitu /= n_i_tot
-        running_loss_rs /= n_rs_tot
+        if n_rs_tot > 0:
+            running_loss_rs /= n_rs_tot
+        else:
+            running_loss_rs = 0.0
     else:
         running_loss = None
         running_loss_insitu = None
@@ -551,17 +499,19 @@ def train_fold_k(
     if not os.path.exists(fold_save_dir):
         os.makedirs(fold_save_dir)
     # split out the test data
-    daily_data = data[0]
-    static_data = data[1]
-    lfmc = data[2]
-    source = data[3]
-    info = data[4]
+    short_data = data[0]
+    long_data = data[1]
+    static_data = data[2]
+    lfmc = data[3]
+    source = data[4]
+    info = data[5]
     (
-        test_daily_data, test_static_data, test_lfmc, test_source, test_info,
-        remaining_daily_data, remaining_static_data, remaining_lfmc, remaining_source, remaining_info
+        test_short_data, test_long_data, test_static_data, test_lfmc, test_source, test_info,
+        remaining_short_data, remaining_long_data, remaining_static_data, remaining_lfmc, remaining_source, remaining_info
     ) = mask_location_data_fast(
         this_locs,
-        daily_data,
+        short_data,
+        long_data,
         static_data,
         lfmc,
         source,
@@ -580,11 +530,12 @@ def train_fold_k(
     val_locs = np.array(val_locs)
     # perform the same masking as was done for the test sites
     (
-        val_daily_data, val_static_data, val_lfmc, val_source, val_info,
-        train_daily_data, train_static_data, train_lfmc, train_source, train_info
+        val_short_data, val_long_data, val_static_data, val_lfmc, val_source, val_info,
+        train_short_data, train_long_data, train_static_data, train_lfmc, train_source, train_info
     ) = mask_location_data_fast(
         val_locs,
-        remaining_daily_data,
+        remaining_short_data,
+        remaining_long_data,
         remaining_static_data,
         remaining_lfmc,
         remaining_source,
@@ -631,13 +582,15 @@ def train_fold_k(
             plot_save_dir
         )
     print('Normalizing the data')
-    train_daily_mean = np.nanmean(train_daily_data, axis=(0,1))
-    train_daily_std = np.nanstd(train_daily_data, axis=(0,1))
+    train_short_mean = np.nanmean(train_short_data, axis=(0,1))
+    train_short_std = np.nanstd(train_short_data, axis=(0,1))
+    train_long_std = np.nanstd(train_long_data, axis=(0,1))
+    train_long_mean = np.nanmean(train_long_data, axis=(0,1))
     train_static_mean = np.nanmean(train_static_data, axis=(0,1))
     train_static_std = np.nanstd(train_static_data, axis=(0,1))
     y_mean = np.nanmean(train_lfmc)
     y_std = np.nanstd(train_lfmc)
-    for v,var in enumerate(var_names['daily_vars']):
+    for v,var in enumerate(var_names['short_vars']):
         if (
             '_sin' in var or
             '_cos' in var or
@@ -645,9 +598,20 @@ def train_fold_k(
             'zone' in var
         ):
             continue
-        train_daily_data[:,:,v] = (train_daily_data[:,:,v] - train_daily_mean[v]) / train_daily_std[v]
-        val_daily_data[:,:,v] = (val_daily_data[:,:,v] - train_daily_mean[v]) / train_daily_std[v]
-        test_daily_data[:,:,v] = (test_daily_data[:,:,v] - train_daily_mean[v]) / train_daily_std[v]
+        train_short_data[:,:,v] = (train_short_data[:,:,v] - train_short_mean[v]) / train_short_std[v]
+        val_short_data[:,:,v] = (val_short_data[:,:,v] - train_short_mean[v]) / train_short_std[v]
+        test_short_data[:,:,v] = (test_short_data[:,:,v] - train_short_mean[v]) / train_short_std[v]
+    for v,var in enumerate(var_names['long_vars']):
+        if (
+            '_sin' in var or
+            '_cos' in var or
+            'lag' in var or
+            'zone' in var
+        ):
+            continue
+        train_long_data[:,:,v] = (train_long_data[:,:,v] - train_long_mean[v]) / train_long_std[v]
+        val_long_data[:,:,v] = (val_long_data[:,:,v] - train_long_mean[v]) / train_long_std[v]
+        test_long_data[:,:,v] = (test_long_data[:,:,v] - train_long_mean[v]) / train_long_std[v]
     for v,var in enumerate(var_names['static_vars']):
         if (
             '_sin' in var or
@@ -664,8 +628,10 @@ def train_fold_k(
     test_lfmc = (test_lfmc - y_mean) / y_std
     # save the normalization parameters for later use
     norm_params = {
-        'train_daily_mean': train_daily_mean.tolist(),
-        'train_daily_std': train_daily_std.tolist(),
+        'train_short_mean': train_short_mean.tolist(),
+        'train_short_std': train_short_std.tolist(),
+        'train_long_mean': train_long_mean.tolist(),
+        'train_long_std': train_long_std.tolist(),
         'train_static_mean': train_static_mean.tolist(),
         'train_static_std': train_static_std.tolist(),
         'y_mean': y_mean.tolist(),
@@ -676,7 +642,8 @@ def train_fold_k(
         json.dump(norm_params, f)
     # create the datasets and dataloaders
     train_dataset = TensorDataset(
-        train_daily_data,
+        train_short_data,
+        train_long_data,
         train_static_data,
         train_lfmc,
         train_source
@@ -688,7 +655,8 @@ def train_fold_k(
         pin_memory=True
     )
     val_dataset = TensorDataset(
-        val_daily_data,
+        val_short_data,
+        val_long_data,
         val_static_data,
         val_lfmc,
         val_source
@@ -700,7 +668,8 @@ def train_fold_k(
         pin_memory=True
     )
     test_dataset = TensorDataset(
-        test_daily_data,
+        test_short_data,
+        test_long_data,
         test_static_data,
         test_lfmc,
         test_source
@@ -912,6 +881,14 @@ def train_fold_k(
         val_r2_rs = r2_score(lfmc_rs_val_true, lfmc_rs_val_only)
         val_nll_rs = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_rs_val_only) + ((lfmc_rs_val_true - lfmc_rs_val_only) ** 2) / (lfmc_std_rs_val_only ** 2)))
         val_rmse_rs = np.sqrt(np.mean((lfmc_rs_val_only - lfmc_rs_val_true) ** 2))
+    else:
+        lfmc_rs_val_only = np.nan
+        lfmc_std_rs_val_only = np.nan
+        lfmc_rs_val_true = np.nan
+        val_mae_rs = np.nan
+        val_r2_rs = np.nan
+        val_nll_rs = np.nan
+        val_rmse_rs = np.nan
     # average values for sanity check
     #avg_val_pred = np.mean(lfmc_i_val)
     #avg_val_true = np.mean(lfmc_i_val_true)
@@ -977,6 +954,14 @@ def train_fold_k(
             test_r2_rs = r2_score(lfmc_rs_test_true, lfmc_rs_test_only)
             test_nll_rs = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_rs_test_only) + ((lfmc_rs_test_true - lfmc_rs_test_only) ** 2) / (lfmc_std_rs_test_only ** 2)))
             test_rmse_rs = np.sqrt(np.mean((lfmc_rs_test_only - lfmc_rs_test_true) ** 2))
+        else:
+            lfmc_rs_test_only = np.nan
+            lfmc_std_rs_test_only = np.nan
+            lfmc_rs_test_true = np.nan
+            test_mae_rs = np.nan
+            test_r2_rs = np.nan
+            test_nll_rs = np.nan
+            test_rmse_rs = np.nan
         # average testues for sanity check
         #avg_test_pred = np.mean(lfmc_i_test)
         #avg_test_true = np.mean(lfmc_i_test_true)
@@ -1042,7 +1027,7 @@ def main():
     np.random.seed(42)
     # configs
     # directories, etc.
-    input_data_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs'
+    input_data_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_multitask_5'
     save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs'
     # training settings
     batch_size = 128
@@ -1051,10 +1036,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type != 'cuda':
         print('WARNING: CUDA not available, using CPU. This will be slow!')
-    warmup_steps = 1500
+    warmup_steps = 400
     base_lr = lr
     warmup_start_lr = 1e-6
-    val_split = 0.15
+    val_split = 0.2
     adam_weight_decay = 1e-4
     patience = 8
     # model hyperparameters (go back to the github and get what I deleted here)
@@ -1062,8 +1047,14 @@ def main():
     nhead = 2
     num_layers = 2
     dim_feedforward = 128
-    dropout = 0.15
+    dropout = 0.1
     rs_factor = 1.0 # weighting for RS loss
+    # long model hyperparameters
+    long_d_model = 128
+    long_nhead = 4
+    long_num_layers = 4
+    long_dim_feedforward = 256
+    long_out_dim = 64
     # load the data
     datasets = load_data(input_data_dir)
     var_names = json.load(
@@ -1071,21 +1062,27 @@ def main():
     )
     # get the input dims that we are working with to build the model
     short_input_dim = datasets[0].shape[-1]
-    static_input_dim = datasets[1].shape[-1]
-    # set up the save directories
-    full_save_dir = os.path.join(save_dir, this_model_name)
-    if os.path.exists(full_save_dir):
-        shutil.rmtree(full_save_dir)
-    os.makedirs(full_save_dir)
+    long_input_dim = datasets[1].shape[-1]
+    static_input_dim = datasets[2].shape[-1]
     # build the folds by location
-    daily_data = datasets[0]
-    info = datasets[4]
+    short_data = datasets[0]
+    long_data = datasets[1]
+    static_data = datasets[2]
+    info = datasets[5]
     num_rs_obs = info[info['source'] == 'rs'].shape[0]
     this_model_name = (
         f'transformer_dm{d_model}_nh{nhead}_nl{num_layers}_df{dim_feedforward}'
         f'_do{dropout}_bs{batch_size}_lr{lr}_warmup{warmup_steps}'
         f'_wd{adam_weight_decay}_rsf{rs_factor}_rsobs{num_rs_obs}'
+        f'_dmlong{long_d_model}_nhlong{long_nhead}_nllong{long_num_layers}'
+        f'_dflong{long_dim_feedforward}_outlong{long_out_dim}'
+        f'_longweather_30daymodis'
     )
+    # set up the save directories
+    full_save_dir = os.path.join(save_dir, this_model_name)
+    if os.path.exists(full_save_dir):
+        shutil.rmtree(full_save_dir)
+    os.makedirs(full_save_dir)
     n_folds = 10
     total_obs_insitu_obs = (
         info[info['source'] == 'nfmd'].shape[0]
@@ -1114,15 +1111,21 @@ def main():
     for fold, locs in enumerate(fold_locs.items()):
         print(f'Training fold {fold+1}/{n_folds} with {len(locs[1])} locations held out for testing')
         # build the model
-        model = LFMCTransformerMultiTask(
+        model = LFMCTransformerMultiTaskLongClimate(
             short_input_dim=short_input_dim,
             static_input_dim=static_input_dim,
+            long_input_dim=long_input_dim,
             d_model=d_model,
             nhead=nhead,
             num_layers=num_layers,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
-            num_queries=2
+            num_queries=2,
+            long_d_model=long_d_model,
+            long_nhead=long_nhead,
+            long_num_layers=long_num_layers,
+            long_dim_feedforward=long_dim_feedforward,
+            long_out_dim=long_out_dim
         ).to(device)
         # build the optimizer
         decay, no_decay = [], []
@@ -1172,15 +1175,21 @@ def main():
         )
     # one final version of the model trained on all the data
     print('Training final model on all data')
-    model = LFMCTransformerMultiTask(
+    model = LFMCTransformerMultiTaskLongClimate(
         short_input_dim=short_input_dim,
         static_input_dim=static_input_dim,
-        d_model=d_model,   
+        long_input_dim=long_input_dim,
+        d_model=d_model,
         nhead=nhead,
         num_layers=num_layers,
         dim_feedforward=dim_feedforward,
         dropout=dropout,
-        num_queries=2
+        num_queries=2,
+        long_d_model=long_d_model,
+        long_nhead=long_nhead,
+        long_num_layers=long_num_layers,
+        long_dim_feedforward=long_dim_feedforward,
+        long_out_dim=long_out_dim
     ).to(device)
     # build the optimizer
     decay, no_decay = [], []

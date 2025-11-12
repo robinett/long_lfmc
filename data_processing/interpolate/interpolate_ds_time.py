@@ -137,10 +137,10 @@ if __name__ == "__main__":
     start_date = arg_parse.parse_args().start_date
     end_date = arg_parse.parse_args().end_date
     base_path="/scratch/users/trobinet/long_lfmc/trent_datasets/modis/modis_regridded/quality_1"
-    output_base="/scratch/users/trobinet/long_lfmc/trent_datasets/modis/modis_regridded_gapfilled/quality_1/interpolated"
+    output_base="/scratch/users/trobinet/long_lfmc/trent_datasets/modis/modis_regridded_gapfilled/quality_1/interpolated_long"
     chunk_size = 100
-    buffer_days = 14
-    max_gap = 14
+    buffer_days = 180
+    max_gap = 180
     # if chunk size is greater than date range, set it to date range
     start_dt = datetime.strptime(start_date, '%Y-%m-%d')
     end_dt = datetime.strptime(end_date, '%Y-%m-%d')

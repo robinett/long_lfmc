@@ -352,7 +352,8 @@ def train_fold_k(
         if (
             '_sin' in var or
             '_cos' in var or
-            'lag' in var
+            'lag' in var or
+            'zone' in var
         ):
             continue
         train_daily_data[:,:,v] = (train_daily_data[:,:,v] - train_daily_mean[v]) / train_daily_std[v]
@@ -362,7 +363,8 @@ def train_fold_k(
         if (
             '_sin' in var or
             '_cos' in var or
-            'lag' in var
+            'lag' in var or
+            'zone' in var
         ):
             continue
         train_static_data[:,:,v] = (train_static_data[:,:,v] - train_static_mean[v]) / train_static_std[v]
@@ -599,7 +601,7 @@ def main():
     np.random.seed(42)
     # configs
     # directories, etc.
-    input_data_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs'
+    input_data_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_30daysweather_nokrishnastats'
     save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs'
     # training settings
     batch_size = 128
@@ -608,18 +610,18 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type != 'cuda':
         print('WARNING: CUDA not available, using CPU. This will be slow!')
-    warmup_steps = 200
+    warmup_steps = 250
     base_lr = lr
     warmup_start_lr = 1e-6
-    val_split = 0.15
-    adam_weight_decay = 1e-2
+    val_split = 0.2
+    adam_weight_decay = 1e-4
     patience = 8
     # model hyperparameters (go back to the github and get what I deleted here)
-    d_model = 32
+    d_model = 16
     nhead = 1
     num_layers = 2
-    dim_feedforward = 64
-    dropout = 0.1
+    dim_feedforward = 32
+    dropout = 0.2
     # load the data
     datasets = load_data(input_data_dir)
     var_names = json.load(
@@ -632,7 +634,7 @@ def main():
     this_model_name = (
         f'transformer_dm{d_model}_nh{nhead}_nl{num_layers}_df{dim_feedforward}'
         f'_do{dropout}_bs{batch_size}_lr{lr}_warmup{warmup_steps}'
-        f'_wd{adam_weight_decay}'
+        f'_wd{adam_weight_decay}_nostats_forreal'
     )
     full_save_dir = os.path.join(save_dir, this_model_name)
     #if os.path.exists(full_save_dir):
@@ -652,7 +654,7 @@ def main():
     # build the folds by location
     daily_data = datasets[0]
     info = datasets[3]
-    n_folds = 5
+    n_folds = 10
     total_obs = daily_data.shape[0]
     desired_obs_per_fold = total_obs / n_folds
     fold_locs = {}
@@ -705,7 +707,7 @@ def main():
         # build the scheduler
         scheduler = CosineAnnealingLR(
             optimizer,
-            T_max=25,
+            T_max=50,
             eta_min=1e-6
         )
         # build early stopping

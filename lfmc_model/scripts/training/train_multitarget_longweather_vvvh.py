@@ -20,6 +20,7 @@ sys.path.append(os.path.join(project_root,'lfmc_model','utils'))
 
 from transformer_model import LFMCTransformer
 from transformer_model_multitask import LFMCTransformer as LFMCTransformerMultiTask
+from transformer_multitask_longclimate import LFMCTransformer as LFMCTransformerMultiTaskLongClimate
 import plotting
 
 import warnings
@@ -67,7 +68,8 @@ def fuse_gaussians(mu_i, logv_i, mu_r, logv_r,
 
 def mask_location_data_fast(
     keep_locs,            # np.array (K,2) [lat, lon] in degrees
-    daily_data,           # torch.Tensor [N, ...]
+    short_data,
+    long_data,           # torch.Tensor [N, ...]
     static_data,          # torch.Tensor [N, ...]
     lfmc_insitu,          # torch.Tensor [N, ...]
     source,               # torch.Tensor [N]
@@ -80,8 +82,8 @@ def mask_location_data_fast(
     if len(info) == 0 or len(keep_locs) == 0:
         # nothing to keep or nothing to act on → everything is remaining
         empty = slice(0, 0)
-        return (daily_data[empty], static_data[empty], lfmc_insitu[empty], source[empty], info.iloc[:0],
-                daily_data, static_data, lfmc_insitu, source, info)
+        return (short_data[empty], long_data[empty], static_data[empty], lfmc_insitu[empty], source[empty], info.iloc[:0],
+                short_data, long_data, static_data, lfmc_insitu, source, info)
 
     # Prepare coordinates
     all_lats = np.asarray(info["latitude"], dtype=float)
@@ -118,85 +120,23 @@ def mask_location_data_fast(
     m_rem  = torch.from_numpy(mask_remaining)
 
     # Slice outputs
-    kept_daily_data   = daily_data[m_kept]
+    kept_short_data   = short_data[m_kept]
+    kept_long_data    = long_data[m_kept]
     kept_static_data  = static_data[m_kept]
     kept_lfmc_insitu  = lfmc_insitu[m_kept]
     kept_source       = source[m_kept]
     kept_info         = info.loc[mask_kept]
 
-    remaining_daily_data   = daily_data[m_rem]
+    remaining_short_data   = short_data[m_rem]
+    remaining_long_data    = long_data[m_rem]
     remaining_static_data  = static_data[m_rem]
     remaining_lfmc_insitu  = lfmc_insitu[m_rem]
     remaining_source       = source[m_rem]
     remaining_info         = info.loc[mask_remaining]
 
     return (
-        kept_daily_data, kept_static_data, kept_lfmc_insitu, kept_source, kept_info,
-        remaining_daily_data, remaining_static_data, remaining_lfmc_insitu, remaining_source, remaining_info
-    )
-
-
-def mask_location_data(
-    test_locs,
-    daily_data,
-    static_data,
-    lfmc_insitu,
-    source,
-    info,
-    rs_masking_radius_m=600.0
-):
-    all_lats = info["latitude"].astype(float).to_numpy()
-    all_lons = info["longitude"].astype(float).to_numpy()
-    # ensure source is a numpy array of ints
-    source_np = source.numpy().astype(int)
-    fold_test_lats = np.asarray(test_locs[:,0])
-    fold_test_lons = np.asarray(test_locs[:,1])
-    # radius of the earth in meters
-    R = 6371000.0
-    # check points within 250m
-    lat1 = np.deg2rad(all_lats)[:, None]
-    lon1 = np.deg2rad(all_lons)[:, None]
-    lat2 = np.deg2rad(fold_test_lats)[None, :]
-    lon2 = np.deg2rad(fold_test_lons)[None, :]
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
-    a = (
-        np.sin(dlat / 2.0) ** 2 +
-        np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
-    )
-    c = 2.0 * np.arcsin(np.sqrt(a))
-    dist_m = R * c
-    min_dist_m = np.min(dist_m, axis=1)
-    within_masking_dist = min_dist_m <= rs_masking_radius_m
-    # build indices
-    test_idx = np.nonzero(within_masking_dist & (source_np == 1))[0].tolist()
-    delete_idx = np.nonzero(within_masking_dist & (source_np == 0))[0].tolist()
-    N = len(info)
-    mask_test = np.zeros(N, dtype=bool)
-    mask_delete = np.zeros(N, dtype=bool)
-    mask_test[test_idx] = True
-    mask_delete[delete_idx] = True
-    mask_keep = ~(mask_test | mask_delete)
-    m_test = torch.as_tensor(
-        mask_test,
-        dtype=torch.bool,
-    )  m_keep = torch.as_tensor(
-        mask_keep,
-        dtype=torch.bool,
-    )
-    test_daily_data = daily_data[m_test]
-    test_static_data = static_data[m_test]
-    test_lfmc_insitu = lfmc_insitu[m_test]
-    test_source = source[m_test]
-    test_info = info.iloc[mask_test]
-    remaining_daily_data = daily_data[m_keep]
-    remaining_static_data = static_data[m_keep]
-    remaining_lfmc_insitu = lfmc_insitu[m_keep]
-    remaining_source = source[m_keep]
-    remaining_info = info.iloc[mask_keep]
-    return (
-        test_daily_data, test_static_data, test_lfmc_insitu, test_source, test_info,
-        remaining_daily_data, remaining_static_data, remaining_lfmc_insitu, remaining_source, remaining_info
+        kept_short_data, kept_long_data, kept_static_data, kept_lfmc_insitu, kept_source, kept_info,
+        remaining_short_data, remaining_long_data, remaining_static_data, remaining_lfmc_insitu, remaining_source, remaining_info
     )
 
 class GaussianNLLLoss(nn.Module):
@@ -246,8 +186,12 @@ class GaussianNLLLoss(nn.Module):
 
 def load_data(center_data_dir):
     # load all the center data
-    X_daily = torch.load(
-        os.path.join(center_data_dir, 'X_daily.pt'),
+    X_short = torch.load(
+        os.path.join(center_data_dir, 'X_short.pt'),
+        weights_only=False
+    )
+    X_long = torch.load(
+        os.path.join(center_data_dir, 'X_long.pt'),
         weights_only=False
     )
     X_static = torch.load(
@@ -265,7 +209,7 @@ def load_data(center_data_dir):
     # load the center info
     center_info = pd.read_csv(os.path.join(center_data_dir, 'info.csv'))
     all_center_data = [
-        X_daily, X_static, Y_lfmc, source, center_info
+        X_short, X_long, X_static, Y_lfmc, source, center_info
     ]
     return all_center_data
 
@@ -311,24 +255,24 @@ class EarlyStopping:
 def create_site_split(
     data_info: pd.DataFrame,
     desired_insitu_sample_size: int,
-    desired_rs_sample_size: int,
+    desired_vv_sample_size: int,
+    desired_vh_sample_size: int,
     seed: int = 42,
-    used_sites=None,
+    used_sites = None,
     round_decimals: int = 6,
 ):
     # split sources
     insitu = data_info[data_info['source'] == 'nfmd']
-    rs = data_info[data_info['source'] == 'rs']
+    vv     = data_info[data_info['source'] == 'VV']
+    vh     = data_info[data_info['source'] == 'VH']
 
     # clean/standardize lat/lon once
     def clean(df):
         out = df[['date', 'latitude', 'longitude']].copy()
         out = out.rename(columns={'latitude': 'lat',
                                   'longitude': 'lon'})
-        out['lat'] = pd.to_numeric(out['lat'],
-                                   errors='coerce')
-        out['lon'] = pd.to_numeric(out['lon'],
-                                   errors='coerce')
+        out['lat'] = pd.to_numeric(out['lat'], errors='coerce')
+        out['lon'] = pd.to_numeric(out['lon'], errors='coerce')
         out = out.dropna(subset=['lat', 'lon'])
         # optional: snap to grid to avoid tiny fp diffs
         out['lat'] = out['lat'].round(round_decimals)
@@ -336,38 +280,37 @@ def create_site_split(
         return out
 
     insitu = clean(insitu)
-    rs = clean(rs)
-    if insitu.empty and rs.empty:
+    vv     = clean(vv)
+    vh     = clean(vh)
+    if insitu.empty and vv.empty and vh.empty:
         return []
 
     # group counts per site (lat, lon)
     insitu_counts = (insitu.groupby(['lat', 'lon'])
-                     .size()
-                     .rename('n')
-                     .reset_index())
-    rs_counts = (rs.groupby(['lat', 'lon'])
-                 .size()
-                 .rename('n')
-                 .reset_index())
+                     .size().rename('n').reset_index())
+    vv_counts = (vv.groupby(['lat', 'lon'])
+                 .size().rename('n').reset_index())
+    vh_counts = (vh.groupby(['lat', 'lon'])
+                 .size().rename('n').reset_index())
 
     # fast exclude used_sites (as set of tuples)
     if used_sites:
-        # apply same rounding to used_sites keys
         us = {(round(float(lat), round_decimals),
                round(float(lon), round_decimals))
               for (lat, lon) in used_sites}
+
         if not insitu_counts.empty:
-            mi_i = pd.MultiIndex.from_frame(
-                insitu_counts[['lat', 'lon']]
-            )
+            mi_i = pd.MultiIndex.from_frame(insitu_counts[['lat', 'lon']])
             mask_i = ~mi_i.isin(us)
             insitu_counts = insitu_counts.loc[mask_i]
-        if not rs_counts.empty:
-            mi_r = pd.MultiIndex.from_frame(
-                rs_counts[['lat', 'lon']]
-            )
-            mask_r = ~mi_r.isin(us)
-            rs_counts = rs_counts.loc[mask_r]
+        if not vv_counts.empty:
+            mi_vv = pd.MultiIndex.from_frame(vv_counts[['lat', 'lon']])
+            mask_vv = ~mi_vv.isin(us)
+            vv_counts = vv_counts.loc[mask_vv]
+        if not vh_counts.empty:
+            mi_vh = pd.MultiIndex.from_frame(vh_counts[['lat', 'lon']])
+            mask_vh = ~mi_vh.isin(us)
+            vh_counts = vh_counts.loc[mask_vh]
 
     # shuffle sites reproducibly
     rng = np.random.default_rng(seed)
@@ -375,34 +318,131 @@ def create_site_split(
         insitu_counts = insitu_counts.iloc[
             rng.permutation(len(insitu_counts))
         ].reset_index(drop=True)
-    if not rs_counts.empty:
-        rs_counts = rs_counts.iloc[
-            rng.permutation(len(rs_counts))
+    if not vv_counts.empty:
+        vv_counts = vv_counts.iloc[
+            rng.permutation(len(vv_counts))
+        ].reset_index(drop=True)
+    if not vh_counts.empty:
+        vh_counts = vh_counts.iloc[
+            rng.permutation(len(vh_counts))
         ].reset_index(drop=True)
 
-    # pick minimum number of sites needed to hit
-    # desired obs using cumsum + searchsorted
+    # pick minimum number of sites needed to hit desired obs
     def pick_sites(df, goal):
         if df.empty or goal <= 0:
             return []
         csum = df['n'].to_numpy().cumsum()
-        # index of last site needed
         k = np.searchsorted(csum, goal, side='left')
         k = min(k, len(df) - 1)
         take = df.iloc[:k+1][['lat', 'lon']]
         return list(map(tuple, take.to_numpy()))
 
-    val_i = pick_sites(insitu_counts,
-                       desired_insitu_sample_size)
-    val_r = pick_sites(rs_counts,
-                       desired_rs_sample_size)
+    val_i  = pick_sites(insitu_counts, desired_insitu_sample_size)
+    val_vv = pick_sites(vv_counts,     desired_vv_sample_size)
+    val_vh = pick_sites(vh_counts,     desired_vh_sample_size)
 
-    # combine; if you want to prevent duplicates,
-    # make it a set then back to list:
-    val_locs = val_i + val_r
-    # val_locs = list(dict.fromkeys(val_i + val_r))
+    # combine (allow duplicates if the same site is selected for multiple sources)
+    val_locs = val_i + val_vv + val_vh
+    # If you want unique sites only:
+    # val_locs = list(dict.fromkeys(val_locs))
 
     return val_locs
+
+#def create_site_split(
+#    data_info: pd.DataFrame,
+#    desired_insitu_sample_size: int,
+#    desired_rs_sample_size: int,
+#    seed: int = 42,
+#    used_sites=None,
+#    round_decimals: int = 6,
+#):
+#    # split sources
+#    insitu = data_info[data_info['source'] == 'nfmd']
+#    rs = data_info[data_info['source'] == 'rs']
+#
+#    # clean/standardize lat/lon once
+#    def clean(df):
+#        out = df[['date', 'latitude', 'longitude']].copy()
+#        out = out.rename(columns={'latitude': 'lat',
+#                                  'longitude': 'lon'})
+#        out['lat'] = pd.to_numeric(out['lat'],
+#                                   errors='coerce')
+#        out['lon'] = pd.to_numeric(out['lon'],
+#                                   errors='coerce')
+#        out = out.dropna(subset=['lat', 'lon'])
+#        # optional: snap to grid to avoid tiny fp diffs
+#        out['lat'] = out['lat'].round(round_decimals)
+#        out['lon'] = out['lon'].round(round_decimals)
+#        return out
+#
+#    insitu = clean(insitu)
+#    rs = clean(rs)
+#    if insitu.empty and rs.empty:
+#        return []
+#
+#    # group counts per site (lat, lon)
+#    insitu_counts = (insitu.groupby(['lat', 'lon'])
+#                     .size()
+#                     .rename('n')
+#                     .reset_index())
+#    rs_counts = (rs.groupby(['lat', 'lon'])
+#                 .size()
+#                 .rename('n')
+#                 .reset_index())
+#
+#    # fast exclude used_sites (as set of tuples)
+#    if used_sites:
+#        # apply same rounding to used_sites keys
+#        us = {(round(float(lat), round_decimals),
+#               round(float(lon), round_decimals))
+#              for (lat, lon) in used_sites}
+#        if not insitu_counts.empty:
+#            mi_i = pd.MultiIndex.from_frame(
+#                insitu_counts[['lat', 'lon']]
+#            )
+#            mask_i = ~mi_i.isin(us)
+#            insitu_counts = insitu_counts.loc[mask_i]
+#        if not rs_counts.empty:
+#            mi_r = pd.MultiIndex.from_frame(
+#                rs_counts[['lat', 'lon']]
+#            )
+#            mask_r = ~mi_r.isin(us)
+#            rs_counts = rs_counts.loc[mask_r]
+#
+#    # shuffle sites reproducibly
+#    rng = np.random.default_rng(seed)
+#    if not insitu_counts.empty:
+#        insitu_counts = insitu_counts.iloc[
+#            rng.permutation(len(insitu_counts))
+#        ].reset_index(drop=True)
+#    if not rs_counts.empty:
+#        rs_counts = rs_counts.iloc[
+#            rng.permutation(len(rs_counts))
+#        ].reset_index(drop=True)
+#
+#    # pick minimum number of sites needed to hit
+#    # desired obs using cumsum + searchsorted
+#    def pick_sites(df, goal):
+#        if df.empty or goal <= 0:
+#            return []
+#        csum = df['n'].to_numpy().cumsum()
+#        # index of last site needed
+#        k = np.searchsorted(csum, goal, side='left')
+#        k = min(k, len(df) - 1)
+#        take = df.iloc[:k+1][['lat', 'lon']]
+#        return list(map(tuple, take.to_numpy()))
+#
+#    val_i = pick_sites(insitu_counts,
+#                       desired_insitu_sample_size)
+#    val_r = pick_sites(rs_counts,
+#                       desired_rs_sample_size)
+#
+#    # combine; if you want to prevent duplicates,
+#    # make it a set then back to list:
+#    val_locs = val_i + val_r
+#    # val_locs = list(dict.fromkeys(val_i + val_r))
+#
+#    return val_locs
 
 def run_model(
     model,
@@ -415,7 +455,8 @@ def run_model(
     global_step=0,
     warmup_start_lr=None,
     warmup_end_lr=None,
-    lambda_rs=0.9
+    lambda_vv=1.0,
+    lambda_vh=1.0
 ):
     pbar = tqdm.tqdm(
         loader,
@@ -424,52 +465,70 @@ def run_model(
     # tracking paraphanalia
     n_samples_tot = 0.0
     n_i_tot = 0.0
-    n_rs_tot = 0.0
+    n_vv_tot = 0.0
+    n_vh_tot = 0.0
     running_loss = 0.0
     running_loss_insitu = 0.0
-    running_loss_rs = 0.0
+    running_loss_vv = 0.0
+    running_loss_vh = 0.0
     out_mu_i = []
     out_logv_i = []
-    out_mu_rs = []
-    out_logv_rs = []
+    out_mu_vv = []
+    out_logv_vv = []
+    out_mu_vh = []
+    out_logv_vh = []
     out_true_i = []
-    out_true_rs = []
-    for Xd_b,Xs_b,Y_b,insitu_b in pbar:
+    out_true_vv = []
+    out_true_vh = []
+    for Xsh_b,Xl_b,Xst_b,Y_b,insitu_b in pbar:
         # move data to device
-        Xd_b = Xd_b.to(device=device, dtype=torch.float32)
-        Xs_b = Xs_b.to(device=device, dtype=torch.float32)
+        Xsh_b = Xsh_b.to(device=device, dtype=torch.float32)
+        Xl_b = Xl_b.to(device=device, dtype=torch.float32)
+        Xst_b = Xst_b.to(device=device, dtype=torch.float32)
         Y_b = Y_b.to(device=device, dtype=torch.float32)
         insitu_b = insitu_b.to(device=device, dtype=torch.float32)
         Y_b = Y_b.view(-1)
         insitu_b = insitu_b.view(-1)
         if train_model:
-            preds = model(Xd_b, Xs_b)
+            preds = model(Xsh_b, Xl_b, Xst_b)
         else:
             with torch.no_grad():
-                preds = model(Xd_b, Xs_b)
+                preds = model(Xsh_b, Xl_b, Xst_b)
         mu_i_b = preds['mu_insitu']
         logv_i_b = preds['log_var_insitu']
         #logv_i_b = torch.zeros_like(mu_i_b)  # homoscedastic for insitu
-        mu_rs_b = preds['mu_rs']
-        logv_rs_b = preds['log_var_rs']
+        mu_vv_b = preds['mu_vv']
+        logv_vv_b = preds['log_var_vv']
+        mu_vh_b = preds['mu_vh']
+        logv_vh_b = preds['log_var_vh']
         #logv_rs_b = torch.zeros_like(mu_rs_b)  # homoscedastic for rs
-        m_i = insitu_b > 0.5
-        m_rs = ~m_i
+        m_i = insitu_b == 0
+        m_vv = insitu_b == 1
+        m_vh = insitu_b == 2
         if loss_fn is not None:
             loss_i = loss_fn(mu_i_b, logv_i_b, Y_b, mask=m_i)
-            loss_rs = loss_fn(mu_rs_b, logv_rs_b, Y_b, mask=m_rs)
+            loss_vv = loss_fn(mu_vv_b, logv_vv_b, Y_b, mask=m_vv)
+            loss_vh = loss_fn(mu_vh_b, logv_vh_b, Y_b, mask=m_vh)
             n_i = int(m_i.sum().item())
-            n_rs = int(m_rs.sum().item())
+            n_vv = int(m_vv.sum().item())
+            n_vh = int(m_vh.sum().item())
             n_i_tot += n_i
-            n_rs_tot += n_rs
-            n_samples = n_i + n_rs
+            n_vv_tot += n_vv
+            n_vh_tot += n_vh
+            n_samples = n_i + n_vv + n_vh
             n_samples_tot += n_samples
-            denominator = n_i + lambda_rs * n_rs
-            total_loss = (n_i * loss_i + lambda_rs * n_rs * loss_rs) / denominator
+            denominator = n_i + lambda_vv * n_vv + lambda_vh * n_vh
+            total_loss = (
+                n_i * loss_i + 
+                lambda_vv * n_vv * loss_vv + 
+                lambda_vh * n_vh * loss_vh
+            ) / denominator
             if n_i > 0:
                 running_loss_insitu += loss_i.item() * n_i
-            if n_rs > 0:
-                running_loss_rs += loss_rs.item() * n_rs
+            if n_vv > 0:
+                running_loss_vv += loss_vv.item() * n_vv
+            if n_vh > 0:
+                running_loss_vh += loss_vh.item() * n_vh
         if train_model:
             if global_step < warmup_steps:
                 this_t = global_step / warmup_steps
@@ -482,45 +541,67 @@ def run_model(
             global_step += 1
         out_mu_i.append(mu_i_b.detach().cpu())
         out_logv_i.append(logv_i_b.detach().cpu())
-        out_mu_rs.append(mu_rs_b.detach().cpu())
-        out_logv_rs.append(logv_rs_b.detach().cpu())
+        out_mu_vv.append(mu_vv_b.detach().cpu())
+        out_logv_vv.append(logv_vv_b.detach().cpu())
         out_true_i.append(Y_b[m_i].detach().cpu())
-        out_true_rs.append(Y_b[m_rs].detach().cpu())
+        out_true_vv.append(Y_b[m_vv].detach().cpu())
     # calculate running loss
     if loss_fn is not None and n_samples > 0:
-        running_loss = running_loss_insitu + running_loss_rs * lambda_rs
-        running_loss /= (n_i_tot + lambda_rs * n_rs_tot)
+        running_loss = running_loss_insitu + running_loss_vv * lambda_vv + running_loss_vh * lambda_vh
+        running_loss /= (n_i_tot + lambda_vv * n_vv_tot + lambda_vh * n_vh_tot)
         running_loss_insitu /= n_i_tot
-        running_loss_rs /= n_rs_tot
+        if n_vv_tot > 0:
+            running_loss_vv /= n_vv_tot
+        else:
+            running_loss_vv = 0.0
+        if n_vh_tot > 0:
+            running_loss_vh /= n_vh_tot
+        else:
+            running_loss_vh = 0.0
     else:
         running_loss = None
         running_loss_insitu = None
-        running_loss_rs = None
+        running_loss_vv = None
+        running_loss_vh = None
     if len(out_mu_i) > 0:
         mu_i = torch.cat(out_mu_i).squeeze().numpy()
         logv_i = torch.cat(out_logv_i).squeeze().numpy()
-        mu_rs = torch.cat(out_mu_rs).squeeze().numpy()
-        logv_rs = torch.cat(out_logv_rs).squeeze().numpy()
         true_i = torch.cat(out_true_i).squeeze().numpy()
-        true_rs = torch.cat(out_true_rs).squeeze().numpy()
     else:
         mu_i = np.array([])
         logv_i = np.array([])
-        mu_rs = np.array([])
-        logv_rs = np.array([])
         true_i = np.array([])
-        true_rs = np.array([])
+    if len(out_mu_vv) > 0:
+        mu_vv = torch.cat(out_mu_vv).squeeze().numpy()
+        logv_vv = torch.cat(out_logv_vv).squeeze().numpy()
+        true_vv = torch.cat(out_true_vv).squeeze().numpy()
+    else:
+        mu_vv = np.array([])
+        logv_vv = np.array([])
+        true_vv = np.array([])
+    if len(out_mu_vh) > 0:
+        mu_vh = torch.cat(out_mu_vh).squeeze().numpy()
+        logv_vh = torch.cat(out_logv_h).squeeze().numpy()
+        true_vh = torch.cat(out_true_vh).squeeze().numpy()
+    else:
+        mu_vh = np.array([])
+        logv_vh = np.array([])
+        true_vh = np.array([])
     return(
         model,
         running_loss,
         running_loss_insitu,
-        running_loss_rs,
+        running_loss_vv,
+        running_loss_vh,
         mu_i,
         logv_i,
-        mu_rs,
-        logv_rs,
+        mu_vv,
+        logv_vv,
+        mu_vh,
+        logv_vh,
         true_i,
-        true_rs,
+        true_vv,
+        true_vh,
         global_step
     )
 
@@ -551,40 +632,47 @@ def train_fold_k(
     if not os.path.exists(fold_save_dir):
         os.makedirs(fold_save_dir)
     # split out the test data
-    daily_data = data[0]
-    static_data = data[1]
-    lfmc = data[2]
-    source = data[3]
-    info = data[4]
+    short_data = data[0]
+    long_data = data[1]
+    static_data = data[2]
+    lfmc = data[3]
+    source = data[4]
+    info = data[5]
     (
-        test_daily_data, test_static_data, test_lfmc, test_source, test_info,
-        remaining_daily_data, remaining_static_data, remaining_lfmc, remaining_source, remaining_info
+        test_short_data, test_long_data, test_static_data, test_lfmc, test_source, test_info,
+        remaining_short_data, remaining_long_data, remaining_static_data, remaining_lfmc, remaining_source, remaining_info
     ) = mask_location_data_fast(
         this_locs,
-        daily_data,
+        short_data,
+        long_data,
         static_data,
         lfmc,
         source,
         info
     )
     # split out the validation data
-    remaining_insitu_obs = remaining_info[remaining_info['source'] == 'nfmd'].shape[0]
-    remaining_rs_obs = remaining_info[remaining_info['source'] == 'rs'].shape[0]
+    remaining_insitu_obs = remaining_info[remaining_info['source_legible'] == 'nfmd'].shape[0]
+    remaining_vv_obs = remaining_info[remaining_info['source_legible'] == 'vv'].shape[0]
+    remaining_vh_obs = remaining_info[remaining_info['source_legible'] == 'vh'].shape[0]
+    
     num_val_obs_insitu = remaining_insitu_obs * val_split
-    num_val_obs_rs = remaining_rs_obs * val_split
+    num_val_obs_vv = remaining_vv_obs * val_split
+    num_val_obs_vh = remaining_vh_obs * val_split
     val_locs = create_site_split(
         remaining_info,
         desired_insitu_sample_size=int(num_val_obs_insitu),
-        desired_rs_sample_size=int(num_val_obs_rs),
+        desired_vv_sample_size=int(num_val_obs_vv),
+        desired_vh_sample_size=int(num_val_obs_vh),
     )
     val_locs = np.array(val_locs)
     # perform the same masking as was done for the test sites
     (
-        val_daily_data, val_static_data, val_lfmc, val_source, val_info,
-        train_daily_data, train_static_data, train_lfmc, train_source, train_info
+        val_short_data, val_long_data, val_static_data, val_lfmc, val_source, val_info,
+        train_short_data, train_long_data, train_static_data, train_lfmc, train_source, train_info
     ) = mask_location_data_fast(
         val_locs,
-        remaining_daily_data,
+        remaining_short_data,
+        remaining_long_data,
         remaining_static_data,
         remaining_lfmc,
         remaining_source,
@@ -593,17 +681,20 @@ def train_fold_k(
     # Sanity check
     total_test = test_info.shape[0]
     insitu_test = test_info[test_info['source'] == 'nfmd'].shape[0]
-    rs_test = test_info[test_info['source'] == 'rs'].shape[0]
+    vv_test = test_info[test_info['source'] == 'vv'].shape[0]
+    vh_test = test_info[test_info['source'] == 'vh'].shape[0]
     total_val = val_info.shape[0]
     insitu_val = val_info[val_info['source'] == 'nfmd'].shape[0]
-    rs_val = val_info[val_info['source'] == 'rs'].shape[0]
+    vv_val = val_info[val_info['source'] == 'vv'].shape[0]
+    vh_val = val_info[val_info['source'] == 'vh'].shape[0]
     total_train = train_info.shape[0]
     insitu_train = train_info[train_info['source'] == 'nfmd'].shape[0]
-    rs_train = train_info[train_info['source'] == 'rs'].shape[0]
+    vv_train = train_info[train_info['source'] == 'vv'].shape[0]
+    vh_train = train_info[train_info['source'] == 'vh'].shape[0]
     print(
-        f"Test: {total_test} ({insitu_test} insitu, {rs_test} rs) | "
-        f"Val: {total_val} ({insitu_val} insitu, {rs_val} rs) | "
-        f"Train: {total_train} ({insitu_train} insitu, {rs_train} rs)"
+        f"Test: {total_test} ({insitu_test} insitu, {vv_test} vv, {vh_test} vh) | "
+        f"Val: {total_val} ({insitu_val} insitu, {vv_val} vv, {vh_val} vh) | "
+        f"Train: {total_train} ({insitu_train} insitu, {vv_train} vv, {vh_train} vh)"
     )
     if plot_distributions:
         print('Plotting feature distributions for train/val/test splits')
@@ -631,13 +722,15 @@ def train_fold_k(
             plot_save_dir
         )
     print('Normalizing the data')
-    train_daily_mean = np.nanmean(train_daily_data, axis=(0,1))
-    train_daily_std = np.nanstd(train_daily_data, axis=(0,1))
+    train_short_mean = np.nanmean(train_short_data, axis=(0,1))
+    train_short_std = np.nanstd(train_short_data, axis=(0,1))
+    train_long_std = np.nanstd(train_long_data, axis=(0,1))
+    train_long_mean = np.nanmean(train_long_data, axis=(0,1))
     train_static_mean = np.nanmean(train_static_data, axis=(0,1))
     train_static_std = np.nanstd(train_static_data, axis=(0,1))
     y_mean = np.nanmean(train_lfmc)
     y_std = np.nanstd(train_lfmc)
-    for v,var in enumerate(var_names['daily_vars']):
+    for v,var in enumerate(var_names['short_vars']):
         if (
             '_sin' in var or
             '_cos' in var or
@@ -645,9 +738,20 @@ def train_fold_k(
             'zone' in var
         ):
             continue
-        train_daily_data[:,:,v] = (train_daily_data[:,:,v] - train_daily_mean[v]) / train_daily_std[v]
-        val_daily_data[:,:,v] = (val_daily_data[:,:,v] - train_daily_mean[v]) / train_daily_std[v]
-        test_daily_data[:,:,v] = (test_daily_data[:,:,v] - train_daily_mean[v]) / train_daily_std[v]
+        train_short_data[:,:,v] = (train_short_data[:,:,v] - train_short_mean[v]) / train_short_std[v]
+        val_short_data[:,:,v] = (val_short_data[:,:,v] - train_short_mean[v]) / train_short_std[v]
+        test_short_data[:,:,v] = (test_short_data[:,:,v] - train_short_mean[v]) / train_short_std[v]
+    for v,var in enumerate(var_names['long_vars']):
+        if (
+            '_sin' in var or
+            '_cos' in var or
+            'lag' in var or
+            'zone' in var
+        ):
+            continue
+        train_long_data[:,:,v] = (train_long_data[:,:,v] - train_long_mean[v]) / train_long_std[v]
+        val_long_data[:,:,v] = (val_long_data[:,:,v] - train_long_mean[v]) / train_long_std[v]
+        test_long_data[:,:,v] = (test_long_data[:,:,v] - train_long_mean[v]) / train_long_std[v]
     for v,var in enumerate(var_names['static_vars']):
         if (
             '_sin' in var or
@@ -664,8 +768,10 @@ def train_fold_k(
     test_lfmc = (test_lfmc - y_mean) / y_std
     # save the normalization parameters for later use
     norm_params = {
-        'train_daily_mean': train_daily_mean.tolist(),
-        'train_daily_std': train_daily_std.tolist(),
+        'train_short_mean': train_short_mean.tolist(),
+        'train_short_std': train_short_std.tolist(),
+        'train_long_mean': train_long_mean.tolist(),
+        'train_long_std': train_long_std.tolist(),
         'train_static_mean': train_static_mean.tolist(),
         'train_static_std': train_static_std.tolist(),
         'y_mean': y_mean.tolist(),
@@ -676,7 +782,8 @@ def train_fold_k(
         json.dump(norm_params, f)
     # create the datasets and dataloaders
     train_dataset = TensorDataset(
-        train_daily_data,
+        train_short_data,
+        train_long_data,
         train_static_data,
         train_lfmc,
         train_source
@@ -688,7 +795,8 @@ def train_fold_k(
         pin_memory=True
     )
     val_dataset = TensorDataset(
-        val_daily_data,
+        val_short_data,
+        val_long_data,
         val_static_data,
         val_lfmc,
         val_source
@@ -700,7 +808,8 @@ def train_fold_k(
         pin_memory=True
     )
     test_dataset = TensorDataset(
-        test_daily_data,
+        test_short_data,
+        test_long_data,
         test_static_data,
         test_lfmc,
         test_source
@@ -719,10 +828,12 @@ def train_fold_k(
     # set up the things that we need to track
     train_loss = []
     train_loss_insitu = []
-    train_loss_rs = []
+    train_loss_vv = []
+    train_loss_vh = []
     val_loss = []
     val_loss_insitu = []
-    val_loss_rs = []
+    val_loss_vv = []
+    val_loss_vh = []
     global_step = 0
     for epoch in range(1,max_epochs):
         print(f'Fold {this_fold_num}, Epoch {epoch}/{max_epochs}')
@@ -731,7 +842,11 @@ def train_fold_k(
             model,
             this_train_loss,
             this_train_loss_insitu,
-            this_train_loss_rs,
+            this_train_loss_vv,
+            this_train_loss_vh,
+            _,
+            _,
+            _,
             _,
             _,
             _,
@@ -750,14 +865,17 @@ def train_fold_k(
             global_step=global_step,
             warmup_start_lr=warmup_start_lr,
             warmup_end_lr=warmup_end_lr,
-            lambda_rs=rs_factor
+            lambda_vv=rs_factor,
+            lambda_vh=rs_factor
         )
         train_loss.append(this_train_loss)
         train_loss_insitu.append(this_train_loss_insitu)
-        train_loss_rs.append(this_train_loss_rs) 
+        train_loss_vv.append(this_train_loss_vv)
+        train_loss_vh.append(this_train_loss_vh)
         print(f'Training total loss: {this_train_loss:.4f}')
         print(f'Training insitu loss: {this_train_loss_insitu:.4f}')
-        print(f'Training rs loss: {this_train_loss_rs:.4f}')
+        print(f'Training vv loss: {this_train_loss_vv:.4f}')
+        print(f'Training vh loss: {this_train_loss_vh:.4f}')
         scheduler.step()
         # run the validation
         model.eval()
@@ -765,13 +883,17 @@ def train_fold_k(
             model,
             this_val_loss,
             this_val_loss_insitu,
-            this_val_loss_rs,
+            this_val_loss_vv,
+            this_val_loss_vh,
             mu_i_val,
             logv_i_val,
-            mu_rs_val,
-            logv_rs_val,
+            mu_vv_val,
+            logv_vv_val,
+            mu_vh_val,
+            logv_vh_val,
             true_i,
-            true_rs,
+            true_vv,
+            true_vh,
             _
         ) = run_model(
             model,
@@ -779,17 +901,20 @@ def train_fold_k(
             device,
             criterion,
             train_model=False,
-            lambda_rs=rs_factor
+            lambda_vv=rs_factor,
+            lambda_vh=rs_factor
         )
         val_loss.append(this_val_loss)
         val_loss_insitu.append(this_val_loss_insitu)
-        val_loss_rs.append(this_val_loss_rs)
+        val_loss_vv.append(this_val_loss_vv)
+        val_loss_vh.append(this_val_loss_vh)
         print(f'Validation total loss: {this_val_loss:.4f}')
         print(f'Validation insitu loss: {this_val_loss_insitu:.4f}')
-        print(f'Validation rs loss: {this_val_loss_rs:.4f}')
+        print(f'Validation vv loss: {this_val_loss_vv:.4f}')
+        print(f'Validation vh loss: {this_val_loss_vh:.4f}')
         # denorm
-        lfmc_i_val_only = mu_i_val[val_source.numpy() == 1 ] * y_std + y_mean
-        lfmc_std_i_val_only = np.sqrt(np.exp(logv_i_val[val_source.numpy() == 1])) * y_std
+        lfmc_i_val_only = mu_i_val[val_source.numpy() == 0 ] * y_std + y_mean
+        lfmc_std_i_val_only = np.sqrt(np.exp(logv_i_val[val_source.numpy() == 0])) * y_std
         lfmc_i_val_true = true_i * y_std + y_mean
         ## get mixture
         #mu_mix_val, logv_mix_val = fuse_gaussians(
@@ -810,14 +935,14 @@ def train_fold_k(
         #val_r2_mix = r2_score(lfmc_i_val_true, lfmc_mix_val)
         #val_nll_mix = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_mix_val) + ((lfmc_i_val_true - lfmc_mix_val) ** 2) / (lfmc_std_mix_val ** 2)))
         #val_rmse_mix = np.sqrt(np.mean((lfmc_mix_val - lfmc_i_val_true) ** 2))
-        # and for rs data
-        if len(true_rs) > 0:
-            lfmc_rs_val_only = mu_rs_val[val_source.numpy() == 0] * y_std + y_mean
-            lfmc_std_rs_val_only = np.sqrt(np.exp(logv_rs_val[val_source.numpy() == 0])) * y_std
-            lfmc_rs_val_true = true_rs * y_std + y_mean
-            val_mae_rs = np.mean(np.abs(lfmc_rs_val_only - lfmc_rs_val_true))
-            val_r2_rs = r2_score(lfmc_rs_val_true, lfmc_rs_val_only)
-            val_nll_rs = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_rs_val_only) + ((lfmc_rs_val_true - lfmc_rs_val_only) ** 2) / (lfmc_std_rs_val_only ** 2)))
+        # and for vv data
+        if len(true_vv) > 0:
+            lfmc_vv_val_only = mu_vv_val[val_source.numpy() == 1] * y_std + y_mean
+            lfmc_std_vv_val_only = np.sqrt(np.exp(logv_vv_val[val_source.numpy() == 1])) * y_std
+            lfmc_vv_val_true = true_vv * y_std + y_mean
+            val_mae_vv = np.mean(np.abs(lfmc_vv_val_only - lfmc_vv_val_true))
+            val_r2_vv = r2_score(lfmc_vv_val_true, lfmc_vv_val_only)
+            val_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_vv_val_only) + ((lfmc_vv_val_true - lfmc_vv_val_only) ** 2) / (lfmc_std_vv_val_only ** 2)))
             val_rmse_rs = np.sqrt(np.mean((lfmc_rs_val_only - lfmc_rs_val_true) ** 2))
             ## also calculate the mixtures
             #lfmc_rs_mix_val = mu_mix_val[val_source.numpy() == 0] * y_std + y_mean
@@ -826,6 +951,14 @@ def train_fold_k(
             #val_r2_rs_mix = r2_score(lfmc_rs_val_true, lfmc_rs_mix_val)
             #val_nll_rs_mix = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_rs_mix_val) + ((lfmc_rs_val_true - lfmc_rs_mix_val) ** 2) / (lfmc_std_rs_mix_val ** 2)))
             #val_rmse_rs_mix = np.sqrt(np.mean((lfmc_rs_mix_val - lfmc_rs_val_true) ** 2))
+        if len(true_vh) > 0:
+            lfmc_vh_val_only = mu_vh_val[val_source.numpy() == 2] * y_std + y_mean
+            lfmc_std_vh_val_only = np.sqrt(np.exp(logv_vh_val[val_source.numpy() == 2])) * y_std
+            lfmc_vh_val_true = true_vh * y_std + y_mean
+            val_mae_vh = np.mean(np.abs(lfmc_vh_val_only - lfmc_vh_val_true))
+            val_r2_vh = r2_score(lfmc_vh_val_true, lfmc_vh_val_only)
+            val_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_vh_val_only) + ((lfmc_vh_val_true - lfmc_vh_val_only) ** 2) / (lfmc_std_vh_val_only ** 2)))
+            val_rmse_vh = np.sqrt(np.mean((lfmc_vh_val_only - lfmc_vh_val_true) ** 2))
         # average values for sanity check
         #avg_val_pred = np.mean(lfmc_i_val)
         #avg_val_true = np.mean(lfmc_i_val_true)
@@ -836,12 +969,19 @@ def train_fold_k(
         #print(
         #    f'Validation Mixture MAE: {val_mae_mix:.4f}, RMSE: {val_rmse_mix:.4f}, R2: {val_r2_mix:.4f}, NLL: {val_nll_mix:.4f}'
         #)
-        if len(true_rs) > 0:
+        if len(true_vv) > 0:
             print(
-                f'Validation RS MAE: {val_mae_rs:.4f}, RMSE: {val_rmse_rs:.4f}, R2: {val_r2_rs:.4f}, NLL: {val_nll_rs:.4f}'
+                f'Validation VV MAE: {val_mae_vv:.4f}, RMSE: {val_rmse_vv:.4f}, R2: {val_r2_vv:.4f}, NLL: {val_nll_vv:.4f}'
             )
             #print(
-            #    f'Validation RS Mixture MAE: {val_mae_rs_mix:.4f}, RMSE: {val_rmse_rs_mix:.4f}, R2: {val_r2_rs_mix:.4f}, NLL: {val_nll_rs_mix:.4f}'
+            #    f'Validation VV Mixture MAE: {val_mae_vv_mix:.4f}, RMSE: {val_rmse_vv_mix:.4f}, R2: {val_r2_vv_mix:.4f}, NLL: {val_nll_vv_mix:.4f}'
+            #)
+        if len(true_vh) > 0:
+            print(
+                f'Validation VH MAE: {val_mae_vh:.4f}, RMSE: {val_rmse_vh:.4f}, R2: {val_r2_vh:.4f}, NLL: {val_nll_vh:.4f}'
+            )
+            #print(
+            #    f'Validation VH Mixture MAE: {val_mae_vh_mix:.4f}, RMSE: {val_rmse_vh_mix:.4f}, R2: {val_r2_vh_mix:.4f}, NLL: {val_nll_vh_mix:.4f}'
             #)
         #print(
         #    f'Validation Avg Pred: {avg_val_pred:.4f}, Validation Avg True: {avg_val_true:.4f}, Validation Avg Std: {avg_val_std:.4f}'
@@ -879,13 +1019,17 @@ def train_fold_k(
         model,
         val_loss,
         val_loss_insitu,
-        val_loss_rs,
+        val_loss_vv,
+        val_loss_vh,
         mu_i_val,
         logv_i_val,
-        mu_rs_val,
-        logv_rs_val,
+        mu_vv_val,
+        logv_vv_val,
+        mu_vh_val,
+        logv_vh_val,
         true_i_val,
-        true_rs_val,
+        true_vv_val,
+        true_vh_val,
         _
     ) = run_model(
         model,
@@ -893,25 +1037,50 @@ def train_fold_k(
         device,
         criterion,
         train_model=False,
-        lambda_rs=rs_factor
+        lambda_vv=rs_factor,
+        lambda_vh=rs_factor
     )
-    lfmc_i_val_only = mu_i_val[val_source.numpy() == 1 ] * y_std + y_mean
-    lfmc_std_i_val_only = np.sqrt(np.exp(logv_i_val[val_source.numpy() == 1])) * y_std
+    lfmc_i_val_only = mu_i_val[val_source.numpy() == 0] * y_std + y_mean
+    lfmc_std_i_val_only = np.sqrt(np.exp(logv_i_val[val_source.numpy() == 0])) * y_std
     lfmc_i_val_true = true_i * y_std + y_mean
     # calculate metrics of interet
     val_mae = np.mean(np.abs(lfmc_i_val_only - lfmc_i_val_true))
     val_r2 = r2_score(lfmc_i_val_true, lfmc_i_val_only)
     val_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_i_val_only) + ((lfmc_i_val_true - lfmc_i_val_only) ** 2) / (lfmc_std_i_val_only ** 2)))
     val_rmse = np.sqrt(np.mean((lfmc_i_val_only - lfmc_i_val_true) ** 2))
-    # and for rs data
-    if len(true_rs) > 0:
-        lfmc_rs_val_only = mu_rs_val[val_source.numpy() == 0] * y_std + y_mean
-        lfmc_std_rs_val_only = np.sqrt(np.exp(logv_rs_val[val_source.numpy() == 0])) * y_std
-        lfmc_rs_val_true = true_rs * y_std + y_mean
-        val_mae_rs = np.mean(np.abs(lfmc_rs_val_only - lfmc_rs_val_true))
-        val_r2_rs = r2_score(lfmc_rs_val_true, lfmc_rs_val_only)
-        val_nll_rs = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_rs_val_only) + ((lfmc_rs_val_true - lfmc_rs_val_only) ** 2) / (lfmc_std_rs_val_only ** 2)))
-        val_rmse_rs = np.sqrt(np.mean((lfmc_rs_val_only - lfmc_rs_val_true) ** 2))
+    # and for vv data
+    if len(true_vv) > 0:
+        lfmc_vv_val_only = mu_vv_val[val_source.numpy() == 1] * y_std + y_mean
+        lfmc_std_vv_val_only = np.sqrt(np.exp(logv_vv_val[val_source.numpy() == 1])) * y_std
+        lfmc_vv_val_true = true_vv * y_std + y_mean
+        val_mae_vv = np.mean(np.abs(lfmc_vv_val_only - lfmc_vv_val_true))
+        val_r2_vv = r2_score(lfmc_vv_val_true, lfmc_vv_val_only)
+        val_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_vv_val_only) + ((lfmc_vv_val_true - lfmc_vv_val_only) ** 2) / (lfmc_std_vv_val_only ** 2)))
+        val_rmse_vv = np.sqrt(np.mean((lfmc_vv_val_only - lfmc_vv_val_true) ** 2))
+    else:
+        lfmc_vv_val_only = np.nan
+        lfmc_std_vv_val_only = np.nan
+        lfmc_vv_val_true = np.nan
+        val_mae_vv = np.nan
+        val_r2_vv = np.nan
+        val_nll_vv = np.nan
+        val_rmse_vv = np.nan
+    if len(true_vh) > 0:
+        lfmc_vh_val_only = mu_vh_val[val_source.numpy() == 2] * y_std + y_mean
+        lfmc_std_vh_val_only = np.sqrt(np.exp(logv_vh_val[val_source.numpy() == 2])) * y_std
+        lfmc_vh_val_true = true_vh * y_std + y_mean
+        val_mae_vh = np.mean(np.abs(lfmc_vh_val_only - lfmc_vh_val_true))
+        val_r2_vh = r2_score(lfmc_vh_val_true, lfmc_vh_val_only)
+        val_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_vh_val_only) + ((lfmc_vh_val_true - lfmc_vh_val_only) ** 2) / (lfmc_std_vh_val_only ** 2)))
+        val_rmse_vh = np.sqrt(np.mean((lfmc_vh_val_only - lfmc_vh_val_true) ** 2))
+    else:
+        lfmc_vh_val_only = np.nan
+        lfmc_std_vh_val_only = np.nan
+        lfmc_vh_val_true = np.nan
+        val_mae_vh = np.nan
+        val_r2_vh = np.nan
+        val_nll_vh = np.nan
+        val_rmse_vh = np.nan
     # average values for sanity check
     #avg_val_pred = np.mean(lfmc_i_val)
     #avg_val_true = np.mean(lfmc_i_val_true)
@@ -919,22 +1088,30 @@ def train_fold_k(
     print(
         f'Validation MAE: {val_mae:.4f}, RMSE: {val_rmse:.4f}, R2: {val_r2:.4f}, NLL: {val_nll:.4f}'
     )
-    if len(true_rs) > 0:
+    if len(true_vv) > 0:
         print(
-            f'Validation RS MAE: {val_mae_rs:.4f}, RMSE: {val_rmse_rs:.4f}, R2: {val_r2_rs:.4f}, NLL: {val_nll_rs:.4f}'
+            f'Validation VV MAE: {val_mae_vv:.4f}, RMSE: {val_rmse_vv:.4f}, R2: {val_r2_vv:.4f}, NLL: {val_nll_vv:.4f}'
+        )
+    if len(true_vh) > 0:
+        print(
+            f'Validation VH MAE: {val_mae_vh:.4f}, RMSE: {val_rmse_vh:.4f}, R2: {val_r2_vh:.4f}, NLL: {val_nll_vh:.4f}'
         )
     # run the test
     (
         model,
         test_loss,
         test_loss_insitu,
-        test_loss_rs,
+        test_loss_vv,
+        test_loss_vh,
         mu_i_test,
         logv_i_test,
-        mu_rs_test,
-        logv_rs_test,
+        mu_vv_test,
+        logv_vv_test,
+        mu_vh_test,
+        logv_vh_test,
         true_i_test,
-        true_rs_test,
+        true_vv_test,
+        true_vh_test,
         _
     ) = run_model(
         model,
@@ -942,7 +1119,8 @@ def train_fold_k(
         device,
         criterion,
         train_model=False,
-        lambda_rs=rs_factor
+        lambda_vv=rs_factor,
+        lambda_vh=rs_factor
     )
     # denorm
     if len(mu_i_test) == 0:
@@ -960,23 +1138,47 @@ def train_fold_k(
         test_nll = np.nan
         test_rmse = np.nan
     else:
-        lfmc_i_test_only = mu_i_test[test_source.numpy() == 1 ] * y_std + y_mean
-        lfmc_std_i_test_only = np.sqrt(np.exp(logv_i_test[test_source.numpy() == 1])) * y_std
+        lfmc_i_test_only = mu_i_test[test_source.numpy() == 0] * y_std + y_mean
+        lfmc_std_i_test_only = np.sqrt(np.exp(logv_i_test[test_source.numpy() == 0])) * y_std
         lfmc_i_test_true = true_i_test * y_std + y_mean
         # calculate metrics of interet
         test_mae = np.mean(np.abs(lfmc_i_test_only - lfmc_i_test_true))
         test_r2 = r2_score(lfmc_i_test_true, lfmc_i_test_only)
         test_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_i_test_only) + ((lfmc_i_test_true - lfmc_i_test_only) ** 2) / (lfmc_std_i_test_only ** 2)))
         test_rmse = np.sqrt(np.mean((lfmc_i_test_only - lfmc_i_test_true) ** 2))
-        # and for rs data
-        if len(true_rs) > 0:
-            lfmc_rs_test_only = mu_rs_test[test_source.numpy() == 0] * y_std + y_mean
-            lfmc_std_rs_test_only = np.sqrt(np.exp(logv_rs_test[test_source.numpy() == 0])) * y_std
-            lfmc_rs_test_true = true_rs_test * y_std + y_mean
-            test_mae_rs = np.mean(np.abs(lfmc_rs_test_only - lfmc_rs_test_true))
-            test_r2_rs = r2_score(lfmc_rs_test_true, lfmc_rs_test_only)
-            test_nll_rs = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_rs_test_only) + ((lfmc_rs_test_true - lfmc_rs_test_only) ** 2) / (lfmc_std_rs_test_only ** 2)))
-            test_rmse_rs = np.sqrt(np.mean((lfmc_rs_test_only - lfmc_rs_test_true) ** 2))
+        # and for vv data
+        if len(true_vv) > 0:
+            lfmc_vv_test_only = mu_vv_test[test_source.numpy() == 1] * y_std + y_mean
+            lfmc_std_vv_test_only = np.sqrt(np.exp(logv_vv_test[test_source.numpy() == 1])) * y_std
+            lfmc_vv_test_true = true_vv_test * y_std + y_mean
+            test_mae_vv = np.mean(np.abs(lfmc_vv_test_only - lfmc_vv_test_true))
+            test_r2_vv = r2_score(lfmc_vv_test_true, lfmc_vv_test_only)
+            test_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_vv_test_only) + ((lfmc_vv_test_true - lfmc_vv_test_only) ** 2) / (lfmc_std_vv_test_only ** 2)))
+            test_rmse_vv = np.sqrt(np.mean((lfmc_vv_test_only - lfmc_vv_test_true) ** 2))
+        else:
+            lfmc_vv_test_only = np.nan
+            lfmc_std_vv_test_only = np.nan
+            lfmc_vv_test_true = np.nan
+            test_mae_vv = np.nan
+            test_r2_vv = np.nan
+            test_nll_vv = np.nan
+            test_rmse_vv = np.nan
+        if len(true_vh) > 0:
+            lfmc_vh_test_only = mu_vh_test[test_source.numpy() == 2] * y_std + y_mean
+            lfmc_std_vh_test_only = np.sqrt(np.exp(logv_vh_test[test_source.numpy() == 2])) * y_std
+            lfmc_vh_test_true = true_vh_test * y_std + y_mean
+            test_mae_vh = np.mean(np.abs(lfmc_vh_test_only - lfmc_vh_test_true))
+            test_r2_vh = r2_score(lfmc_vh_test_true, lfmc_vh_test_only)
+            test_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_vh_test_only) + ((lfmc_vh_test_true - lfmc_vh_test_only) ** 2) / (lfmc_std_vh_test_only ** 2)))
+            test_rmse_vh = np.sqrt(np.mean((lfmc_vh_test_only - lfmc_vh_test_true) ** 2))
+        else:
+            lfmc_vh_test_only = np.nan
+            lfmc_std_vh_test_only = np.nan
+            lfmc_vh_test_true = np.nan
+            test_mae_vh = np.nan
+            test_r2_vh = np.nan
+            test_nll_vh = np.nan
+            test_rmse_vh = np.nan
         # average testues for sanity check
         #avg_test_pred = np.mean(lfmc_i_test)
         #avg_test_true = np.mean(lfmc_i_test_true)
@@ -984,9 +1186,13 @@ def train_fold_k(
         print(
             f'testidation MAE: {test_mae:.4f}, RMSE: {test_rmse:.4f}, R2: {test_r2:.4f}, NLL: {test_nll:.4f}'
         )
-        if len(true_rs) > 0:
+        if len(true_vv) > 0:
             print(
-                f'testidation RS MAE: {test_mae_rs:.4f}, RMSE: {test_rmse_rs:.4f}, R2: {test_r2_rs:.4f}, NLL: {test_nll_rs:.4f}'
+                f'testidation VV MAE: {test_mae_vv:.4f}, RMSE: {test_rmse_vv:.4f}, R2: {test_r2_vv:.4f}, NLL: {test_nll_vv:.4f}'
+            )
+        if len(true_vh) > 0:
+            print(
+                f'testidation VH MAE: {test_mae_vh:.4f}, RMSE: {test_rmse_vh:.4f}, R2: {test_r2_vh:.4f}, NLL: {test_nll_vh:.4f}'
             )
     # save the outputs
     torch.save(
@@ -999,13 +1205,17 @@ def train_fold_k(
         {
             'loss':val_loss,
             'loss_insitu':val_loss_insitu,
-            'loss_rs':val_loss_rs,
+            'loss_vv':val_loss_vv,
+            'loss_vh':val_loss_vh,
             'lfmc_insitu_preds':lfmc_i_val_only,
             'lfmc_insitu_std':lfmc_std_i_val_only,
-            'lfmc_rs_preds':lfmc_rs_val_only,
-            'lfmc_rs_std':lfmc_std_rs_val_only,
+            'lfmc_vv_preds':lfmc_vv_val_only,
+            'lfmc_vv_std':lfmc_std_vv_val_only,
+            'lfmc_vh_preds':lfmc_vh_val_only,
+            'lfmc_vh_std':lfmc_std_vh_val_only,
             'lfmc_insitu_true':lfmc_i_val_true,
-            'lfmc_rs_true':lfmc_rs_val_true
+            'lfmc_vv_true':lfmc_vv_val_true,
+            'lfmc_vh_true':lfmc_vh_val_true
         },
         os.path.join(fold_save_dir,'val_outputs.pth')
     )
@@ -1013,13 +1223,17 @@ def train_fold_k(
         {
             'loss':test_loss,
             'loss_insitu':test_loss_insitu,
-            'loss_rs':test_loss_rs,
+            'loss_vv':test_loss_vv,
+            'loss_vh':test_loss_vh,
             'lfmc_insitu_preds':lfmc_i_test_only,
             'lfmc_insitu_std':lfmc_std_i_test_only,
-            'lfmc_rs_preds':lfmc_rs_test_only,
-            'lfmc_rs_std':lfmc_std_rs_test_only,
+            'lfmc_vv_preds':lfmc_vv_test_only,
+            'lfmc_vv_std':lfmc_std_vv_test_only,
+            'lfmc_vh_preds':lfmc_vh_test_only,
+            'lfmc_vh_std':lfmc_std_vh_test_only,
             'lfmc_insitu_true':lfmc_i_test_true,
-            'lfmc_rs_true':lfmc_rs_test_true
+            'lfmc_vv_true':lfmc_vv_test_true,
+            'lfmc_vh_true':lfmc_vh_test_true
         },
         os.path.join(fold_save_dir,'test_outputs.pth')
     )
@@ -1042,7 +1256,7 @@ def main():
     np.random.seed(42)
     # configs
     # directories, etc.
-    input_data_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs'
+    input_data_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_multitasksar'
     save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs'
     # training settings
     batch_size = 128
@@ -1051,10 +1265,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type != 'cuda':
         print('WARNING: CUDA not available, using CPU. This will be slow!')
-    warmup_steps = 1500
+    warmup_steps = 400
     base_lr = lr
     warmup_start_lr = 1e-6
-    val_split = 0.15
+    val_split = 0.2
     adam_weight_decay = 1e-4
     patience = 8
     # model hyperparameters (go back to the github and get what I deleted here)
@@ -1062,8 +1276,14 @@ def main():
     nhead = 2
     num_layers = 2
     dim_feedforward = 128
-    dropout = 0.15
+    dropout = 0.2
     rs_factor = 1.0 # weighting for RS loss
+    # long model hyperparameters
+    long_d_model = 64
+    long_nhead = 2
+    long_num_layers = 2
+    long_dim_feedforward = 128
+    long_out_dim = 64
     # load the data
     datasets = load_data(input_data_dir)
     var_names = json.load(
@@ -1071,30 +1291,41 @@ def main():
     )
     # get the input dims that we are working with to build the model
     short_input_dim = datasets[0].shape[-1]
-    static_input_dim = datasets[1].shape[-1]
-    # set up the save directories
-    full_save_dir = os.path.join(save_dir, this_model_name)
-    if os.path.exists(full_save_dir):
-        shutil.rmtree(full_save_dir)
-    os.makedirs(full_save_dir)
+    long_input_dim = datasets[1].shape[-1]
+    static_input_dim = datasets[2].shape[-1]
     # build the folds by location
-    daily_data = datasets[0]
-    info = datasets[4]
+    short_data = datasets[0]
+    long_data = datasets[1]
+    static_data = datasets[2]
+    info = datasets[5]
     num_rs_obs = info[info['source'] == 'rs'].shape[0]
     this_model_name = (
         f'transformer_dm{d_model}_nh{nhead}_nl{num_layers}_df{dim_feedforward}'
         f'_do{dropout}_bs{batch_size}_lr{lr}_warmup{warmup_steps}'
         f'_wd{adam_weight_decay}_rsf{rs_factor}_rsobs{num_rs_obs}'
+        f'_dmlong{long_d_model}_nhlong{long_nhead}_nllong{long_num_layers}'
+        f'_dflong{long_dim_feedforward}_outlong{long_out_dim}'
+        f'_multitasksar'
     )
+    # set up the save directories
+    full_save_dir = os.path.join(save_dir, this_model_name)
+    if os.path.exists(full_save_dir):
+        shutil.rmtree(full_save_dir)
+    os.makedirs(full_save_dir)
     n_folds = 10
     total_obs_insitu_obs = (
-        info[info['source'] == 'nfmd'].shape[0]
+        info[info['source_legible'] == 'nfmd'].shape[0]
     )
-    total_obs_rs_obs = (
-        info[info['source'] == 'rs'].shape[0]
+    total_obs_vv_obs = (
+        info[info['source_legible'] == 'vh'].shape[0]
     )
+    total_obs_vh_obs = (
+        info[info['source_legible'] == 'vh'].shape[0]
+    )
+
     desired_insitu_obs_per_fold = total_obs_insitu_obs / n_folds
-    desired_rs_obs_per_fold = total_obs_rs_obs / n_folds
+    desired_vv_obs_per_fold = total_obs_vv_obs / n_folds
+    desired_vh_obs_per_fold = total_obs_vh_obs / n_folds
     fold_locs = {}
     used_sites = []
     for fold in range(n_folds):
@@ -1102,7 +1333,8 @@ def main():
         this_locs = create_site_split(
             info,
             desired_insitu_sample_size=int(desired_insitu_obs_per_fold),
-            desired_rs_sample_size=int(desired_rs_obs_per_fold),
+            desired_vv_sample_size=int(desired_vv_obs_per_fold),
+            desired_vh_sample_size=int(desired_vh_obs_per_fold),
             used_sites=used_sites
         )
         used_sites.extend(this_locs)
@@ -1114,15 +1346,21 @@ def main():
     for fold, locs in enumerate(fold_locs.items()):
         print(f'Training fold {fold+1}/{n_folds} with {len(locs[1])} locations held out for testing')
         # build the model
-        model = LFMCTransformerMultiTask(
+        model = LFMCTransformerMultiTaskLongClimate(
             short_input_dim=short_input_dim,
             static_input_dim=static_input_dim,
+            long_input_dim=long_input_dim,
             d_model=d_model,
             nhead=nhead,
             num_layers=num_layers,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
-            num_queries=2
+            num_queries=2,
+            long_d_model=long_d_model,
+            long_nhead=long_nhead,
+            long_num_layers=long_num_layers,
+            long_dim_feedforward=long_dim_feedforward,
+            long_out_dim=long_out_dim
         ).to(device)
         # build the optimizer
         decay, no_decay = [], []
@@ -1172,15 +1410,21 @@ def main():
         )
     # one final version of the model trained on all the data
     print('Training final model on all data')
-    model = LFMCTransformerMultiTask(
+    model = LFMCTransformerMultiTaskLongClimate(
         short_input_dim=short_input_dim,
         static_input_dim=static_input_dim,
-        d_model=d_model,   
+        long_input_dim=long_input_dim,
+        d_model=d_model,
         nhead=nhead,
         num_layers=num_layers,
         dim_feedforward=dim_feedforward,
         dropout=dropout,
-        num_queries=2
+        num_queries=2,
+        long_d_model=long_d_model,
+        long_nhead=long_nhead,
+        long_num_layers=long_num_layers,
+        long_dim_feedforward=long_dim_feedforward,
+        long_out_dim=long_out_dim
     ).to(device)
     # build the optimizer
     decay, no_decay = [], []

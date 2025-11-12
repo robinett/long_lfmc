@@ -18,6 +18,7 @@ from typing import Optional, Tuple, List, Dict
 import json
 import xarray as xr
 import rioxarray as rxr
+import pyproj
 
 # append up one dir to path
 sys.path.append(sys.path[0] + '/../..')
@@ -34,28 +35,30 @@ def _detect_reason_columns(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
     return retrieved_cols, filled_cols
 
 def drop_nans_with_reasons(
-    df: pd.DataFrame
+    df: pd.DataFrame,
+    target_cols: Optional[List[str]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, int], Dict[str, pd.DataFrame]]:
     """
-    Drops any row with ≥1 NaN. Returns:
-      kept_df: rows with no NaNs anywhere
-      counts:  totals per drop reason (same keys as before + a few helpers)
-      dropped: dataframes for each reason bucket
-
-    Buckets (mutually exclusive, sum to total_nan_rows):
-      - only_retrieved
-      - only_filled
-      - both
-      - other   (NaNs outside retrieved/filled cols)
-
-    Convenience (overlapping) views also included:
-      - retrieved_any = only_retrieved ∪ both
-      - filled_any    = only_filled ∪ both
-      - any_nan       = all dropped rows
+    Drops any row with ≥1 NaN, EXCEPT rows where any `target_cols`
+    has a non-NaN value (those are kept).
     """
     retrieved_cols, filled_cols = _detect_reason_columns(df)
 
-    nan_mask = df.isna().any(axis=1)
+    # Base "has any NaN" rule
+    nan_mask_base = df.isna().any(axis=1)
+
+    # Keep rows if any target col is non-NaN
+    if target_cols:
+        _tcols = [c for c in target_cols if c in df.columns]
+        if _tcols:
+            has_target_value = df[_tcols].notna().any(axis=1)
+        else:
+            has_target_value = pd.Series(False, index=df.index, dtype=bool)
+    else:
+        has_target_value = pd.Series(False, index=df.index, dtype=bool)
+
+    # Only drop if: (has any NaN) AND (no target col has value)
+    nan_mask = nan_mask_base & ~has_target_value
     nan_rows = df.loc[nan_mask]
 
     # masks within rows we’re dropping
@@ -107,19 +110,105 @@ def drop_nans_with_reasons(
         "other": other_count,
     }
 
-    # Build the dropped DataFrame views
     dropped = {
         "only_retrieved": nan_rows.loc[only_ret].copy(),
         "only_filled":    nan_rows.loc[only_fill].copy(),
         "both":           nan_rows.loc[both_nan].copy(),
         "other":          nan_rows.loc[other_nan].copy(),
-        # convenience (overlapping) views:
         "retrieved_any":  nan_rows.loc[only_ret | both_nan].copy(),
         "filled_any":     nan_rows.loc[only_fill | both_nan].copy(),
         "any_nan":        nan_rows.copy(),
     }
 
     return kept, counts, dropped
+
+#def drop_nans_with_reasons(
+#    df: pd.DataFrame
+#) -> Tuple[pd.DataFrame, Dict[str, int], Dict[str, pd.DataFrame]]:
+#    """
+#    Drops any row with ≥1 NaN. Returns:
+#      kept_df: rows with no NaNs anywhere
+#      counts:  totals per drop reason (same keys as before + a few helpers)
+#      dropped: dataframes for each reason bucket
+#
+#    Buckets (mutually exclusive, sum to total_nan_rows):
+#      - only_retrieved
+#      - only_filled
+#      - both
+#      - other   (NaNs outside retrieved/filled cols)
+#
+#    Convenience (overlapping) views also included:
+#      - retrieved_any = only_retrieved ∪ both
+#      - filled_any    = only_filled ∪ both
+#      - any_nan       = all dropped rows
+#    """
+#    retrieved_cols, filled_cols = _detect_reason_columns(df)
+#
+#    nan_mask = df.isna().any(axis=1)
+#    nan_rows = df.loc[nan_mask]
+#
+#    # masks within rows we’re dropping
+#    if retrieved_cols:
+#        retrieved_nan = nan_rows[retrieved_cols].isna().any(axis=1)
+#    else:
+#        retrieved_nan = pd.Series(False, index=nan_rows.index, dtype=bool)
+#
+#    if filled_cols:
+#        filled_nan = nan_rows[filled_cols].isna().any(axis=1)
+#    else:
+#        filled_nan = pd.Series(False, index=nan_rows.index, dtype=bool)
+#
+#    both_nan  = retrieved_nan & filled_nan
+#    only_ret  = retrieved_nan & ~filled_nan
+#    only_fill = filled_nan & ~retrieved_nan
+#
+#    # "other" = NaNs outside retrieved/filled columns
+#    reason_cols = sorted(set(retrieved_cols) | set(filled_cols))
+#    if reason_cols:
+#        other_nan = (~retrieved_nan & ~filled_nan &
+#                     nan_rows.drop(columns=reason_cols).isna().any(axis=1))
+#    else:
+#        # no retrieved/filled columns at all → everything is "other"
+#        other_nan = pd.Series(True, index=nan_rows.index, dtype=bool)
+#
+#    total            = int(nan_mask.sum())
+#    only_ret_count   = int(only_ret.sum())
+#    only_fill_count  = int(only_fill.sum())
+#    both_count       = int(both_nan.sum())
+#    other_count      = int(other_nan.sum())
+#    retrieved_count  = only_ret_count + both_count
+#    filled_count     = only_fill_count + both_count
+#
+#    # invariants with the explicit "other" bucket
+#    assert total == only_ret_count + only_fill_count + both_count + other_count
+#    assert retrieved_count == only_ret_count + both_count
+#    assert filled_count    == only_fill_count + both_count
+#
+#    kept = df.loc[~nan_mask]
+#
+#    counts = {
+#        "total_nan_rows": total,
+#        "retrieved": retrieved_count,
+#        "filled": filled_count,
+#        "both": both_count,
+#        "only_retrieved": only_ret_count,
+#        "only_filled": only_fill_count,
+#        "other": other_count,
+#    }
+#
+#    # Build the dropped DataFrame views
+#    dropped = {
+#        "only_retrieved": nan_rows.loc[only_ret].copy(),
+#        "only_filled":    nan_rows.loc[only_fill].copy(),
+#        "both":           nan_rows.loc[both_nan].copy(),
+#        "other":          nan_rows.loc[other_nan].copy(),
+#        # convenience (overlapping) views:
+#        "retrieved_any":  nan_rows.loc[only_ret | both_nan].copy(),
+#        "filled_any":     nan_rows.loc[only_fill | both_nan].copy(),
+#        "any_nan":        nan_rows.copy(),
+#    }
+#
+#    return kept, counts, dropped
 
 def init_nan_totals() -> Dict[str, int]:
     return {
@@ -235,24 +324,25 @@ def load_and_clean_csv(
 
 def filter_lag_columns(
     df,
-    day_lags
+    static_vars,
+    short_lag_days,
+    short_vars,
+    long_lag_days,
+    long_vars,
+    target_vars,
+    info_vars
 ):
-    day_suffixes = [f'_lag_{day}d' for day in day_lags]
-    matched_suffixes = set()
-    def keep_column(col: str):
-        match = re.search(r'lag_\d+[dh]',col)
-        if match:
-            for suffix in day_suffixes:
-                if col.endswith(suffix):
-                    matched_suffixes.add(suffix)
-                    return True
-            return False
-        return True # non-lag columns are kept
-    cols_to_keep = [col for col in df.columns if keep_column(col)]    
-    unmatched_suffixes = set(day_suffixes) - matched_suffixes
-    if unmatched_suffixes:
-        raise ValueError(f"Unmatched lag suffixes: {unmatched_suffixes}")
-    return df[cols_to_keep]    
+    keep_cols = static_vars + target_vars + info_vars
+    for sv,s_var in enumerate(short_vars):
+        for sd,s_day in enumerate(short_lag_days):
+            keep_cols.append(f'{s_var}_lag_{s_day}d')
+    for lv,l_var in enumerate(long_vars):
+        for ld,l_day in enumerate(long_lag_days):
+            keep_cols.append(f'{l_var}_lag_{l_day}d')
+    keep_cols = list(dict.fromkeys(keep_cols)) # make unique
+    cols_to_keep = [col for col in df.columns if col in keep_cols]
+    df = df[cols_to_keep]
+    return df
 
 def _coerce_numeric_block(df_block: pd.DataFrame) -> np.ndarray:
     """Coerce a DataFrame block to float32 numpy (handles object dtypes)."""
@@ -348,53 +438,65 @@ def build_inputs(
     first_label_date,
     last_label_date,
     static_features,
-    dynamic_features,
+    short_features,
+    long_features,
     info_features,
-    target_col,
+    target_cols,
     var_names,
-    lag_days,
+    short_lag_days,
+    long_lag_days,
     save_dir,
     model_name='transformer',
     acceptable_lfmc_range=(30,500), # Example range for LFMC, adjust
     num_rs_samples=0.0, # will include num_nfmd_samples * factor random samples from RS data
     include_lag=True,
     make_plots=False,
-    krishna_for_constraint=False
+    only_at_krishna_retrievals=False
 ):
     totals = init_nan_totals()
+    krishna_transforms = {}
     for c,csv in enumerate(csvs):
         print(f'Processing CSV {c+1}/{len(csvs)}: {csv}')
         #df = pd.read_csv(csv, parse_dates=['date'])
         df = load_and_clean_csv(csv)
+        # keep anything that we need for both long and short lag days
+        combined_lag_days = list(set(short_lag_days).union(set(long_lag_days)))
         df = filter_lag_columns(
             df,
-            lag_days
+            static_features,
+            short_lag_days,
+            short_features,
+            long_lag_days,
+            long_features,
+            target_cols,
+            info_features
         )
-        # keep only the columns corresponding to any of our passed features
+        # fill any missing columns
         required_cols = (
             static_features +
             info_features +
-            target_col +
-            [f'{var}_lag_{day}d' for var in dynamic_features for day in lag_days]
+            target_cols +
+            [f'{var}_lag_{day}d' for var in short_features for day in short_lag_days] +
+            [f'{var}_lag_{day}d' for var in long_features for day in long_lag_days]
         )
+        # make sure that this is a unique list
+        required_cols = list(dict.fromkeys(required_cols))
         missing_cols = [col for col in required_cols if col not in df.columns]
         for col in missing_cols:
             print(f'Warning: required column {col} not found in {csv}')
             # fill with zeros
             df = df.copy()
             df[col] = 0.0
-        # make sure that this is a unique list
-        required_cols = list(dict.fromkeys(required_cols))
         df = df[required_cols]
         # get rid of any columns outside of the acceptable lfmc range
-        df = df[(df['lfmc'] >= acceptable_lfmc_range[0]) & (df['lfmc'] <= acceptable_lfmc_range[1])]
-        # get rid of any rows with nans
-        df, nan_counts, dropped_dfs = drop_nans_with_reasons(df)
-        # find where nans are persisting
-        for col in df.columns:
-            if df[col].isna().any():
-                print(f"Warning: column {col} contains NaNs")
-                sys.exit()
+        df = df[
+            (df['lfmc'].isna()) |
+            (
+                (df['lfmc'] >= acceptable_lfmc_range[0]) &
+                (df['lfmc'] <= acceptable_lfmc_range[1])
+            )
+        ]
+        df, nan_counts, dropped_dfs = drop_nans_with_reasons(df,target_cols)
         totals = accumulate_nan_counts(totals,nan_counts)
         # make the plots diagnosing why rows were dropped, if desired
         if make_plots:
@@ -411,82 +513,136 @@ def build_inputs(
         # add in the remote sensing samples according to the specified factor
         # get the number of insitu samples
         in_situ_df = df[df['source'] == 'nfmd']
+        adding_df = in_situ_df.copy()
         num_insitu_samples = in_situ_df.shape[0]
-        source_labels = np.ones(len(in_situ_df), dtype=int)
+        source_labels = np.zeros(len(in_situ_df), dtype=int)
+        source_legible = ['nfmd' for i in range(len(in_situ_df))]
         # sample from the rs dataframe
-        rs_df = df[df['source'] == 'rs']
-        if num_rs_samples > len(rs_df):
-            print(
-                f"Warning: requested {num_rs_samples} samples from remote sensing"
-                f" data, but only {len(rs_df)} available."
+        if 'VV' in target_cols:
+            vv_df = df[df['VV'].notna()]
+            if num_rs_samples > len(vv_df):
+                print(
+                    f"Warning: requested {num_rs_samples} samples from VV"
+                    f" data, but only {len(vv_df)} available."
+                )
+                print("Using all available samples.")
+                this_num_vv_samples = len(vv_df)
+            else:
+                this_num_vv_samples = int(num_rs_samples)
+            vv_samples = vv_df.sample(n=this_num_vv_samples,random_state=42)
+            adding_df = pd.concat([adding_df,vv_samples], ignore_index=True)
+            source_labels = np.concatenate(
+                [source_labels, np.ones(len(vv_samples),dtype=int)]
             )
-            print("Using all available samples.")
-            this_num_rs_samples = len(rs_df)
-        else:
-            this_num_rs_samples = int(num_rs_samples)
-        rs_samples = rs_df.sample(n=this_num_rs_samples, random_state=42)
-        df = pd.concat([in_situ_df, rs_samples], ignore_index=True)
-        source_labels = np.concatenate(
-            [source_labels, np.zeros(len(rs_samples), dtype=int)]
-        )
-        # if krishna_for_constraint, we just wanted to include these to get rid of
-        # pixels where data isn't usable, so get rid of all the columns now
-        # get rid of any column that starts with 'retrieved_'
-        if krishna_for_constraint:
-            cols_to_drop = [col for col in df.columns if col.startswith('retrieved_')]
-            df = df.drop(columns=cols_to_drop)
-            static_features_use = [col for col in static_features if not col.startswith('retrieved_')]
+            [source_legible.append('vv') for i in range(len(vv_samples))]
+        if 'VH' in target_cols:
+            vh_df = df[df['VH'].notna()]
+            if num_rs_samples > len(vh_df):
+                print(
+                    f"Warning: requested {num_rs_samples} samples from VH"
+                    f" data, but only {len(vh_df)} available."
+                )
+                print("Using all available samples.")
+                this_num_vh_samples = len(vh_df)
+            else:
+                this_num_vh_samples = int(num_rs_samples)
+            vh_samples = vh_df.sample(n=this_num_vh_samples,random_state=42)
+            adding_df = pd.concat([adding_df,vh_samples], ignore_index=True)
+            source_labels = np.concatenate(
+                [source_labels, (np.ones(len(vh_samples),dtype=int) + 1)]
+            )
+            [source_legible.append('vh') for i in range(len(vh_samples))]
+        df = adding_df
+        df['source_legible'] = source_legible
         # separate out our different dataframes
         print('Separating variables')
         all_vars = df.columns.tolist()
-        all_daily_vars = []
-        for d_var in dynamic_features:
-            d_var_fmt = f'{d_var}_lag_*d'
-            this_daily_vars = fnmatch.filter(
+        all_short_vars = []
+        for s_var in short_features:
+            s_var_fmt = f'{s_var}_lag_*d'
+            this_short_vars = fnmatch.filter(
                 all_vars,
-                d_var_fmt
+                s_var_fmt
             )
-            all_daily_vars.extend(this_daily_vars)
-        all_static_vars = static_features if not krishna_for_constraint else static_features_use
+            all_short_vars.extend(this_short_vars)
+        all_long_vars = []
+        for l_var in long_features:
+            l_var_fmt = f'{l_var}_lag_*d'
+            this_long_vars = fnmatch.filter(
+                all_vars,
+                l_var_fmt
+            )
+            all_long_vars.extend(this_long_vars)
+        all_static_vars = static_features
         all_info_vars = info_features
-        all_target_vars = target_col
+        all_target_vars = target_cols
         # sort
-        daily_df = df[all_daily_vars]
+        short_df = df[all_short_vars]
+        long_df = df[all_long_vars]
         static_df = df[all_static_vars]
         info_df = df[all_info_vars]
         target_df = df[all_target_vars]
+        # need to consolidate target df into a dataframe that is a single row
+        all_target_vals = np.array([])
+        for var in target_cols:
+            # Select non-NaN values for this column
+            valid_rows = target_df[target_df[var].notna()]
+            all_target_vals = np.concatenate(
+                (all_target_vals, valid_rows[var].to_numpy())
+            )
+        # Concatenate all non-null subsets
+        target_df = target_df.copy()
+        target_df['vals'] = all_target_vals
         if include_lag:
-            dynamic_features.append('lfrac')
-            for d in lag_days:
-                this_lag_frac = d / max(lag_days)
-                daily_df = daily_df.copy()
-                daily_df[f'lfrac_lag_{d}d'] = this_lag_frac
+            short_features.append('lfrac')
+            long_features.append('lfrac')
+            for sd in short_lag_days:
+                this_lag_frac = sd / max(short_lag_days)
+                short_df = short_df.copy()
+                short_df[f'lfrac_lag_{sd}d'] = this_lag_frac
+            for ld in long_lag_days:
+                this_lag_frac = ld / max(long_lag_days)
+                long_df = long_df.copy()
+                long_df[f'lfrac_lag_{ld}d'] = this_lag_frac
         # convert to tensors
         print('Converting to tensors')
         # if this is the first csv, initialize tensors
         if c == 0:
-            X_daily = df_to_tensor(
-                daily_df,
-                dynamic_features,
+            X_short = df_to_tensor(
+                short_df,
+                short_features,
+                'd'
+            )
+            X_long = df_to_tensor(
+                long_df,
+                long_features,
                 'd'
             )
             X_static = df_to_tensor(
                 static_df,
-                static_features if not krishna_for_constraint else static_features_use,
+                static_features,
                 None
             )
             Y = df_to_tensor(
                 target_df,
-                target_col,
+                ['vals'],
                 None
             )
             source = torch.from_numpy(source_labels)
             all_info_df = copy.deepcopy(info_df)
         else:
-            X_daily = torch.cat(
-                (X_daily, df_to_tensor(
-                    daily_df,
-                    dynamic_features,
+            X_short = torch.cat(
+                (X_short, df_to_tensor(
+                    short_df,
+                    short_features,
+                    'd'
+                )),
+                dim=0
+            )
+            X_long = torch.cat(
+                (X_long, df_to_tensor(
+                    long_df,
+                    long_features,
                     'd'
                 )),
                 dim=0
@@ -494,7 +650,7 @@ def build_inputs(
             X_static = torch.cat(
                 (X_static, df_to_tensor(
                     static_df,
-                    static_features if not krishna_for_constraint else static_features_use,
+                    static_features,
                     None
                 )),
                 dim=0
@@ -502,7 +658,7 @@ def build_inputs(
             Y = torch.cat(
                 (Y, df_to_tensor(
                     target_df,
-                    target_col,
+                    ['vals'],
                     None
                 )),
                 dim=0
@@ -517,7 +673,8 @@ def build_inputs(
             )
         if include_lag:
             # remove lfrac from dynamic features so that it is not duplicated
-            dynamic_features.remove('lfrac')
+            short_features.remove('lfrac')
+            long_features.remove('lfrac')
         print('current all info df:')
         print(all_info_df)
     # get rid of any static features that are all zeros
@@ -525,7 +682,7 @@ def build_inputs(
     all_zero_static_cols = (X_static.abs().sum(dim=(0, 1)) == 0).squeeze()
     X_static = X_static[:, :, non_zero_static_cols]
     static_features_new = []
-    for i,col in enumerate(static_features if not krishna_for_constraint else static_features_use):
+    for i,col in enumerate(static_features):
         if all_zero_static_cols[i]:
             print(f'Warning: static feature {col} is all zeros. Dropping.')
         else:
@@ -604,16 +761,19 @@ def build_inputs(
     print(f'  of which are solely retrieved static: {totals["only_retrieved"]}')
     print(f'  of which are solely filled MODIS: {totals["only_filled"]}')
     print(f'  of which are other: {totals["other"]}')
-    frac_insitu = (source == 1).sum().item() / len(source)
-    frac_rs = (source == 0).sum().item() / len(source)
-    print(f'In final dataset, fraction insitu: {frac_insitu:.3f}, fraction rs: {frac_rs:.3f}')
-    print(f'X_daily shape: {X_daily.shape}')
+    frac_insitu = (source == 0).sum().item() / len(source)
+    frac_vv = (source == 1).sum().item() / len(source)
+    frac_vh = (source == 2).sum().item() / len(source)
+    print(f'In final dataset, fraction insitu: {frac_insitu:.3f}, fraction vv: {frac_vv:.3f}, fraction vh: {frac_vh:.3f}')
+    print(f'X_short shape: {X_short.shape}')
+    print(f'X_long shape: {X_long.shape}')
     print(f'X_static shape: {X_static.shape}')
     print(f'Y shape: {Y.shape}')
     print(f'info_df shape: {all_info_df.shape}')
     # save to disk
     print('Saving tensors to disk')
-    torch.save(X_daily,os.path.join(save_dir,'X_daily.pt'))
+    torch.save(X_short,os.path.join(save_dir,'X_short.pt'))
+    torch.save(X_long,os.path.join(save_dir,'X_long.pt'))
     torch.save(X_static,os.path.join(save_dir,'X_static.pt'))
     torch.save(Y,os.path.join(save_dir,'Y.pt'))
     torch.save(source,os.path.join(save_dir,'source.pt'))
@@ -627,11 +787,11 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     # fill in follwing necessary information for producing the correct dataset
-    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_30daysweather_nokrishnastats'
+    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_singletask_sar'
     os.makedirs(save_dir, exist_ok=True)
     csv_names = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/compiled/'
-        'y_InsituRS_X_ModisfilledDaymetStaticClimatezoneKrishnastats_30d/'
+        'y_InsituVvVhVvminusvh_X_ModisfilledDaymetStaticClimatezoneSarstats_180d/'
         'compiled_data_*.csv'
     )
     csv_names = sorted(glob.glob(csv_names))
@@ -655,29 +815,28 @@ if __name__ == "__main__":
         'climate_zone_24','climate_zone_25',
         'climate_zone_26','climate_zone_27',
         'climate_zone_28','climate_zone_29',
-        'retrieved_lfmc_mean',
-        'retrieved_lfmc_std',
-        'retrieved_lfmc_min',
-        'retrieved_lfmc_max',
-        #'retrieved_Jan_mean',
-        #'retrieved_Feb_mean',
-        #'retrieved_Mar_mean',
-        #'retrieved_Apr_mean',
-        #'retrieved_May_mean',
-        #'retrieved_Jun_mean',
-        #'retrieved_Jul_mean',
-        #'retrieved_Aug_mean',
-        #'retrieved_Sep_mean',
-        #'retrieved_Oct_mean',
-        #'retrieved_Nov_mean',
-        #'retrieved_Dec_mean',
-        'retrieved_lfmc_skewness',
-        'retrieved_lfmc_kurtosis',
-        'retrieved_lfmc_autocorr1',
-        'retrieved_lfmc_autocorr2'
+        'sar_vv_mean',#'sar_vh_mean',#'sar_vv_minus_vh_mean',
+        'sar_vv_std',#'sar_vh_std',#'sar_vv_minus_vh_std',
+        'sar_vv_min',#'sar_vh_min',#'sar_vv_minus_vh_min',
+        'sar_vv_max',#'sar_vh_max',#'sar_vv_minus_vh_max',
+        #'sar_vv_jan_mean','sar_vh_jan_mean',#'sar_vv_minus_vh_jan_mean',
+        #'sar_vv_feb_mean','sar_vh_feb_mean',#'sar_vv_minus_vh_feb_mean',
+        #'sar_vv_mar_mean','sar_vh_mar_mean',#'sar_vv_minus_vh_mar_mean',
+        #'sar_vv_apr_mean','sar_vh_apr_mean',#'sar_vv_minus_vh_apr_mean',
+        #'sar_vv_may_mean','sar_vh_may_mean',#'sar_vv_minus_vh_may_mean',
+        #'sar_vv_jun_mean','sar_vh_jun_mean',#'sar_vv_minus_vh_jun_mean',
+        #'sar_vv_jul_mean','sar_vh_jul_mean',#'sar_vv_minus_vh_jul_mean',
+        #'sar_vv_aug_mean','sar_vh_aug_mean',#'sar_vv_minus_vh_aug_mean',
+        #'sar_vv_sep_mean','sar_vh_sep_mean',#'sar_vv_minus_vh_sep_mean',
+        #'sar_vv_oct_mean','sar_vh_oct_mean',#'sar_vv_minus_vh_oct_mean',
+        #'sar_vv_nov_mean','sar_vh_nov_mean',#'sar_vv_minus_vh_nov_mean',
+        #'sar_vv_dec_mean','sar_vh_dec_mean',#'sar_vv_minus_vh_dec_mean',
+        'vv_skewness',#'vh_skewness',#'vv_minus_vh_skewness',
+        'vv_kurtosis',#'vh_kurtosis',#'vv_minus_vh_kurtosis',
+        'vv_autocorr1',#'vh_autocorr1',#'vv_minus_vh_autocorr1',
+        'vv_autocorr2',#'vh_autocorr2',#'vv_minus_vh_autocorr2'
     ]
-    dynamic_features = [
-        'srad','prcp','swe','tmax','vp',
+    short_features = [
         'Nadir_Reflectance_Band1_filled',
         'Nadir_Reflectance_Band2_filled',
         'Nadir_Reflectance_Band3_filled',
@@ -685,60 +844,72 @@ if __name__ == "__main__":
         'Nadir_Reflectance_Band5_filled',
         'Nadir_Reflectance_Band6_filled',
         'Nadir_Reflectance_Band7_filled',
-        #'days_since_rain','max_precip_14_days',
-        #'rolling_precip_14_days','max_temp_14_days',
-        #'rolling_temp_14_days','max_vp_14_days',
-        #'rolling_vp_14_days'
+    ]
+    long_features = [
+        'srad','prcp','swe','tmax','vp',
     ]
     include_lag = True
-    target_col = ['lfmc']
+    target_cols = ['lfmc','VV','VH']
     num_rs_samples = 0
-    #num_rs_samples = 3000.0
-    #num_rs_samples = 6000.0
-    #num_rs_samples = 1000000.0
+    #num_rs_samples = 6500.0
     info_features = [
         'date',
         'latitude',
         'longitude',
-        'source'
+        'source',
+        'source_legible'
     ]
     # save the variable names for later use
     var_names = {
-        'daily_vars': dynamic_features + (['lfrac'] if include_lag else []),
+        'short_vars': short_features + (['lfrac'] if include_lag else []),
+        'long_vars': long_features + (['lfrac'] if include_lag else []),
         'static_vars': static_features,
         'info_vars': info_features,
-        'lfmc_vars': target_col
+        'lfmc_vars': target_cols
     }
-    lag_days = [
-        0,1,2,3,4,7,10,15,20,25,30
+    short_lag_days = [
+        0,1,2,3,4,5,6,7,8,9,10,
+        11,12,13,14,15,16,17,18,19,20,
+        21,22,23,24,25,26,27,28,29,30
     ]
-    #lag_days = [
-    #    0,1,2,3,4,5,6,7,8,9,10,
-    #    11,12,13,14,15,16,17,18,19,20,
-    #    21,22,23,24,25,26,27,28,29,30,
-    #    31,32,33,34,35,36,37,38,39,40,
-    #    41,42,43,44,45,46,47,48,49,50,
-    #    51,52,53,54,55,56,57,58,59,60,
-    #    61,62,63,64,65,66,67,68,69,70,
-    #    71,72,73,74,75,76,77,78,79,80,
-    #    81,82,83,84,85,86,87,88,89,90
-    #]
+    long_lag_days = [
+        0,1,2,3,4,5,6,7,8,9,10,
+        11,12,13,14,15,16,17,18,19,20,
+        21,22,23,24,25,26,27,28,29,30,
+        31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,
+        51,52,53,54,55,56,57,58,59,60,
+        61,62,63,64,65,66,67,68,69,70,
+        71,72,73,74,75,76,77,78,79,80,
+        81,82,83,84,85,86,87,88,89,90,
+        91,92,93,94,95,96,97,98,99,100,
+        101,102,103,104,105,106,107,108,109,110,
+        111,112,113,114,115,116,117,118,119,120,
+        121,122,123,124,125,126,127,128,129,130,
+        131,132,133,134,135,136,137,138,139,140,
+        141,142,143,144,145,146,147,148,149,150,
+        151,152,153,154,155,156,157,158,159,160,
+        161,162,163,164,165,166,167,168,169,170,
+        171,172,173,174,175,176,177,178,179,180,
+    ]
     acceptable_lfmc_range = (30, 500)  # Example range for LFMC, adjust as needed
     build_inputs(
         csvs=csv_names,
         first_label_date=first_label_date,
         last_label_date=last_label_date,
         static_features=static_features,
-        dynamic_features=dynamic_features,
+        long_features=long_features,
+        short_features=short_features,
         info_features=info_features,
-        target_col=target_col,
+        target_cols=target_cols,
         var_names=var_names,
-        lag_days=lag_days,
+        short_lag_days=short_lag_days,
+        long_lag_days=long_lag_days,
         save_dir=save_dir,
         model_name='transformer',
         acceptable_lfmc_range=acceptable_lfmc_range,
         num_rs_samples=num_rs_samples,
         include_lag=include_lag,
         make_plots=False,
-        krishna_for_constraint=True
+        only_at_krishna_retrievals=False,
     )

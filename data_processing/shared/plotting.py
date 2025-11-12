@@ -52,41 +52,138 @@ def get_proj(proj):
     return coded_proj
 
 def plot_from_xarray(
-    load_type,type_obj,var,
-    proj_in,proj_out,
-    fname,cmap='rainbow'
+    load_type, type_obj, var,
+    proj_in, proj_out,
+    fname, cmap='rainbow'
 ):
-    # if load type is 'fname', load the file
+    # --- load ---
     if load_type == 'fname':
-        #ds = xr.open_dataset(type_obj,engine='netcdf4')
-        # check if file extension is tif
-        if type_obj.endswith('.tif'):
+        if str(type_obj).endswith('.tif'):
             da = rioxarray.open_rasterio(
-                type_obj,engine='rasterio',mask_and_scale=True
-            ).squeeze()
+                type_obj,
+                engine='rasterio',
+                mask_and_scale=True
+            ).squeeze(drop=True)
             ds = da.to_dataset(name=var)
         else:
-            ds = xr.open_dataset(type_obj,engine='netcdf4')
-    if load_type == 'ds':
+            ds = xr.open_dataset(type_obj, engine='netcdf4')
+    elif load_type == 'ds':
         ds = type_obj
-    # get the in projection
-    coded_proj_in = get_proj(proj_in)
-    # get the out projection
-    coded_proj_out = get_proj(proj_out)
-    fig,ax = plt.subplots(subplot_kw={'projection':coded_proj_out})
-    # set extent to western US
-    west_us_extent = [-126,-99,20,55]
-    ax.set_extent(west_us_extent,crs=get_proj('EPSG:4326'))
-    ds[var].plot(
-        ax=ax,transform=coded_proj_in,
-        cmap=cmap
+    else:
+        raise ValueError("load_type must be 'fname' or 'ds'.")
+
+    if var not in ds:
+        raise KeyError(f"'{var}' not in dataset.")
+
+    da = ds[var]
+
+    # --- reduce to 2D (auto-slice) ---
+    # common spatial names
+    y_names = ['y', 'latitude', 'lat']
+    x_names = ['x', 'longitude', 'lon']
+    dims = list(da.dims)
+
+    # squeeze length-1 dims first
+    da = da.squeeze(drop=True)
+
+    def pick_first(name_list, dims):
+        for n in name_list:
+            if n in dims:
+                return n
+        return None
+
+    ydim = pick_first(y_names, da.dims)
+    xdim = pick_first(x_names, da.dims)
+
+    # if still 3+ dims, drop non-spatial by .isel(index=0)
+    # prefer common non-spatial dims in this order
+    drop_order = ['band', 'time', 'variable', 'layer']
+    for d in drop_order:
+        if d in da.dims and da.ndim > 2:
+            da = da.isel({d: 0}).squeeze(drop=True)
+
+    # if unknown extra dims remain, drop first indices
+    while da.ndim > 2:
+        for d in da.dims:
+            if d not in (ydim, xdim):
+                da = da.isel({d: 0}).squeeze(drop=True)
+                break
+
+    # final guard: ensure 2D
+    if da.ndim != 2:
+        raise RuntimeError(
+            f"Could not reduce '{var}' to 2D; "
+            f"got dims={da.dims}."
+        )
+
+    # --- projections & axes ---
+    coded_in = get_proj(proj_in)
+    coded_out = get_proj(proj_out)
+
+    fig, ax = plt.subplots(
+        subplot_kw={'projection': coded_out},
+        figsize=(7, 6)
     )
-    ax.add_feature(cfeature.COASTLINE,linewidth=0.15)
-    ax.add_feature(cfeature.STATES,linewidth=0.1)
-    # save the figure
-    savename = '{fname}'.format(fname=fname)
-    plt.savefig(savename,dpi=300,bbox_inches='tight')
-    plt.close()
+
+    # extent: western US
+    west_us = [-126, -99, 20, 55]
+    ax.set_extent(west_us, crs=get_proj('EPSG:4326'))
+
+    # --- plot as image (2D -> cmap ok) ---
+    im = da.plot.imshow(
+        ax=ax,
+        transform=coded_in,
+        cmap=cmap,
+        robust=True,
+        add_colorbar=True,
+        rasterized=True
+    )
+
+    # --- decorations ---
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.15)
+    ax.add_feature(cfeature.STATES, linewidth=0.10)
+
+    # --- save ---
+    plt.savefig(fname, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
+
+#def plot_from_xarray(
+#    load_type,type_obj,var,
+#    proj_in,proj_out,
+#    fname,cmap='rainbow'
+#):
+#    # if load type is 'fname', load the file
+#    if load_type == 'fname':
+#        #ds = xr.open_dataset(type_obj,engine='netcdf4')
+#        # check if file extension is tif
+#        if type_obj.endswith('.tif'):
+#            da = rioxarray.open_rasterio(
+#                type_obj,engine='rasterio',mask_and_scale=True
+#            ).squeeze()
+#            ds = da.to_dataset(name=var)
+#        else:
+#            ds = xr.open_dataset(type_obj,engine='netcdf4')
+#    if load_type == 'ds':
+#        ds = type_obj
+#    # get the in projection
+#    coded_proj_in = get_proj(proj_in)
+#    # get the out projection
+#    coded_proj_out = get_proj(proj_out)
+#    fig,ax = plt.subplots(subplot_kw={'projection':coded_proj_out})
+#    # set extent to western US
+#    west_us_extent = [-126,-99,20,55]
+#    ax.set_extent(west_us_extent,crs=get_proj('EPSG:4326'))
+#    ds[var].plot(
+#        ax=ax,transform=coded_proj_in,
+#        cmap=cmap
+#    )
+#    ax.add_feature(cfeature.COASTLINE,linewidth=0.15)
+#    ax.add_feature(cfeature.STATES,linewidth=0.1)
+#    # save the figure
+#    savename = '{fname}'.format(fname=fname)
+#    plt.savefig(savename,dpi=300,bbox_inches='tight')
+#    plt.close()
 
 def plot_multiple_xarray_datasets(
     load_types,type_objs,vars_to_plot,

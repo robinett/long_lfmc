@@ -55,6 +55,8 @@ def compile_data(
                     f" data, but only {len(this_labs)} available."
                 )
                 print("Using all available samples.")
+        elif num_rs_samples == 0.0 and label_name == 'rs':
+            this_labs = this_labs.iloc[0:0]  # 0 rows
         if l == 0:
             labels = this_labs
         else:
@@ -97,19 +99,25 @@ def compile_data(
     # first, get the unique list of lat/lon coordinates that we need and 
     # map them to the indices of the labels that need them
     coord_to_indices = {}
+    coord_to_dates = {}
     unique_coords = []
     for i in range(len(labels)):
         lat = labels['latitude'].loc[i]
         lon = labels['longitude'].loc[i]
+        date = labels['date'].loc[i]
         coord_str = f"{lat}_{lon}"
         if coord_str not in coord_to_indices:
             coord_to_indices[coord_str] = []
             unique_coords.append((lat, lon))
         coord_to_indices[coord_str].append(i)
+        if coord_str not in coord_to_dates:
+            coord_to_dates[coord_str] = []
+        coord_to_dates[coord_str].append(date)
     # now, go through each of the static datasets and extract the information
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
     feature_source_names = list(feature_info['dirs'].keys())
     static_sources = []
+    nolag_sources = []
     dynamic_sources = []
     for f_source in feature_source_names:
         this_time_type = feature_info['type'][f_source]
@@ -117,11 +125,25 @@ def compile_data(
             static_sources.append(f_source)
         elif 'temporal' in this_time_type:
             dynamic_sources.append(f_source)
+        elif 'nolag' in this_time_type:
+            nolag_sources.append(f_source)
     for s_source in static_sources:
-        this_ds = xr.open_dataset(
-            feature_info['dirs'][s_source],
-            engine='netcdf4'
-        ).load()
+        if feature_info['dirs'][s_source].endswith('.nc') or \
+           feature_info['dirs'][s_source].endswith('.nc4'):
+            this_ds = xr.open_dataset(
+                feature_info['dirs'][s_source],
+                engine='netcdf4'
+            ).load()
+        elif feature_info['dirs'][s_source].endswith('.zarr'):
+            this_ds = xr.open_zarr(
+                feature_info['dirs'][s_source],
+                chunks='auto'
+            )
+        else:
+            raise ValueError(
+                f"Unrecognized file format for static dataset: "
+                f"{feature_info['dirs'][s_source]}"
+            )
         ds_bounds = this_ds.rio.bounds()
         xs, ys = transformer.transform(
             [lon for (lat,lon) in unique_coords],
@@ -146,6 +168,7 @@ def compile_data(
             this_var_data = this_ds[var].isel(
                 y=('points', y_idx), x=('points', x_idx)
             ).values
+            this_var_data = this_var_data.squeeze()
             # assign NaNs for those outside the bounds
             this_var_data = np.where(
                 np.isin(np.arange(len(this_var_data)), outside_mask),
@@ -159,7 +182,68 @@ def compile_data(
                 this_indices = coord_to_indices[coord_str]
                 for idx in coord_to_indices[coord_str]:
                     to_labels[idx] = this_var_data[i]
-            labels[var] = to_labels
+            if 'onehot' in feature_info['type'][s_source]:
+                # convert to one-hot encoding
+                all_ds_vals = np.unique(this_ds[var].values)
+                all_ds_vals = all_ds_vals[~np.isnan(all_ds_vals)]
+                for uv in all_ds_vals:
+                    this_onehot = copy.deepcopy(to_labels)
+                    this_onehot = np.where(this_onehot == uv, 1, 0)
+                    new_var_name = f"{var}_{int(uv)}"
+                    labels[new_var_name] = this_onehot
+            else:
+                labels[var] = to_labels
+    # edge case for the daymet stats which has a temporal dimension but 
+    # does not need to be lagged
+    for n_source in nolag_sources:
+        nolag_data = {}
+        for var in feature_info['vars'][n_source]:
+            nolag_data[var] = np.zeros(labels.shape[0]) + np.nan
+        this_ds = xr.open_zarr(
+            feature_info['dirs'][n_source].format(year=start_date.year),
+            chunks='auto'
+        )
+        ds_bounds = this_ds.rio.bounds()
+        xs, ys = transformer.transform(
+            [lon for (lat,lon) in unique_coords],
+            [lat for (lat,lon) in unique_coords]
+        )
+        outside_mask = []
+        for i,(lat,lon) in enumerate(unique_coords):
+            x,y = transformer.transform(lon, lat)
+            if (x < ds_bounds[0] or x > ds_bounds[2] or
+                y < ds_bounds[1] or y > ds_bounds[3]):
+                outside_mask.append(i)
+        outside_mask = np.array(outside_mask)
+        this_vars = feature_info['vars'][n_source]
+        for i,row in labels.iterrows():
+            if i % 100 == 0:
+                print(
+                    'working on nolag source:', n_source, 'for label', i, 
+                    'of', len(labels)
+                )
+            lat = row['latitude']
+            lon = row['longitude']
+            date = row['date'].date()
+            x,y = transformer.transform(lon, lat)
+            x_idx = nearest_indices_unsorted(this_ds['x'].values, [x])[0]
+            y_idx = nearest_indices_unsorted(this_ds['y'].values, [y])[0]
+            this_data = this_ds['data'].sel(
+                time=np.datetime64(date),
+                var=this_vars,
+            ).isel(
+                y=y_idx, x=x_idx
+            ).values
+            this_data = this_data.squeeze()
+            # assign NaN if outside bounds
+            if (x < ds_bounds[0] or x > ds_bounds[2] or
+                y < ds_bounds[1] or y > ds_bounds[3]):
+                this_data = this_data + np.nan
+            for v,var in enumerate(this_vars):
+                nolag_data[var][i] = this_data[v]
+        for var in feature_info['vars'][n_source]:
+            labels = labels.copy()
+            labels[var] = nolag_data[var]
     # now do the same for the dynamic datasets
     to_labels = {}
     for d_source in dynamic_sources:

@@ -88,10 +88,11 @@ class LFMCTransformer(nn.Module):
         self.film_cond = FiLMConditioner(
             in_dim=static_input_dim, d_model=d_model, hidden=64
         )
-        self.pooler = MultiheadAttnPool(
-            d_model=d_model, nhead=nhead,
-            num_queries=num_queries, dropout=dropout
-        )
+        self.pooler = LinearAttnPool(d_model)
+        #self.pooler = MultiheadAttnPool(
+        #    d_model=d_model, nhead=nhead,
+        #    num_queries=num_queries, dropout=dropout
+        #)
         self.head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.ReLU(),
@@ -104,14 +105,14 @@ class LFMCTransformer(nn.Module):
         x_tok = self.short_proj(short_history)         # [B,T,d]
         s_tok = self.static_proj(static_features)      # [B,d]
         s_tok = s_tok.unsqueeze(1)                     # [B,1,d]
-        # FiLM: stable residual scaling
-        gamma, beta = self.film_cond(static_features)  # [B,d],[B,d]
-        gamma = 0.5 * torch.tanh(gamma)                # bound
-        x_tok = (1 + gamma).unsqueeze(1) * x_tok \
-                + beta.unsqueeze(1)                    # [B,T,d]
+        ## FiLM: stable residual scaling
+        #gamma, beta = self.film_cond(static_features)  # [B,d],[B,d]
+        #gamma = 0.5 * torch.tanh(gamma)                # bound
+        #x_tok = (1 + gamma).unsqueeze(1) * x_tok \
+        #        + beta.unsqueeze(1)                    # [B,T,d]
         # Pack sequence (static token first)
         x_seq = torch.cat([s_tok, x_tok], dim=1)       # [B,T+1,d]
-        x_seq = self.pos_enc(x_seq)
+        #x_seq = self.pos_enc(x_seq)
         x_enc = self.encoder(x_seq)                    # [B,T+1,d]
         # Pool (met tokens) + add static token
         h_met  = self.pooler(x_enc[:, 1:, :])          # [B,d]

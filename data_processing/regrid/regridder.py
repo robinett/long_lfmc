@@ -187,7 +187,8 @@ def reproject_and_regrid_single_file(
     this_src_ds = this_src_ds.squeeze()
     # add all variables that we will include. Initialize as nan
     vars_to_add = list(this_src_ds.data_vars)
-    dims_to_add = this_src_ds[vars_to_add[0]].dims
+    #dims_to_add = this_src_ds[vars_to_add[0]].dims
+    dims_to_add = ['y','x']
     shape_to_add = tuple(
         this_regridded_ds.sizes[dim] for dim in dims_to_add
     )
@@ -305,6 +306,7 @@ def reproject_and_regrid_single_file(
         ~target_grid_mask
     )
     return this_regridded_ds
+
 def save_xarray_w_encoding(
     this_regridded_ds,
     target_save_fname

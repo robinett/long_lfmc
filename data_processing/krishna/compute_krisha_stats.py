@@ -6,12 +6,147 @@ import sys
 import pandas as pd
 import rioxarray
 import numpy as np
+import calendar
 
 # Add the parent directory to the path to import plotting
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 from shared import plotting
+
+def nan_autocorr(x, lag=1, axis=-1):
+    """
+    Autocorrelation at integer `lag` along `axis`, ignoring NaNs.
+    Returns a scalar per slice (i.e., input shape without `axis`).
+
+    Parameters
+    ----------
+    x : np.ndarray
+    lag : int >= 1
+    axis : int
+
+    Returns
+    -------
+    r : np.ndarray (x.shape with `axis` removed)
+    """
+    if lag < 1:
+        raise ValueError("lag must be >= 1")
+
+    x = np.asarray(x, dtype=np.float64)
+    # move target axis to the end
+    x = np.swapaxes(x, axis, -1)
+
+    if x.shape[-1] <= lag:
+        # not enough samples for this lag
+        return np.full(x.shape[:-1], np.nan, dtype=np.float64)
+
+    x0 = x[..., :-lag]
+    x1 = x[...,  lag:]
+
+    mask = (~np.isnan(x0)) & (~np.isnan(x1))
+    n = mask.sum(axis=-1)
+
+    # early exit if no valid pairs anywhere
+    if not np.any(n):
+        return np.full(x.shape[:-1], np.nan, dtype=np.float64)
+
+    # replace NaNs with 0 just for masked sums
+    x0m = np.where(mask, x0, 0.0)
+    x1m = np.where(mask, x1, 0.0)
+
+    # means over valid pairs
+    denom = np.where(n > 0, n, 1)
+    mu0 = x0m.sum(axis=-1) / denom
+    mu1 = x1m.sum(axis=-1) / denom
+
+    # demean and apply mask
+    d0 = np.where(mask, x0m - mu0[..., None], 0.0)
+    d1 = np.where(mask, x1m - mu1[..., None], 0.0)
+
+    # cov and variances over valid pairs
+    cov = (d0 * d1).sum(axis=-1) / denom
+    v0  = (d0 * d0).sum(axis=-1) / denom
+    v1  = (d1 * d1).sum(axis=-1) / denom
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        r = cov / np.sqrt(v0 * v1)
+
+    # guards: need ≥2 valid pairs and nonzero variance
+    r = np.where((n >= 2) & (v0 > 0) & (v1 > 0), r, np.nan)
+    return r
+
+def nan_kurtosis(x, axis=0):
+    """
+    Compute excess kurtosis (Fisher definition) along a given axis,
+    ignoring NaNs.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Input data array.
+    axis : int, optional
+        Axis along which to compute kurtosis. Default is 0.
+
+    Returns
+    -------
+    kurtosis : np.ndarray
+        Excess kurtosis (0 for normal). NaN where fewer than 4 valid
+        samples exist or variance = 0.
+    """
+    x = np.asarray(x, dtype=np.float64)
+
+    mean = np.nanmean(x, axis=axis, keepdims=True)
+    dev = x - mean
+
+    # Central moments
+    m2 = np.nanmean(dev**2, axis=axis)
+    m4 = np.nanmean(dev**4, axis=axis)
+
+    # Sample count and guard conditions
+    n = np.sum(~np.isnan(x), axis=axis)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        kurt = m4 / (m2**2) - 3.0  # excess kurtosis
+
+    kurt = np.where((n >= 4) & (m2 > 0), kurt, np.nan)
+    return kurt
+
+def nan_skew(x, axis=0):
+    """
+    Compute skewness along a given axis, ignoring NaNs.
+    Equivalent to Fisher-Pearson moment coefficient of skewness.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Input data array.
+    axis : int, optional
+        Axis along which to compute skewness. Default is 0.
+
+    Returns
+    -------
+    skew : np.ndarray
+        Skewness values along the specified axis.
+        Returns NaN where fewer than 3 valid samples exist or variance = 0.
+    """
+    x = np.asarray(x, dtype=np.float64)
+
+    # Mean and deviations
+    mean = np.nanmean(x, axis=axis, keepdims=True)
+    dev = x - mean
+
+    # Central moments
+    m2 = np.nanmean(dev**2, axis=axis)
+    m3 = np.nanmean(dev**3, axis=axis)
+
+    # Sample count and guard conditions
+    n = np.sum(~np.isnan(x), axis=axis)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        skew = m3 / np.power(m2, 1.5)
+
+    # Mask degenerate or insufficient cases
+    skew = np.where((n >= 3) & (m2 > 0), skew, np.nan)
+    return skew    
+    print('computing skewness')
 
 def main(krishna_files_path,krishna_plots_path,save_stats_path):
     # open all the files in the directory
@@ -24,6 +159,7 @@ def main(krishna_files_path,krishna_plots_path,save_stats_path):
             this_date = extract_date_from_fname(file)
             all_krishna_dates.append(this_date)
     combined_ds = None
+    #all_krishna_files = all_krishna_files[:5]
     for f,file in enumerate(all_krishna_files):
         print('adding file {} to dataset'.format(file))
         print('file {} of {}'.format(f+1,len(all_krishna_files)))
@@ -50,21 +186,34 @@ def main(krishna_files_path,krishna_plots_path,save_stats_path):
     stats_ds['retrieved_lfmc_min'] = combined_ds['band_data'].min(dim='time', skipna=True)
     print('computing max')
     stats_ds['retrieved_lfmc_max'] = combined_ds['band_data'].max(dim='time', skipna=True)
-    # computing seasonal means
-    seasonal_means = combined_ds['band_data'].groupby('time.season').mean(dim='time', skipna=True)
-    for season in seasonal_means['season'].values:
-        var_name = 'retrieved_lfmc_' + season.lower() + '_mean'
-        stats_ds[var_name] = seasonal_means.sel(season=season)
-    print('stats_ds')
-    print(stats_ds)
-    #print('computing p10')
-    #stats_ds['p10'] = combined_ds.quantile(0.1, dim='time', skipna=True)
-    #print('computing p90')
-    #stats_ds['p90'] = combined_ds.quantile(0.9, dim='time', skipna=True)
-    # need to squeeze the quantiles
-    #stats_ds['p10'] = stats_ds['p10'].squeeze('quantile')
-    #stats_ds['p90'] = stats_ds['p90'].squeeze('quantile')
-    # plot each of these variables
+    # --- Monthly means: one variable per month ---
+    print('computing monthly climatological means (Jan_mean, Feb_mean, ...)')
+    monthly_clim = (
+        combined_ds['band_data']
+        .groupby('time.month')
+        .mean(dim='time', skipna=True)
+    )
+    for i, month_name in enumerate(calendar.month_abbr[1:], start=1):  # Jan..Dec
+        var_name = f'retrieved_{month_name}_mean'
+        stats_ds[var_name] = monthly_clim.sel(month=i)
+        stats_ds[var_name].attrs['description'] = f'Mean LFMC for {month_name} across all years'
+    skewness_arr = np.zeros((stats_ds.dims['y'], stats_ds.dims['x'])) * np.nan
+    kurtosis_arr = np.zeros((stats_ds.dims['y'], stats_ds.dims['x'])) * np.nan
+    autocorr1_arr = np.zeros((stats_ds.dims['y'], stats_ds.dims['x'])) * np.nan
+    autocorr2_arr = np.zeros((stats_ds.dims['y'], stats_ds.dims['x'])) * np.nan
+    for i in range(stats_ds.dims['y']):
+        print(f'Processing row {i+1} of {stats_ds.dims["y"]}')
+        for j in range(stats_ds.dims['x']):
+            pixel_time_series = combined_ds['band_data'][:, i, j].values
+            if np.sum(~np.isnan(pixel_time_series)) > 2:
+                skewness_arr[i, j] = nan_skew(pixel_time_series)
+                kurtosis_arr[i, j] = nan_kurtosis(pixel_time_series)
+                autocorr1_arr[i, j] = nan_autocorr(pixel_time_series, lag=1)
+                autocorr2_arr[i, j] = nan_autocorr(pixel_time_series, lag=2)
+    stats_ds['retrieved_lfmc_skewness'] = (('y', 'x'), skewness_arr)
+    stats_ds['retrieved_lfmc_kurtosis'] = (('y', 'x'), kurtosis_arr)
+    stats_ds['retrieved_lfmc_autocorr1'] = (('y', 'x'), autocorr1_arr)
+    stats_ds['retrieved_lfmc_autocorr2'] = (('y', 'x'), autocorr2_arr)
     # save the dataset
     print('saving statistics dataset to {}'.format(save_stats_path))
     stats_ds.to_netcdf(save_stats_path, engine='netcdf4')

@@ -5,13 +5,15 @@
 # for all the files that we want to download
 start_month="2016-01"
 end_month="2022-12" # inclusive
-src_top_level_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_raw_from_gee_api"
-target_top_level_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_regrid"
+src_top_level_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/sar/raw"
+target_top_level_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/sar/regrid"
 target_grid_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/grid/epsg5070_500m_westUS_grid.nc4"
 src_crs="EPSG:4326"
 target_crs="EPSG:5070"
 chunk_buffer=750
-fill_value=-9999
+#fill_value=-9999
+#sbatch run_regridder.sh "$target_grid_dir" "$src_top_level_dir" "$target_top_level_dir" "$src_crs" "$target_crs" "$chunk_buffer"
+
 # delta between each request submitted
 month_delta=0
 year_delta=1
@@ -31,7 +33,7 @@ while [[ "$current_date" < "$final_date" ]]; do
         target_dir="${target_top_level_dir}/${year}"
     fi
     # submit the job
-    sbatch run_regridder.sh "$target_grid_dir" "$src_dir" "$target_dir" "$src_crs" "$target_crs" "$chunk_buffer" "$fill_value"
+    sbatch run_regridder.sh "$target_grid_dir" "$src_dir" "$target_dir" "$src_crs" "$target_crs" "$chunk_buffer"
     # increment the current date by one month
     current_date=$(date -d "$current_date + ${year_delta} year + ${month_delta} month" +%Y-%m-%d)
 done

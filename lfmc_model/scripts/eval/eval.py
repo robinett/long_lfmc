@@ -13,20 +13,20 @@ from plotting import pred_obs_scatter
 
 def main():
     # model settings
-    d_model = 32
+    d_model = 16
     nhead = 1
     num_layers = 2
-    dim_feedforward = 64
-    dropout = 0.1
+    dim_feedforward = 32
+    dropout = 0.2
     batch_size = 128
     lr = 1e-4
-    warmup_steps = 200
-    adam_weight_decay = 0.01   
+    warmup_steps = 250
+    adam_weight_decay = 1e-4
     # get model name
     this_model_name = (
         f'transformer_dm{d_model}_nh{nhead}_nl{num_layers}_df{dim_feedforward}'
         f'_do{dropout}_bs{batch_size}_lr{lr}_warmup{warmup_steps}'
-        f'_wd{adam_weight_decay}'
+        f'_wd{adam_weight_decay}_nostats_forreal'
     )
     # set up directories
     save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs'
@@ -86,6 +86,10 @@ def main():
         all_val_true = np.concatenate((all_val_true, val_true))
         all_test_preds = np.concatenate((all_test_preds, test_preds))
         all_test_true = np.concatenate((all_test_true, test_true))
+        if f == 0:
+            all_test_info = test_info
+        else:
+            all_test_info = pd.concat((all_test_info, test_info), ignore_index=True)
     # compute overall metrics
     overall_val_mae = np.mean(np.abs(all_val_preds - all_val_true))
     overall_val_rmse = np.sqrt(np.mean((all_val_preds - all_val_true)**2))
@@ -116,6 +120,83 @@ def main():
         rmse=overall_test_rmse,
         r2=overall_test_r2
     )
+    # compute and make plots for space vs time tradeoff
+    print('Computing space vs time tradeoff metrics and plots...')
+
+    # get the lat/lon pairs (sites)
+    test_lats = all_test_info['latitude'].values
+    test_lons = all_test_info['longitude'].values
+    test_sites = np.column_stack((test_lats, test_lons))
+    test_unique_sites = np.unique(test_sites, axis=0)
+
+    for us, (lat, lon) in enumerate(test_unique_sites):
+        site_mask = (test_lats == lat) & (test_lons == lon)
+        this_site_preds = all_test_preds[site_mask]
+        this_site_true = all_test_true[site_mask]
+        # get the averages
+        this_site_pred_mean = np.mean(this_site_preds)
+        this_site_true_mean = np.mean(this_site_true)
+        this_site_preds_anom = this_site_preds - this_site_pred_mean
+        this_site_true_anom = this_site_true - this_site_true_mean
+        if us == 0:
+            all_test_preds_anom = this_site_preds_anom
+            all_test_true_anom = this_site_true_anom
+            all_test_preds_means = np.array([this_site_pred_mean])
+            all_test_true_means = np.array([this_site_true_mean])
+        else:
+            all_test_preds_anom = np.concatenate(
+                (all_test_preds_anom, this_site_preds_anom)
+            )
+            all_test_true_anom = np.concatenate(
+                (all_test_true_anom, this_site_true_anom)
+            )
+            all_test_preds_means = np.concatenate(
+                (all_test_preds_means, np.array([this_site_pred_mean]))
+            )
+            all_test_true_means = np.concatenate(
+                (all_test_true_means, np.array([this_site_true_mean]))
+            )
+
+    # compute metrics for anomalies
+    overall_test_anom_mae = np.mean(np.abs(all_test_preds_anom - all_test_true_anom))
+    overall_test_anom_rmse = np.sqrt(np.mean((all_test_preds_anom - all_test_true_anom)**2))
+    overall_test_anom_r2 = r2_score(all_test_true_anom, all_test_preds_anom)
+    overall_test_anom_n = len(all_test_true_anom)
+    print('Overall Test Metrics - Anomalies:')
+    print(f'MAE: {overall_test_anom_mae:.3f}, RMSE: {overall_test_anom_rmse:.3f}, R2: {overall_test_anom_r2:.3f}')
+
+    # make overall plot for anomalies
+    overall_test_anom_plot_path = os.path.join(model_dir, 'overall_test_anom_pred_obs_scatter.png')
+    pred_obs_scatter(
+        all_test_preds_anom,
+        all_test_true_anom,
+        overall_test_anom_plot_path,
+        mae=overall_test_anom_mae,
+        rmse=overall_test_anom_rmse,
+        r2=overall_test_anom_r2,
+        n=overall_test_anom_n
+    )
+
+    # compute metrics for means
+    overall_test_mean_mae = np.mean(np.abs(all_test_preds_means - all_test_true_means))
+    overall_test_mean_rmse = np.sqrt(np.mean((all_test_preds_means - all_test_true_means)**2))
+    overall_test_mean_r2 = r2_score(all_test_true_means, all_test_preds_means)
+    overall_test_mean_n = len(all_test_true_means)
+    print('Overall Test Metrics - Means:')
+    print(f'MAE: {overall_test_mean_mae:.3f}, RMSE: {overall_test_mean_rmse:.3f}, R2: {overall_test_mean_r2:.3f}')
+
+    # make overall plot for means
+    overall_test_mean_plot_path = os.path.join(model_dir, 'overall_test_mean_pred_obs_scatter.png')
+    pred_obs_scatter(
+        all_test_preds_means,
+        all_test_true_means,
+        overall_test_mean_plot_path,
+        mae=overall_test_mean_mae,
+        rmse=overall_test_mean_rmse,
+        r2=overall_test_mean_r2,
+        n=overall_test_mean_n
+    )
+
 
 
 if __name__ == "__main__":

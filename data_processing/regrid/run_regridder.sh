@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=regridder_quality3  # Job name
+#SBATCH --job-name=regridder_sar  # Job name
 #SBATCH --output=./logs/slurm-%j.out       # Output log file (%j = job ID)
 #SBATCH --error=./logs/slurm-%j.err        # Error log file
 #SBATCH --time=03:00:00             # Wall time limit (hh:mm:ss)
@@ -11,8 +11,8 @@
 #SBATCH --mail-user=trobinet@stanford.edu
 
 source ~/.bashrc
-source ~/poetry_activations/activate_long_lfmc_process_env.sh
+source ~/uv_activations/activate_lfmc_process.sh
 
-python3 -u main.py --target_grid "$1" --src_dir "$2" --target_dir "$3" --src_crs "$4" --target_crs "$5" --chunk_buffer "$6" --fill_value $7
+python3 -u main.py --target_grid "$1" --src_dir "$2" --target_dir "$3" --src_crs "$4" --target_crs "$5" --chunk_buffer "$6"
 
 echo Processing Complete
