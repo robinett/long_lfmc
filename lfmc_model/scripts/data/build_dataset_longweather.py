@@ -815,10 +815,10 @@ if __name__ == "__main__":
         'climate_zone_24','climate_zone_25',
         'climate_zone_26','climate_zone_27',
         'climate_zone_28','climate_zone_29',
-        'sar_vv_mean',#'sar_vh_mean',#'sar_vv_minus_vh_mean',
-        'sar_vv_std',#'sar_vh_std',#'sar_vv_minus_vh_std',
-        'sar_vv_min',#'sar_vh_min',#'sar_vv_minus_vh_min',
-        'sar_vv_max',#'sar_vh_max',#'sar_vv_minus_vh_max',
+        #'sar_vv_mean',#'sar_vh_mean',#'sar_vv_minus_vh_mean',
+        #'sar_vv_std',#'sar_vh_std',#'sar_vv_minus_vh_std',
+        #'sar_vv_min',#'sar_vh_min',#'sar_vv_minus_vh_min',
+        #'sar_vv_max',#'sar_vh_max',#'sar_vv_minus_vh_max',
         #'sar_vv_jan_mean','sar_vh_jan_mean',#'sar_vv_minus_vh_jan_mean',
         #'sar_vv_feb_mean','sar_vh_feb_mean',#'sar_vv_minus_vh_feb_mean',
         #'sar_vv_mar_mean','sar_vh_mar_mean',#'sar_vv_minus_vh_mar_mean',
@@ -831,10 +831,10 @@ if __name__ == "__main__":
         #'sar_vv_oct_mean','sar_vh_oct_mean',#'sar_vv_minus_vh_oct_mean',
         #'sar_vv_nov_mean','sar_vh_nov_mean',#'sar_vv_minus_vh_nov_mean',
         #'sar_vv_dec_mean','sar_vh_dec_mean',#'sar_vv_minus_vh_dec_mean',
-        'vv_skewness',#'vh_skewness',#'vv_minus_vh_skewness',
-        'vv_kurtosis',#'vh_kurtosis',#'vv_minus_vh_kurtosis',
-        'vv_autocorr1',#'vh_autocorr1',#'vv_minus_vh_autocorr1',
-        'vv_autocorr2',#'vh_autocorr2',#'vv_minus_vh_autocorr2'
+        #'vv_skewness',#'vh_skewness',#'vv_minus_vh_skewness',
+        #'vv_kurtosis',#'vh_kurtosis',#'vv_minus_vh_kurtosis',
+        #'vv_autocorr1',#'vh_autocorr1',#'vv_minus_vh_autocorr1',
+        #'vv_autocorr2',#'vh_autocorr2',#'vv_minus_vh_autocorr2'
     ]
     short_features = [
         'Nadir_Reflectance_Band1_filled',
@@ -849,6 +849,7 @@ if __name__ == "__main__":
         'srad','prcp','swe','tmax','vp',
     ]
     include_lag = True
+    #target_cols = ['lfmc']
     target_cols = ['lfmc','VV','VH']
     num_rs_samples = 0
     #num_rs_samples = 6500.0

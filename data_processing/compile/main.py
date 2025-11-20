@@ -51,6 +51,14 @@ def main():
                 scratch_dir,
                 'sar/sar_stats.zarr'
             ),
+            'landcover_frac':os.path.join(
+                scratch_dir,
+                'nlcd/nlcd_target_grid_2003_2023.zarr'
+            ),
+            'nlcd_class':os.path.join(
+                scratch_dir,
+                'nlcd/nlcd_2003_2023.zarr'
+            )
             #'krishna_stats':os.path.join(
             #    scratch_dir,
             #    'krishna/stats/krishna_lfmc_statistics.nc4'
@@ -149,6 +157,22 @@ def main():
                 'vh_autocorr2',
                 'vv_minus_vh_autocorr2'
             ],
+            'landcover_frac':[
+                'barren',
+                'crops',
+                'deciduous_forest',
+                'developed',
+                'evergreen_forest',
+                'grass',
+                'mixed_forest',
+                'other',
+                'shrub',
+                'water',
+                'wetlands'
+            ],
+            'nlcd_class':[
+                'nlcd'
+            ]
             #'krishna_stats':[
             #    'retrieved_lfmc_mean',
             #    'retrieved_lfmc_std',
@@ -235,6 +259,8 @@ def main():
             'static':'spatial_static',
             'climate_zone':'spatial_static_onehot',
             'sar_stats':'spatial_static',
+            'landcover_frac':'spatial_yearly',
+            'nlcd_class':'nlcd'
             #'krishna_stats':'spatial_static',
             #'weather_stats':'spatial_nolag'
         }
@@ -293,7 +319,7 @@ def main():
         171, 172, 173, 174, 175, 176, 177, 178, 179, 180
     ]
     inputs_outputs = (
-        'y_InsituVvVhVvminusvh_X_ModisfilledDaymetStaticClimatezoneSarstats_180d'
+        'y_InsituVvVhVvminusvh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverFrac_Z_Nlcdclass_180d'
     )
     out_dir = os.path.join(
         scratch_dir,

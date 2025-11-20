@@ -119,6 +119,8 @@ def compile_data(
     static_sources = []
     nolag_sources = []
     dynamic_sources = []
+    yearly_sources = []
+    nlcd_sources = []
     for f_source in feature_source_names:
         this_time_type = feature_info['type'][f_source]
         if 'static' in this_time_type:
@@ -127,6 +129,10 @@ def compile_data(
             dynamic_sources.append(f_source)
         elif 'nolag' in this_time_type:
             nolag_sources.append(f_source)
+        elif 'yearly' in this_time_type:
+            yearly_sources.append(f_source)
+        elif 'nlcd' in this_time_type:
+            nlcd_sources.append(f_source)
     for s_source in static_sources:
         if feature_info['dirs'][s_source].endswith('.nc') or \
            feature_info['dirs'][s_source].endswith('.nc4'):
@@ -195,12 +201,12 @@ def compile_data(
                 labels[var] = to_labels
     # edge case for the daymet stats which has a temporal dimension but 
     # does not need to be lagged
-    for n_source in nolag_sources:
-        nolag_data = {}
-        for var in feature_info['vars'][n_source]:
-            nolag_data[var] = np.zeros(labels.shape[0]) + np.nan
+    yearly_data = {}
+    for y_source in yearly_sources:
+        for var in feature_info['vars'][y_source]:
+            yearly_data[var] = np.zeros(labels.shape[0]) + np.nan
         this_ds = xr.open_zarr(
-            feature_info['dirs'][n_source].format(year=start_date.year),
+            feature_info['dirs'][y_source],
             chunks='auto'
         )
         ds_bounds = this_ds.rio.bounds()
@@ -215,35 +221,142 @@ def compile_data(
                 y < ds_bounds[1] or y > ds_bounds[3]):
                 outside_mask.append(i)
         outside_mask = np.array(outside_mask)
-        this_vars = feature_info['vars'][n_source]
+        this_vars = feature_info['vars'][y_source]
+        ds_years = {}
         for i,row in labels.iterrows():
             if i % 100 == 0:
                 print(
-                    'working on nolag source:', n_source, 'for label', i, 
+                    'working on yearly source:', y_source, 'for label', i, 
                     'of', len(labels)
                 )
             lat = row['latitude']
             lon = row['longitude']
             date = row['date'].date()
+            # load up this year if not done already
+            if date.year not in ds_years:
+                #this_ds = xr.open_zarr(
+                #    feature_info['dirs'][y_source],
+                #    chunks='auto'
+                #)
+                this_ds_subset = this_ds.sel(
+                    year=np.datetime64(f"{date.year}-01-01")
+                )
+                this_ds_subset = this_ds_subset.load()
+                ds_years[date.year] = this_ds_subset.copy()
+            this_year_ds = ds_years[date.year]
+            date = pd.Timestamp(
+                year=date.year,
+                month=1,
+                day=1
+            )
             x,y = transformer.transform(lon, lat)
-            x_idx = nearest_indices_unsorted(this_ds['x'].values, [x])[0]
-            y_idx = nearest_indices_unsorted(this_ds['y'].values, [y])[0]
-            this_data = this_ds['data'].sel(
-                time=np.datetime64(date),
-                var=this_vars,
-            ).isel(
+            x_idx = nearest_indices_unsorted(this_year_ds['x'].values, [x])[0]
+            y_idx = nearest_indices_unsorted(this_year_ds['y'].values, [y])[0]
+            this_data = this_year_ds[this_vars].isel(
                 y=y_idx, x=x_idx
-            ).values
-            this_data = this_data.squeeze()
+            ).to_array()
+            #print(this_data)
+            #this_data = this_data.squeeze()
             # assign NaN if outside bounds
             if (x < ds_bounds[0] or x > ds_bounds[2] or
                 y < ds_bounds[1] or y > ds_bounds[3]):
                 this_data = this_data + np.nan
             for v,var in enumerate(this_vars):
-                nolag_data[var][i] = this_data[v]
+                yearly_data[var][i] = this_data[v]
+        for var in feature_info['vars'][y_source]:
+            labels = labels.copy()
+            labels[var] = yearly_data[var]
+    # get the nlcd data
+    nlcd_data = {}
+    for n_source in nlcd_sources:
+        #nlcd_dict = {
+        #    11:'water',
+        #    12:'water',
+        #    21:'developed',
+        #    22:'developed',
+        #    23:'developed',
+        #    24:'developed',
+        #    31:'barren',
+        #    41:'deciduous_forest',
+        #    42:'evergreen_forest',
+        #    43:'mixed_forest',
+        #    52:'shrub',
+        #    71:'grass',
+        #    81:'crops',
+        #    82:'crops',
+        #    90:'wetlands',
+        #    95:'wetlands'
+        #}
+        for var in feature_info['vars'][n_source]:
+            to_labels = np.zeros(labels.shape[0]) + np.nan
+            nlcd_data[var] = to_labels
+        this_ds = xr.open_zarr(
+            feature_info['dirs'][n_source],
+            chunks='auto'
+        )
+        print(this_ds)
+        ds_bounds = this_ds.rio.bounds()
+        xs, ys = transformer.transform(
+            [lon for (lat,lon) in unique_coords],
+            [lat for (lat,lon) in unique_coords]
+        )
+        outside_mask = []
+        for i,(lat,lon) in enumerate(unique_coords):
+            x,y = transformer.transform(lon, lat)
+            if (x < ds_bounds[0] or x > ds_bounds[2] or
+                y < ds_bounds[1] or y > ds_bounds[3]):
+                outside_mask.append(i)
+        outside_mask = np.array(outside_mask)
+        this_vars = feature_info['vars'][n_source]
+        ds_years = {}
+        for i,row in labels.iterrows():
+            if i % 100 == 0:
+                print(
+                    'working on nlcd source:', n_source, 'for label', i, 
+                    'of', len(labels)
+                )
+            lat = row['latitude']
+            lon = row['longitude']
+            date = row['date'].date()
+            year = date.year
+            #if year not in ds_years:
+            #    this_ds_subset = this_ds.sel(
+            #        time=np.datetime64(f"{year}-01-01")
+            #    )
+            #    this_ds_subset = this_ds_subset.load()
+            #    ds_years[year] = this_ds_subset.copy()
+            #this_year_ds = ds_years[year]
+            date = pd.Timestamp(
+                year=year,
+                month=1,
+                day=1
+            )
+            x,y = transformer.transform(lon, lat)
+            x_idx = nearest_indices_unsorted(this_ds['x'].values, [x])[0]
+            y_idx = nearest_indices_unsorted(this_ds['y'].values, [y])[0]
+            #print(x)
+            #print(y)
+            #print(x_idx)
+            #print(y_idx)
+            this_data = this_ds[this_vars].sel(
+                time=np.datetime64(f"{year}-01-01")
+            ).isel(
+                y=y_idx, x=x_idx
+            ).nlcd.values
+            # assign NaN if outside bounds
+            if (x < ds_bounds[0] or x > ds_bounds[2] or
+                y < ds_bounds[1] or y > ds_bounds[3]):
+                this_data = this_data + np.nan
+            for v,var in enumerate(this_vars):
+                ## translate to landcover name
+                #if np.isnan(this_data[v].values):
+                #    lc_name = 'unknown'
+                #else:
+                #    lc_name = nlcd_dict.get(int(this_data[v].values), 'unknown')
+                nlcd_data[var][i] = this_data
         for var in feature_info['vars'][n_source]:
             labels = labels.copy()
-            labels[var] = nolag_data[var]
+            labels[var] = nlcd_data[var]
     # now do the same for the dynamic datasets
     to_labels = {}
     for d_source in dynamic_sources:

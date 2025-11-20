@@ -196,8 +196,9 @@ def process(
             # if all above threshold, average lfmc at each timepoint
             #all_above_threshold = True
             if all_above_threshold:
-                # average the lfmc at each timepoint
-                avg_lfmc = pivot_df.mean(axis=1)
+                # average the lfmc at each timepoint, only if we have measurements from all species for that day
+                pivot_df_clean = pivot_df.dropna()
+                avg_lfmc = pivot_df_clean.mean(axis=1)
                 # get a single string that is all the species we averaged
                 # together
                 species_str = '; '.join(species_names)
