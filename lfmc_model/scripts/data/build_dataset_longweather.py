@@ -39,29 +39,54 @@ def drop_nans_with_reasons(
     target_cols: Optional[List[str]] = None,
 ) -> Tuple[pd.DataFrame, Dict[str, int], Dict[str, pd.DataFrame]]:
     """
-    Drops any row with ≥1 NaN, EXCEPT rows where any `target_cols`
-    has a non-NaN value (those are kept).
+    Drop rows based on NaNs with the following rules:
+
+    - Let `target_cols` be the columns containing target values.
+    - "Non-target" columns are all other columns.
+
+    A row is dropped if:
+      1) Any non-target column has a NaN, OR
+      2) All target columns are NaN (i.e., no target value).
+
+    Only rows where all non-target columns are non-NaN and
+    at least one target column is non-NaN are kept.
+
+    Returned:
+      kept:   DataFrame after dropping rows
+      counts: dict of counts by reason
+      dropped: dict of DataFrames by reason
     """
     retrieved_cols, filled_cols = _detect_reason_columns(df)
 
-    # Base "has any NaN" rule
-    nan_mask_base = df.isna().any(axis=1)
-
-    # Keep rows if any target col is non-NaN
+    # Normalize target columns to those that exist in df
     if target_cols:
         _tcols = [c for c in target_cols if c in df.columns]
-        if _tcols:
-            has_target_value = df[_tcols].notna().any(axis=1)
-        else:
-            has_target_value = pd.Series(False, index=df.index, dtype=bool)
     else:
-        has_target_value = pd.Series(False, index=df.index, dtype=bool)
+        _tcols = []
 
-    # Only drop if: (has any NaN) AND (no target col has value)
-    nan_mask = nan_mask_base & ~has_target_value
+    # Non-target columns are everything else
+    non_target_cols = [c for c in df.columns if c not in _tcols]
+
+    # NaNs in non-target columns
+    if non_target_cols:
+        nan_in_non_target = df[non_target_cols].isna().any(axis=1)
+    else:
+        # If no non-targets, this condition never triggers
+        nan_in_non_target = pd.Series(False, index=df.index, dtype=bool)
+
+    # Rows with no target value (all target cols NaN)
+    if _tcols:
+        no_target_value = df[_tcols].isna().all(axis=1)
+    else:
+        # If no target columns are specified, we never drop
+        # based on "no target value"
+        no_target_value = pd.Series(False, index=df.index, dtype=bool)
+
+    # Drop if: NaN in any non-target OR no target value
+    nan_mask = nan_in_non_target | no_target_value
     nan_rows = df.loc[nan_mask]
 
-    # masks within rows we’re dropping
+    # Reason masks within rows we’re dropping
     if retrieved_cols:
         retrieved_nan = nan_rows[retrieved_cols].isna().any(axis=1)
     else:
@@ -79,19 +104,22 @@ def drop_nans_with_reasons(
     # "other" = NaNs outside retrieved/filled columns
     reason_cols = sorted(set(retrieved_cols) | set(filled_cols))
     if reason_cols:
-        other_nan = (~retrieved_nan & ~filled_nan &
-                     nan_rows.drop(columns=reason_cols).isna().any(axis=1))
+        other_nan = (
+            ~retrieved_nan
+            & ~filled_nan
+            & nan_rows.drop(columns=reason_cols).isna().any(axis=1)
+        )
     else:
-        # no retrieved/filled columns at all → everything is "other"
+        # No retrieved/filled columns at all → everything is "other"
         other_nan = pd.Series(True, index=nan_rows.index, dtype=bool)
 
-    total            = int(nan_mask.sum())
-    only_ret_count   = int(only_ret.sum())
-    only_fill_count  = int(only_fill.sum())
-    both_count       = int(both_nan.sum())
-    other_count      = int(other_nan.sum())
-    retrieved_count  = only_ret_count + both_count
-    filled_count     = only_fill_count + both_count
+    total           = int(nan_mask.sum())
+    only_ret_count  = int(only_ret.sum())
+    only_fill_count = int(only_fill.sum())
+    both_count      = int(both_nan.sum())
+    other_count     = int(other_nan.sum())
+    retrieved_count = only_ret_count + both_count
+    filled_count    = only_fill_count + both_count
 
     # invariants with the explicit "other" bucket
     assert total == only_ret_count + only_fill_count + both_count + other_count
@@ -102,12 +130,12 @@ def drop_nans_with_reasons(
 
     counts = {
         "total_nan_rows": total,
-        "retrieved": retrieved_count,
-        "filled": filled_count,
-        "both": both_count,
+        "retrieved":      retrieved_count,
+        "filled":         filled_count,
+        "both":           both_count,
         "only_retrieved": only_ret_count,
-        "only_filled": only_fill_count,
-        "other": other_count,
+        "only_filled":    only_fill_count,
+        "other":          other_count,
     }
 
     dropped = {
@@ -121,6 +149,94 @@ def drop_nans_with_reasons(
     }
 
     return kept, counts, dropped
+
+
+#def drop_nans_with_reasons(
+#    df: pd.DataFrame,
+#    target_cols: Optional[List[str]] = None,
+#) -> Tuple[pd.DataFrame, Dict[str, int], Dict[str, pd.DataFrame]]:
+#    """
+#    Drops any row with ≥1 NaN in non-target cols, and if <1 target col does not have a value.
+#    """
+#    retrieved_cols, filled_cols = _detect_reason_columns(df)
+#
+#    # Base "has any NaN" rule
+#    nan_mask_base = df.isna().any(axis=1)
+#
+#    # Keep rows if any target col is non-NaN
+#    if target_cols:
+#        _tcols = [c for c in target_cols if c in df.columns]
+#        if _tcols:
+#            has_target_value = df[_tcols].notna().any(axis=1)
+#        else:
+#            has_target_value = pd.Series(False, index=df.index, dtype=bool)
+#    else:
+#        has_target_value = pd.Series(False, index=df.index, dtype=bool)
+#
+#    # Only drop if: (has any NaN) AND (no target col has value)
+#    nan_mask = nan_mask_base & ~has_target_value
+#    nan_rows = df.loc[nan_mask]
+#
+#    # masks within rows we’re dropping
+#    if retrieved_cols:
+#        retrieved_nan = nan_rows[retrieved_cols].isna().any(axis=1)
+#    else:
+#        retrieved_nan = pd.Series(False, index=nan_rows.index, dtype=bool)
+#
+#    if filled_cols:
+#        filled_nan = nan_rows[filled_cols].isna().any(axis=1)
+#    else:
+#        filled_nan = pd.Series(False, index=nan_rows.index, dtype=bool)
+#
+#    both_nan  = retrieved_nan & filled_nan
+#    only_ret  = retrieved_nan & ~filled_nan
+#    only_fill = filled_nan & ~retrieved_nan
+#
+#    # "other" = NaNs outside retrieved/filled columns
+#    reason_cols = sorted(set(retrieved_cols) | set(filled_cols))
+#    if reason_cols:
+#        other_nan = (~retrieved_nan & ~filled_nan &
+#                     nan_rows.drop(columns=reason_cols).isna().any(axis=1))
+#    else:
+#        # no retrieved/filled columns at all → everything is "other"
+#        other_nan = pd.Series(True, index=nan_rows.index, dtype=bool)
+#
+#    total            = int(nan_mask.sum())
+#    only_ret_count   = int(only_ret.sum())
+#    only_fill_count  = int(only_fill.sum())
+#    both_count       = int(both_nan.sum())
+#    other_count      = int(other_nan.sum())
+#    retrieved_count  = only_ret_count + both_count
+#    filled_count     = only_fill_count + both_count
+#
+#    # invariants with the explicit "other" bucket
+#    assert total == only_ret_count + only_fill_count + both_count + other_count
+#    assert retrieved_count == only_ret_count + both_count
+#    assert filled_count    == only_fill_count + both_count
+#
+#    kept = df.loc[~nan_mask]
+#
+#    counts = {
+#        "total_nan_rows": total,
+#        "retrieved": retrieved_count,
+#        "filled": filled_count,
+#        "both": both_count,
+#        "only_retrieved": only_ret_count,
+#        "only_filled": only_fill_count,
+#        "other": other_count,
+#    }
+#
+#    dropped = {
+#        "only_retrieved": nan_rows.loc[only_ret].copy(),
+#        "only_filled":    nan_rows.loc[only_fill].copy(),
+#        "both":           nan_rows.loc[both_nan].copy(),
+#        "other":          nan_rows.loc[other_nan].copy(),
+#        "retrieved_any":  nan_rows.loc[only_ret | both_nan].copy(),
+#        "filled_any":     nan_rows.loc[only_fill | both_nan].copy(),
+#        "any_nan":        nan_rows.copy(),
+#    }
+#
+#    return kept, counts, dropped
 
 #def drop_nans_with_reasons(
 #    df: pd.DataFrame
@@ -330,9 +446,10 @@ def filter_lag_columns(
     long_lag_days,
     long_vars,
     target_vars,
-    info_vars
+    info_vars,
+    stratifier
 ):
-    keep_cols = static_vars + target_vars + info_vars
+    keep_cols = static_vars + target_vars + info_vars + [stratifier]
     for sv,s_var in enumerate(short_vars):
         for sd,s_day in enumerate(short_lag_days):
             keep_cols.append(f'{s_var}_lag_{s_day}d')
@@ -442,6 +559,7 @@ def build_inputs(
     long_features,
     info_features,
     target_cols,
+    stratifier,
     var_names,
     short_lag_days,
     long_lag_days,
@@ -469,13 +587,15 @@ def build_inputs(
             long_lag_days,
             long_features,
             target_cols,
-            info_features
+            info_features,
+            stratifier
         )
         # fill any missing columns
         required_cols = (
             static_features +
             info_features +
             target_cols +
+            [stratifier] +
             [f'{var}_lag_{day}d' for var in short_features for day in short_lag_days] +
             [f'{var}_lag_{day}d' for var in long_features for day in long_lag_days]
         )
@@ -582,6 +702,7 @@ def build_inputs(
         static_df = df[all_static_vars]
         info_df = df[all_info_vars]
         target_df = df[all_target_vars]
+        stratifier_df = df[stratifier]
         # need to consolidate target df into a dataframe that is a single row
         all_target_vals = np.array([])
         for var in target_cols:
@@ -630,6 +751,7 @@ def build_inputs(
             )
             source = torch.from_numpy(source_labels)
             all_info_df = copy.deepcopy(info_df)
+            all_stratifier = stratifier_df.to_numpy()
         else:
             X_short = torch.cat(
                 (X_short, df_to_tensor(
@@ -670,6 +792,10 @@ def build_inputs(
             all_info_df = pd.concat(
                 [all_info_df, info_df],
                 ignore_index=True
+            )
+            all_stratifier = np.concatenate(
+                [all_stratifier, stratifier_df.to_numpy()],
+                axis=0
             )
         if include_lag:
             # remove lfrac from dynamic features so that it is not duplicated
@@ -778,6 +904,10 @@ def build_inputs(
     torch.save(Y,os.path.join(save_dir,'Y.pt'))
     torch.save(source,os.path.join(save_dir,'source.pt'))
     all_info_df.to_csv(os.path.join(save_dir,'info.csv'),index=False)
+    np.save(
+        os.path.join(save_dir,'stratifier.npy'),
+        all_stratifier
+    )
     with open(os.path.join(save_dir,'var_names.json'),'w') as f:
         json.dump(var_names,f)
 
@@ -787,11 +917,11 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     # fill in follwing necessary information for producing the correct dataset
-    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_singletask_sar'
+    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_base'
     os.makedirs(save_dir, exist_ok=True)
     csv_names = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/compiled/'
-        'y_InsituVvVhVvminusvh_X_ModisfilledDaymetStaticClimatezoneSarstats_180d/'
+        'y_InsituVvVhVvminusvh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverFrac_Z_Nlcdclass_180d/'
         'compiled_data_*.csv'
     )
     csv_names = sorted(glob.glob(csv_names))
@@ -815,6 +945,10 @@ if __name__ == "__main__":
         'climate_zone_24','climate_zone_25',
         'climate_zone_26','climate_zone_27',
         'climate_zone_28','climate_zone_29',
+        'barren','crops','deciduous_forest',
+        'developed','evergreen_forest',
+        'grass','mixed_forest','other',
+        'shrub','water','wetlands',
         #'sar_vv_mean',#'sar_vh_mean',#'sar_vv_minus_vh_mean',
         #'sar_vv_std',#'sar_vh_std',#'sar_vv_minus_vh_std',
         #'sar_vv_min',#'sar_vh_min',#'sar_vv_minus_vh_min',
@@ -848,6 +982,7 @@ if __name__ == "__main__":
     long_features = [
         'srad','prcp','swe','tmax','vp',
     ]
+    stratifier = 'nlcd'
     include_lag = True
     #target_cols = ['lfmc']
     target_cols = ['lfmc','VV','VH']
@@ -903,6 +1038,7 @@ if __name__ == "__main__":
         short_features=short_features,
         info_features=info_features,
         target_cols=target_cols,
+        stratifier=stratifier,
         var_names=var_names,
         short_lag_days=short_lag_days,
         long_lag_days=long_lag_days,

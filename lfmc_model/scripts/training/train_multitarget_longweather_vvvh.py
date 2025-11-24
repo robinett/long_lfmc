@@ -13,6 +13,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from sklearn.metrics import r2_score
 from sklearn.neighbors import BallTree
 import math
+from torch.utils.data import Sampler
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
 sys.path.append(os.path.join(project_root,'lfmc_model','models','transformer'))
@@ -30,12 +31,157 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-import numpy as np
-import torch
-from sklearn.neighbors import BallTree  # pip install scikit-learn
+class StratifiedBatchSampler(Sampler):
+    """
+    Yields batches of indices such that each batch has
+    approximately the same class distribution as the full
+    label vector.
+    """
+    def __init__(self, labels, batch_size, shuffle=True, seed=None):
+        """
+        labels: 1D array-like, length N
+            Stratifier / class labels (e.g. land-cover codes).
+        batch_size: int
+        shuffle: bool
+            Whether to shuffle indices within each class.
+        seed: int or None
+            For reproducibility.
+        """
+        self.labels = np.asarray(labels)
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.rng = np.random.default_rng(seed)
+        self.classes, counts = np.unique(self.labels, return_counts=True)
+        self.num_samples = len(self.labels)
+        # Precompute per-class index lists
+        self.class_indices_base = {
+            c: np.where(self.labels == c)[0].tolist()
+            for c in self.classes
+        }
+    def __iter__(self):
+        # Copy and optionally shuffle within each class for this epoch
+        class_indices = {
+            c: idxs.copy() for c, idxs in self.class_indices_base.items()
+        }
+        if self.shuffle:
+            for idxs in class_indices.values():
+                self.rng.shuffle(idxs)
+        while True:
+            # Remaining counts per class
+            rem_counts = np.array(
+                [len(class_indices[c]) for c in self.classes]
+            )
+            total_rem = rem_counts.sum()
+            if total_rem == 0:
+                break
+            # If we are near the end, we may have fewer than batch_size left
+            current_batch_size = min(self.batch_size, total_rem)
+            # Distribution based on remaining samples (keeps proportions stable)
+            probs = rem_counts / rem_counts.sum()
+            expected = probs * current_batch_size
+            base = np.floor(expected).astype(int)
+            remainder = current_batch_size - base.sum()
+            # Give leftover slots to classes with largest fractional parts
+            frac = expected - base
+            order = np.argsort(-frac)
+            for i in order[:remainder]:
+                base[i] += 1
+            batch = []
+            for c, k in zip(self.classes, base):
+                take = min(k, len(class_indices[c]))
+                if take > 0:
+                    batch.extend(class_indices[c][:take])
+                    del class_indices[c][:take]
+            if not batch:
+                break
+            yield batch
+    def __len__(self):
+        # Approx number of batches per epoch
+        return int(np.ceil(self.num_samples / self.batch_size))
 
+def pick_sites_stratified(
+    df: pd.DataFrame,
+    goal: int,
+    strat_col: str = "stratifier",
+    random_state: int = 42
+):
+    """
+    Pick sites so that:
+      * Total observations (sum of n) ~= goal
+      * Land cover distribution (by sum of n) in the picked set
+        is roughly equal to the full df distribution.
 
-import numpy as np
+    Parameters
+    ----------
+    df : DataFrame
+        Must have columns ['lat', 'lon', 'n', strat_col].
+        Each row = one site.
+    goal : int
+        Desired total number of observations (sum of n).
+    strat_col : str
+        Column name with stratifier labels (e.g. NLCD code).
+    random_state : int or None
+        Seed for reproducible randomness.
+
+    Returns
+    -------
+    list[tuple]
+        List of (lat, lon) for selected sites.
+        (You can also grab df.loc[selected_idx] if you
+         want idx/stratifier/etc.)
+    """
+    if df.empty or goal <= 0:
+        return []
+    if strat_col not in df.columns:
+        raise ValueError(f"'{strat_col}' column not found in df.")
+    rng = np.random.default_rng(random_state)
+    # --- 1. overall obs per stratum (by n) ----------------------
+    obs_per_stratum = df.groupby(strat_col)["n"].sum()
+    total_obs = int(obs_per_stratum.sum())
+    # If you ask for more than available, cap at total.
+    if goal > total_obs:
+        goal = total_obs
+    # --- 2. ideal quotas per stratum ----------------------------
+    ideal = obs_per_stratum / total_obs * goal  # float
+    quotas = np.floor(ideal).astype(int)
+    # distribute leftover observations based on largest fractional part
+    remainder = goal - int(quotas.sum())
+    if remainder > 0:
+        frac = ideal - quotas
+        # strata with largest fractional parts get +1
+        extra_order = frac.sort_values(ascending=False).index
+        for s in extra_order[:remainder]:
+            quotas[s] += 1
+    # --- 3. pick minimal sites per stratum to hit each quota ----
+    chosen_parts = []
+    for s, quota in quotas.items():
+        if quota <= 0:
+            continue
+        group = df[df[strat_col] == s].copy()
+        if group.empty:
+            continue
+        # shuffle sites in this stratum
+        group = group.sample(
+            frac=1,
+            random_state=rng.integers(0, 2**32 - 1)
+        )
+        csum = group["n"].to_numpy().cumsum()
+        k = np.searchsorted(csum, quota, side="left")
+        k = min(k, len(group) - 1)
+        chosen_parts.append(group.iloc[:k+1])
+    if not chosen_parts:
+        return []
+    chosen = pd.concat(chosen_parts, ignore_index=True)
+    # Total obs will typically be close to `goal`, but may overshoot
+    # slightly because we can only add whole sites.
+    # Optional final shuffle for randomness in overall order
+    chosen = chosen.sample(
+        frac=1,
+        random_state=rng.integers(0, 2**32 - 1)
+    ).reset_index(drop=True)
+    # Return (lat, lon) tuples like before
+    take = chosen[["lat", "lon"]]
+    return list(map(tuple, take.to_numpy()))
 
 def fuse_gaussians(mu_i, logv_i, mu_r, logv_r,
                       min_var=1e-6, max_logv=10.0,
@@ -74,7 +220,8 @@ def mask_location_data_fast(
     lfmc_insitu,          # torch.Tensor [N, ...]
     source,               # torch.Tensor [N]
     info,                 # pd.DataFrame with 'latitude','longitude'
-    masking_radius_m=600.0,
+    stratifier,
+    masking_radius_m=1000.0,
     match_tolerance_m=5.0,   # how close is "same location"
     round_decimals=6,        # snap to grid to avoid FP drift
 ):
@@ -83,7 +230,7 @@ def mask_location_data_fast(
         # nothing to keep or nothing to act on → everything is remaining
         empty = slice(0, 0)
         return (short_data[empty], long_data[empty], static_data[empty], lfmc_insitu[empty], source[empty], info.iloc[:0],
-                short_data, long_data, static_data, lfmc_insitu, source, info)
+                short_data, long_data, static_data, lfmc_insitu, source, info, stratifier)
 
     # Prepare coordinates
     all_lats = np.asarray(info["latitude"], dtype=float)
@@ -126,6 +273,8 @@ def mask_location_data_fast(
     kept_lfmc_insitu  = lfmc_insitu[m_kept]
     kept_source       = source[m_kept]
     kept_info         = info.loc[mask_kept]
+    kept_info         = kept_info.reset_index(drop=True)
+    kept_stratifier   = stratifier[m_kept]
 
     remaining_short_data   = short_data[m_rem]
     remaining_long_data    = long_data[m_rem]
@@ -133,10 +282,12 @@ def mask_location_data_fast(
     remaining_lfmc_insitu  = lfmc_insitu[m_rem]
     remaining_source       = source[m_rem]
     remaining_info         = info.loc[mask_remaining]
+    remaining_info         = remaining_info.reset_index(drop=True)
+    remaining_stratifier   = stratifier[m_rem]
 
     return (
-        kept_short_data, kept_long_data, kept_static_data, kept_lfmc_insitu, kept_source, kept_info,
-        remaining_short_data, remaining_long_data, remaining_static_data, remaining_lfmc_insitu, remaining_source, remaining_info
+        kept_short_data, kept_long_data, kept_static_data, kept_lfmc_insitu, kept_source, kept_info, kept_stratifier,
+        remaining_short_data, remaining_long_data, remaining_static_data, remaining_lfmc_insitu, remaining_source, remaining_info, remaining_stratifier
     )
 
 class GaussianNLLLoss(nn.Module):
@@ -206,10 +357,20 @@ def load_data(center_data_dir):
         os.path.join(center_data_dir, 'source.pt'),
         weights_only=False
     )
+    stratifier = np.load(
+        os.path.join(center_data_dir, 'stratifier.npy')
+    )
+    # check for nan in any of these
+    assert not torch.isnan(X_short).any(), "NaN found in X_short"
+    assert not torch.isnan(X_long).any(), "NaN found in X_long"
+    assert not torch.isnan(X_static).any(), "NaN found in X_static"
+    assert not torch.isnan(Y_lfmc).any(), "NaN found in Y_lfmc"
+    assert not torch.isnan(source).any(), "NaN found in source"
+    assert not np.isnan(stratifier).any(), "NaN found in stratifier"
     # load the center info
     center_info = pd.read_csv(os.path.join(center_data_dir, 'info.csv'))
     all_center_data = [
-        X_short, X_long, X_static, Y_lfmc, source, center_info
+        X_short, X_long, X_static, Y_lfmc, source, center_info, stratifier
     ]
     return all_center_data
 
@@ -260,12 +421,20 @@ def create_site_split(
     seed: int = 42,
     used_sites = None,
     round_decimals: int = 6,
+    stratifier = None
 ):
     # split sources
     insitu = data_info[data_info['source'] == 'nfmd']
     vv     = data_info[data_info['source'] == 'VV']
     vh     = data_info[data_info['source'] == 'VH']
-
+    # get the index and split by stratifier if provided
+    if stratifier is not None:
+        insitu_idx = data_info[data_info['source'] == 'nfmd'].index
+        vv_idx     = data_info[data_info['source'] == 'VV'].index
+        vh_idx     = data_info[data_info['source'] == 'VH'].index
+        insitu_strat = stratifier[insitu_idx]
+        vv_strat     = stratifier[vv_idx]
+        vh_strat     = stratifier[vh_idx]
     # clean/standardize lat/lon once
     def clean(df):
         out = df[['date', 'latitude', 'longitude']].copy()
@@ -278,27 +447,67 @@ def create_site_split(
         out['lat'] = out['lat'].round(round_decimals)
         out['lon'] = out['lon'].round(round_decimals)
         return out
-
     insitu = clean(insitu)
     vv     = clean(vv)
     vh     = clean(vh)
     if insitu.empty and vv.empty and vh.empty:
         return []
-
     # group counts per site (lat, lon)
-    insitu_counts = (insitu.groupby(['lat', 'lon'])
-                     .size().rename('n').reset_index())
-    vv_counts = (vv.groupby(['lat', 'lon'])
-                 .size().rename('n').reset_index())
-    vh_counts = (vh.groupby(['lat', 'lon'])
-                 .size().rename('n').reset_index())
-
+    #insitu_counts = (insitu.groupby(['lat', 'lon'])
+    #                 .size().rename('n').reset_index())
+    #vv_counts = (vv.groupby(['lat', 'lon'])
+    #             .size().rename('n').reset_index())
+    #vh_counts = (vh.groupby(['lat', 'lon'])
+    #             .size().rename('n').reset_index())
+    # get the land cover type for each site if stratifier is provided
+    insitu_counts = (
+        insitu.groupby(["lat", "lon"])
+              .agg(
+                  n=("date", "size"),
+                  idx=("date", lambda s: list(s.index))
+              )
+              .reset_index()
+    )
+    vv_counts = (
+        vv.groupby(["lat", "lon"])
+            .agg(
+                n=("date", "size"),
+                idx=("date", lambda s: list(s.index))
+            )
+            .reset_index()
+    )
+    vh_counts = (
+        vh.groupby(["lat", "lon"])
+            .agg(
+                n=("date", "size"),
+                idx=("date", lambda s: list(s.index))
+            )
+            .reset_index()
+    )
+    # get the land cover type for each grouping
+    if stratifier is not None:
+        insitu_lcs = []
+        vv_lcs = []
+        vh_lcs = []
+        for idx,row in insitu_counts.iterrows():
+            all_idx = row['idx']
+            all_lcs = insitu_strat[all_idx]
+            ex_idx = row['idx'][0]
+            insitu_lcs.append(insitu_strat[ex_idx])
+        for idx,row in vv_counts.iterrows():
+            ex_idx = row['idx'][0]
+            vv_lcs.append(vv_strat[ex_idx])
+        for idx,row in vh_counts.iterrows():
+            ex_idx = row['idx'][0]
+            vh_lcs.append(vh_strat[ex_idx])
+        insitu_counts['stratifier'] = insitu_lcs
+        vv_counts['stratifier'] = vv_lcs
+        vh_counts['stratifier'] = vh_lcs
     # fast exclude used_sites (as set of tuples)
     if used_sites:
         us = {(round(float(lat), round_decimals),
                round(float(lon), round_decimals))
               for (lat, lon) in used_sites}
-
         if not insitu_counts.empty:
             mi_i = pd.MultiIndex.from_frame(insitu_counts[['lat', 'lon']])
             mask_i = ~mi_i.isin(us)
@@ -311,7 +520,6 @@ def create_site_split(
             mi_vh = pd.MultiIndex.from_frame(vh_counts[['lat', 'lon']])
             mask_vh = ~mi_vh.isin(us)
             vh_counts = vh_counts.loc[mask_vh]
-
     # shuffle sites reproducibly
     rng = np.random.default_rng(seed)
     if not insitu_counts.empty:
@@ -326,123 +534,15 @@ def create_site_split(
         vh_counts = vh_counts.iloc[
             rng.permutation(len(vh_counts))
         ].reset_index(drop=True)
-
     # pick minimum number of sites needed to hit desired obs
-    def pick_sites(df, goal):
-        if df.empty or goal <= 0:
-            return []
-        csum = df['n'].to_numpy().cumsum()
-        k = np.searchsorted(csum, goal, side='left')
-        k = min(k, len(df) - 1)
-        take = df.iloc[:k+1][['lat', 'lon']]
-        return list(map(tuple, take.to_numpy()))
-
-    val_i  = pick_sites(insitu_counts, desired_insitu_sample_size)
-    val_vv = pick_sites(vv_counts,     desired_vv_sample_size)
-    val_vh = pick_sites(vh_counts,     desired_vh_sample_size)
-
+    val_i  = pick_sites_stratified(insitu_counts, desired_insitu_sample_size)
+    val_vv = pick_sites_stratified(vv_counts,     desired_vv_sample_size)
+    val_vh = pick_sites_stratified(vh_counts,     desired_vh_sample_size)
     # combine (allow duplicates if the same site is selected for multiple sources)
     val_locs = val_i + val_vv + val_vh
     # If you want unique sites only:
     # val_locs = list(dict.fromkeys(val_locs))
-
     return val_locs
-
-#def create_site_split(
-#    data_info: pd.DataFrame,
-#    desired_insitu_sample_size: int,
-#    desired_rs_sample_size: int,
-#    seed: int = 42,
-#    used_sites=None,
-#    round_decimals: int = 6,
-#):
-#    # split sources
-#    insitu = data_info[data_info['source'] == 'nfmd']
-#    rs = data_info[data_info['source'] == 'rs']
-#
-#    # clean/standardize lat/lon once
-#    def clean(df):
-#        out = df[['date', 'latitude', 'longitude']].copy()
-#        out = out.rename(columns={'latitude': 'lat',
-#                                  'longitude': 'lon'})
-#        out['lat'] = pd.to_numeric(out['lat'],
-#                                   errors='coerce')
-#        out['lon'] = pd.to_numeric(out['lon'],
-#                                   errors='coerce')
-#        out = out.dropna(subset=['lat', 'lon'])
-#        # optional: snap to grid to avoid tiny fp diffs
-#        out['lat'] = out['lat'].round(round_decimals)
-#        out['lon'] = out['lon'].round(round_decimals)
-#        return out
-#
-#    insitu = clean(insitu)
-#    rs = clean(rs)
-#    if insitu.empty and rs.empty:
-#        return []
-#
-#    # group counts per site (lat, lon)
-#    insitu_counts = (insitu.groupby(['lat', 'lon'])
-#                     .size()
-#                     .rename('n')
-#                     .reset_index())
-#    rs_counts = (rs.groupby(['lat', 'lon'])
-#                 .size()
-#                 .rename('n')
-#                 .reset_index())
-#
-#    # fast exclude used_sites (as set of tuples)
-#    if used_sites:
-#        # apply same rounding to used_sites keys
-#        us = {(round(float(lat), round_decimals),
-#               round(float(lon), round_decimals))
-#              for (lat, lon) in used_sites}
-#        if not insitu_counts.empty:
-#            mi_i = pd.MultiIndex.from_frame(
-#                insitu_counts[['lat', 'lon']]
-#            )
-#            mask_i = ~mi_i.isin(us)
-#            insitu_counts = insitu_counts.loc[mask_i]
-#        if not rs_counts.empty:
-#            mi_r = pd.MultiIndex.from_frame(
-#                rs_counts[['lat', 'lon']]
-#            )
-#            mask_r = ~mi_r.isin(us)
-#            rs_counts = rs_counts.loc[mask_r]
-#
-#    # shuffle sites reproducibly
-#    rng = np.random.default_rng(seed)
-#    if not insitu_counts.empty:
-#        insitu_counts = insitu_counts.iloc[
-#            rng.permutation(len(insitu_counts))
-#        ].reset_index(drop=True)
-#    if not rs_counts.empty:
-#        rs_counts = rs_counts.iloc[
-#            rng.permutation(len(rs_counts))
-#        ].reset_index(drop=True)
-#
-#    # pick minimum number of sites needed to hit
-#    # desired obs using cumsum + searchsorted
-#    def pick_sites(df, goal):
-#        if df.empty or goal <= 0:
-#            return []
-#        csum = df['n'].to_numpy().cumsum()
-#        # index of last site needed
-#        k = np.searchsorted(csum, goal, side='left')
-#        k = min(k, len(df) - 1)
-#        take = df.iloc[:k+1][['lat', 'lon']]
-#        return list(map(tuple, take.to_numpy()))
-#
-#    val_i = pick_sites(insitu_counts,
-#                       desired_insitu_sample_size)
-#    val_r = pick_sites(rs_counts,
-#                       desired_rs_sample_size)
-#
-#    # combine; if you want to prevent duplicates,
-#    # make it a set then back to list:
-#    val_locs = val_i + val_r
-#    # val_locs = list(dict.fromkeys(val_i + val_r))
-#
-#    return val_locs
 
 def run_model(
     model,
@@ -638,9 +738,10 @@ def train_fold_k(
     lfmc = data[3]
     source = data[4]
     info = data[5]
+    stratifier = data[6]
     (
-        test_short_data, test_long_data, test_static_data, test_lfmc, test_source, test_info,
-        remaining_short_data, remaining_long_data, remaining_static_data, remaining_lfmc, remaining_source, remaining_info
+        test_short_data, test_long_data, test_static_data, test_lfmc, test_source, test_info, test_stratifier,
+        remaining_short_data, remaining_long_data, remaining_static_data, remaining_lfmc, remaining_source, remaining_info, remaining_stratifier
     ) = mask_location_data_fast(
         this_locs,
         short_data,
@@ -648,7 +749,8 @@ def train_fold_k(
         static_data,
         lfmc,
         source,
-        info
+        info,
+        stratifier
     )
     # split out the validation data
     remaining_insitu_obs = remaining_info[remaining_info['source_legible'] == 'nfmd'].shape[0]
@@ -663,12 +765,13 @@ def train_fold_k(
         desired_insitu_sample_size=int(num_val_obs_insitu),
         desired_vv_sample_size=int(num_val_obs_vv),
         desired_vh_sample_size=int(num_val_obs_vh),
+        stratifier=remaining_stratifier
     )
     val_locs = np.array(val_locs)
     # perform the same masking as was done for the test sites
     (
-        val_short_data, val_long_data, val_static_data, val_lfmc, val_source, val_info,
-        train_short_data, train_long_data, train_static_data, train_lfmc, train_source, train_info
+        val_short_data, val_long_data, val_static_data, val_lfmc, val_source, val_info, val_stratifier,
+        train_short_data, train_long_data, train_static_data, train_lfmc, train_source, train_info, train_stratifier
     ) = mask_location_data_fast(
         val_locs,
         remaining_short_data,
@@ -676,7 +779,8 @@ def train_fold_k(
         remaining_static_data,
         remaining_lfmc,
         remaining_source,
-        remaining_info
+        remaining_info,
+        remaining_stratifier
     )
     # Sanity check
     total_test = test_info.shape[0]
@@ -781,6 +885,7 @@ def train_fold_k(
     with open(os.path.join(fold_save_dir, 'norm_params.json'), 'w') as f:
         json.dump(norm_params, f)
     # create the datasets and dataloaders
+    # stratify by land cover type to stabilize training
     train_dataset = TensorDataset(
         train_short_data,
         train_long_data,
@@ -788,10 +893,14 @@ def train_fold_k(
         train_lfmc,
         train_source
     )
-    train_loader = DataLoader(
-        train_dataset,
+    batch_sampler = StratifiedBatchSampler(
+        labels=train_stratifier,
         batch_size=batch_size,
         shuffle=True,
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_sampler=batch_sampler,
         pin_memory=True
     )
     val_dataset = TensorDataset(
@@ -1256,7 +1365,7 @@ def main():
     np.random.seed(42)
     # configs
     # directories, etc.
-    input_data_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_multitasksar'
+    input_data_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_base'
     save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs'
     # training settings
     batch_size = 128
@@ -1298,6 +1407,7 @@ def main():
     long_data = datasets[1]
     static_data = datasets[2]
     info = datasets[5]
+    stratifier = datasets[6]
     num_rs_obs = info[info['source'] == 'rs'].shape[0]
     this_model_name = (
         f'transformer_dm{d_model}_nh{nhead}_nl{num_layers}_df{dim_feedforward}'
@@ -1305,7 +1415,7 @@ def main():
         f'_wd{adam_weight_decay}_rsf{rs_factor}_rsobs{num_rs_obs}'
         f'_dmlong{long_d_model}_nhlong{long_nhead}_nllong{long_num_layers}'
         f'_dflong{long_dim_feedforward}_outlong{long_out_dim}'
-        f'_multitasksar'
+        f'_basic'
     )
     # set up the save directories
     full_save_dir = os.path.join(save_dir, this_model_name)
@@ -1322,7 +1432,6 @@ def main():
     total_obs_vh_obs = (
         info[info['source_legible'] == 'vh'].shape[0]
     )
-
     desired_insitu_obs_per_fold = total_obs_insitu_obs / n_folds
     desired_vv_obs_per_fold = total_obs_vv_obs / n_folds
     desired_vh_obs_per_fold = total_obs_vh_obs / n_folds
@@ -1335,7 +1444,8 @@ def main():
             desired_insitu_sample_size=int(desired_insitu_obs_per_fold),
             desired_vv_sample_size=int(desired_vv_obs_per_fold),
             desired_vh_sample_size=int(desired_vh_obs_per_fold),
-            used_sites=used_sites
+            used_sites=used_sites,
+            stratifier=stratifier
         )
         used_sites.extend(this_locs)
         fold_locs[fold + 1] = this_locs
@@ -1406,7 +1516,7 @@ def main():
             warmup_steps,
             warmup_start_lr,
             val_split,
-            rs_factor
+            rs_factor,
         )
     # one final version of the model trained on all the data
     print('Training final model on all data')
