@@ -14,6 +14,7 @@ from sklearn.metrics import r2_score
 from sklearn.neighbors import BallTree
 import math
 from torch.utils.data import Sampler
+import argparse
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
 sys.path.append(os.path.join(project_root,'lfmc_model','models','transformer'))
@@ -839,7 +840,16 @@ def train_fold_k(
             '_sin' in var or
             '_cos' in var or
             'lag' in var or
-            'zone' in var
+            'zone' in var or
+            'barren' in var or
+            'crops' in var or
+            'forest' in var or
+            'developed' in var or
+            'grass' in var or
+            'other' in var or
+            'shrub' in var or
+            'water' in var or
+            'wetlands' in var
         ):
             continue
         train_short_data[:,:,v] = (train_short_data[:,:,v] - train_short_mean[v]) / train_short_std[v]
@@ -850,7 +860,16 @@ def train_fold_k(
             '_sin' in var or
             '_cos' in var or
             'lag' in var or
-            'zone' in var
+            'zone' in var or
+            'barren' in var or
+            'crops' in var or
+            'forest' in var or
+            'developed' in var or
+            'grass' in var or
+            'other' in var or
+            'shrub' in var or
+            'water' in var or
+            'wetlands' in var
         ):
             continue
         train_long_data[:,:,v] = (train_long_data[:,:,v] - train_long_mean[v]) / train_long_std[v]
@@ -861,7 +880,16 @@ def train_fold_k(
             '_sin' in var or
             '_cos' in var or
             'lag' in var or
-            'zone' in var
+            'zone' in var or
+            'barren' in var or
+            'crops' in var or
+            'forest' in var or
+            'developed' in var or
+            'grass' in var or
+            'other' in var or
+            'shrub' in var or
+            'water' in var or
+            'wetlands' in var
         ):
             continue
         train_static_data[:,:,v] = (train_static_data[:,:,v] - train_static_mean[v]) / train_static_std[v]
@@ -886,6 +914,17 @@ def train_fold_k(
         json.dump(norm_params, f)
     # create the datasets and dataloaders
     # stratify by land cover type to stabilize training
+    # there are nan's somewhere... we need to find out where
+    if np.isnan(train_stratifier).any():
+        raise ValueError("NaN found in train_stratifier")
+    if torch.isnan(train_short_data).any():
+        raise ValueError("NaN found in train_short_data")
+    if torch.isnan(train_long_data).any():
+        raise ValueError("NaN found in train_long_data")
+    if torch.isnan(train_static_data).any():
+        raise ValueError("NaN found in train_static_data")
+    if torch.isnan(train_lfmc).any():
+        raise ValueError("NaN found in train_lfmc")
     train_dataset = TensorDataset(
         train_short_data,
         train_long_data,
@@ -1363,6 +1402,7 @@ def train_fold_k(
 def main():
     torch.manual_seed(42)
     np.random.seed(42)
+    # load passed hyperparameter settings
     # configs
     # directories, etc.
     input_data_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_base'
@@ -1395,6 +1435,17 @@ def main():
     long_out_dim = 64
     # load the data
     datasets = load_data(input_data_dir)
+    # early check that we don't have nans ANYWHERE
+    for i, data in enumerate(datasets):
+        if type(data) is np.ndarray:
+            if np.isnan(data).any():
+                raise ValueError(f'Data array {i} contains NaNs!')
+        elif type(data) is pd.DataFrame:
+            if data.isnull().values.any():
+                raise ValueError(f'DataFrame {i} contains NaNs!')
+        elif type(data) is torch.Tensor:
+            if torch.isnan(data).any():
+                raise ValueError(f'Tensor {i} contains NaNs!')
     var_names = json.load(
         open(os.path.join(input_data_dir, 'var_names.json'), 'r')
     )
@@ -1587,4 +1638,10 @@ def main():
             
 
 if __name__ == "__main__":
+    #parser = argparse.ArgumentParser(
+    #    description='Train LFMC Transformer'
+    #)
+    #parser.add_argument(
+    
+    
     main()

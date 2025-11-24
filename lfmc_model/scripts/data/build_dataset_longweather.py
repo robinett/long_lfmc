@@ -797,6 +797,19 @@ def build_inputs(
                 [all_stratifier, stratifier_df.to_numpy()],
                 axis=0
             )
+        # check if any of the tensors have nans
+        if torch.isnan(X_short).any():
+            raise ValueError('NaNs found in X_short tensor after conversion')
+        if torch.isnan(X_long).any():
+            raise ValueError('NaNs found in X_long tensor after conversion')
+        if torch.isnan(X_static).any():
+            raise ValueError('NaNs found in X_static tensor after conversion')
+        if torch.isnan(Y).any():
+            raise ValueError('NaNs found in Y tensor after conversion')
+        if torch.isnan(source).any():
+            raise ValueError('NaNs found in source tensor after conversion')
+        if np.isnan(all_stratifier).any():
+            raise ValueError('NaNs found in stratifier array after conversion')
         if include_lag:
             # remove lfrac from dynamic features so that it is not duplicated
             short_features.remove('lfrac')
