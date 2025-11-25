@@ -735,7 +735,7 @@ def run_model(
         out_true_i.append(Y_b[m_i].detach().cpu())
         out_true_vv.append(Y_b[m_vv].detach().cpu())
     # calculate running loss
-    if loss_fn is not None and n_samples > 0:
+    if loss_fn is not None and n_samples_tot > 0.0:
         running_loss = running_loss_insitu + running_loss_vv * lambda_vv + running_loss_vh * lambda_vh
         running_loss /= (n_i_tot + lambda_vv * n_vv_tot + lambda_vh * n_vh_tot)
         running_loss_insitu /= n_i_tot
@@ -1365,10 +1365,13 @@ def train_fold_k(
         test_loss_rs = np.nan
         lfmc_i_test_only = np.nan
         lfmc_std_i_test_only = np.nan
-        lfmc_rs_test_only = np.nan
-        lfmc_std_rs_test_only = np.nan
+        lfmc_vv_test_only = np.nan
+        lfmc_std_vv_test_only = np.nan
+        lfmc_vh_test_only = np.nan
+        lfmc_std_vh_test_only = np.nan
         lfmc_i_test_true = np.nan
-        lfmc_rs_test_true = np.nan
+        lfmc_vv_test_true = np.nan
+        lfmc_vh_test_true = np.nan
         test_mae = np.nan
         test_r2 = np.nan
         test_nll = np.nan
@@ -1498,7 +1501,7 @@ def main():
     save_dir = args.save_dir
     # training settings
     batch_size = args.batch_size
-    max_epochs = 100
+    max_epochs = 3
     lr = args.lr
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type != 'cuda':
@@ -1603,6 +1606,7 @@ def main():
     # train this fold
     for fold, locs in enumerate(fold_locs.items()):
         print(f'Training fold {fold+1}/{n_folds} with {len(locs[1])} locations held out for testing')
+        continue
         # build the model
         model = LFMCTransformerMultiTaskLongClimate(
             short_input_dim=short_input_dim,
