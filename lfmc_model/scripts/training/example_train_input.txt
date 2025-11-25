@@ -1,0 +1,17 @@
+python3 train_multitarget_longweather_vvvh.py \
+    --input_data_dir '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_base' \
+    --save_dir '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs' \
+    --batch_size 128 \
+    --lr 1e-4 \
+    --val_split 0.2 \
+    --adam_wd 1e-4 \
+    --d_model 64 \
+    --nhead 2 \
+    --num_layers 2 \
+    --dim_feedforward 128 \
+    --dropout 0.2 \
+    --long_d_model 64 \
+    --long_nhead 2 \
+    --long_num_layers 2 \
+    --long_dim_feedforward 128 \
+    --long_out_dim 64

@@ -32,6 +32,94 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
+def get_args():
+    parser = argparse.ArgumentParser(
+        description='Train LFMC Transformer'
+    )
+    parser.add_argument(
+        '--input_data_dir',
+        type=str,
+        help='Directory containing input data',
+    )
+    parser.add_argument(
+        '--save_dir',
+        type=str,
+        help='Directory to save model outputs',
+    )
+    parser.add_argument(
+        '--batch_size',
+        type=int,
+        help='Batch size for training',
+    )
+    parser.add_argument(
+        '--lr',
+        type=float,
+        help='Learning rate for training',
+    )
+    parser.add_argument(
+        '--val_split',
+        type=float,
+        help='Fraction of data to use for validation',
+    )
+    parser.add_argument(
+        '--adam_wd',
+        type=float,
+        help='Weight decay for Adam optimizer',
+    )
+    parser.add_argument(
+        '--d_model',
+        type=int,
+        help='Dimensionality of the model',
+    )
+    parser.add_argument(
+        '--nhead',
+        type=int,
+        help='Number of attention heads',
+    )
+    parser.add_argument(
+        '--num_layers',
+        type=int,
+        help='Number of layers in the transformer',
+    )
+    parser.add_argument(
+        '--dim_feedforward',
+        type=int,
+        help='Dimensionality of the feedforward layer',
+    )
+    parser.add_argument(
+        '--dropout',
+        type=float,
+        help='Dropout rate',
+    )
+    parser.add_argument(
+        '--long_d_model',
+        type=int,
+        help='Dimensionality of the long-term model',
+    )
+    parser.add_argument(
+        '--long_nhead',
+        type=int,
+        help='Number of attention heads in the long-term model',
+    )
+    parser.add_argument(
+        '--long_num_layers',
+        type=int,
+        help='Number of layers in the long-term transformer',
+    )
+    parser.add_argument(
+        '--long_dim_feedforward',
+        type=int,
+        help='Dimensionality of the feedforward layer in the long-term model',
+    )
+    parser.add_argument(
+        '--long_out_dim',
+        type=int,
+        help='Dimensionality of the output layer in the long-term model',
+    )
+    args = parser.parse_args()
+    return args
+
+
 class StratifiedBatchSampler(Sampler):
     """
     Yields batches of indices such that each batch has
@@ -1403,36 +1491,37 @@ def main():
     torch.manual_seed(42)
     np.random.seed(42)
     # load passed hyperparameter settings
+    args = get_args()
     # configs
     # directories, etc.
-    input_data_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_base'
-    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs'
+    input_data_dir = args.input_data_dir
+    save_dir = args.save_dir
     # training settings
-    batch_size = 128
+    batch_size = args.batch_size
     max_epochs = 100
-    lr = 1e-4
+    lr = args.lr
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type != 'cuda':
         print('WARNING: CUDA not available, using CPU. This will be slow!')
     warmup_steps = 400
     base_lr = lr
     warmup_start_lr = 1e-6
-    val_split = 0.2
-    adam_weight_decay = 1e-4
+    val_split = args.val_split
+    adam_weight_decay = args.adam_wd
     patience = 8
     # model hyperparameters (go back to the github and get what I deleted here)
-    d_model = 64
-    nhead = 2
-    num_layers = 2
-    dim_feedforward = 128
-    dropout = 0.2
+    d_model = args.d_model
+    nhead = args.nhead
+    num_layers = args.num_layers
+    dim_feedforward = args.dim_feedforward
+    dropout = args.dropout
     rs_factor = 1.0 # weighting for RS loss
     # long model hyperparameters
-    long_d_model = 64
-    long_nhead = 2
-    long_num_layers = 2
-    long_dim_feedforward = 128
-    long_out_dim = 64
+    long_d_model = args.long_d_model
+    long_nhead = args.long_nhead
+    long_num_layers = args.long_num_layers
+    long_dim_feedforward = args.long_dim_feedforward
+    long_out_dim = args.long_out_dim
     # load the data
     datasets = load_data(input_data_dir)
     # early check that we don't have nans ANYWHERE
@@ -1500,6 +1589,14 @@ def main():
         )
         used_sites.extend(this_locs)
         fold_locs[fold + 1] = this_locs
+    # if the last fold doesn't have enough locations (due to rounding), get rid of it
+    fold_keys = list(fold_locs.keys())
+    last_key = fold_keys[-1]
+    if len(fold_locs[last_key]) < 1:
+        print(f'Removing fold {last_key} due to insufficient locations')
+        fold_locs.pop(last_key)
+        n_folds -= 1
+    print(f'Using {n_folds} folds for training')
     # save this fold info
     with open(os.path.join(full_save_dir, 'fold_info.json'), 'w') as f:
         json.dump(fold_locs, f)
@@ -1638,10 +1735,4 @@ def main():
             
 
 if __name__ == "__main__":
-    #parser = argparse.ArgumentParser(
-    #    description='Train LFMC Transformer'
-    #)
-    #parser.add_argument(
-    
-    
     main()
