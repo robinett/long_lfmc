@@ -58,7 +58,11 @@ def main():
             'nlcd_class':os.path.join(
                 scratch_dir,
                 'nlcd/nlcd_2003_2023.zarr'
-            )
+            ),
+            'landcover_change':os.path.join(
+                scratch_dir,
+                'nlcd/land_cover_change_flag_2016_2021.nc'
+            ),
             #'krishna_stats':os.path.join(
             #    scratch_dir,
             #    'krishna/stats/krishna_lfmc_statistics.nc4'
@@ -172,7 +176,10 @@ def main():
             ],
             'nlcd_class':[
                 'nlcd'
-            ]
+            ],
+            'landcover_change':[
+                'land_cover_change_flag'
+            ],
             #'krishna_stats':[
             #    'retrieved_lfmc_mean',
             #    'retrieved_lfmc_std',
@@ -260,7 +267,8 @@ def main():
             'climate_zone':'spatial_static_onehot',
             'sar_stats':'spatial_static',
             'landcover_frac':'spatial_yearly',
-            'nlcd_class':'nlcd'
+            'nlcd_class':'nlcd',
+            'landcover_change':'spatial_static',
             #'krishna_stats':'spatial_static',
             #'weather_stats':'spatial_nolag'
         }
@@ -319,7 +327,7 @@ def main():
         171, 172, 173, 174, 175, 176, 177, 178, 179, 180
     ]
     inputs_outputs = (
-        'y_InsituVvVhVvminusvh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverFrac_Z_Nlcdclass_180d'
+        'y_InsituVvVhVvminusvh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverfracLandcoverchange_Z_Nlcdclass_180d'
     )
     out_dir = os.path.join(
         scratch_dir,
