@@ -6,10 +6,10 @@ set -euo pipefail
 ########################
 
 input_data_dir="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/inputs_sarmultitask"
+trent_datasets/lfmc_model/data/inputs_sarstats"
 
 save_root="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/outputs/sarmultitask"
+trent_datasets/lfmc_model/data/outputs/sarstatsnomonthlymeans"
 
 ########################
 # Experiment definitions

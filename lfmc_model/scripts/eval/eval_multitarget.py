@@ -7,21 +7,33 @@ from sklearn.metrics import r2_score
 import sys
 from rich.console import Console
 from rich.table import Table
+import warnings
 
 proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
 sys.path.append(os.path.join(proj_root, 'lfmc_model','utils'))
 
 from plotting import pred_obs_scatter,map_points
 
+warnings.filterwarnings(
+    "ignore",
+    message="Mean of empty slice",
+    category=RuntimeWarning
+)
+warnings.filterwarnings(
+    "ignore",
+    message="invalid value encountered in scalar divide",
+    category=RuntimeWarning
+)
+
 def main():
     # perform analysis across all models in a dir, since these are now batched out
-    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarstats'
+    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarmultitask'
+    load_only = False
     model_dirs = [
         os.path.join(base_dir, d)
         for d in os.listdir(base_dir)
         if os.path.isdir(os.path.join(base_dir, d))
     ]
-    load_only = True
     if load_only:
         csv = pd.read_csv(
             os.path.join(
@@ -48,8 +60,9 @@ def main():
     lrs = []
     warmups = []
     wds = []
-    rsfs = []
-    rsobss = []
+    iobs = []
+    vvobs = []
+    vhobs = []
     long_d_models = []
     long_nheads = []
     long_n_layers = []
@@ -72,8 +85,9 @@ def main():
         lrs.append(float(model_name.split('lr')[1].split('_')[0]))
         warmups.append(int(model_name.split('warmup')[1].split('_')[0]))
         wds.append(float(model_name.split('wd')[1].split('_')[0]))
-        rsfs.append(float(model_name.split('rsf')[1].split('_')[0]))
-        rsobss.append(int(model_name.split('rsobs')[1].split('_')[0]))
+        iobs.append(int(model_name.split('iobs')[1].split('_')[0]))
+        vvobs.append(int(model_name.split('vvobs')[1].split('_')[0]))
+        vhobs.append(int(model_name.split('vhobs')[1].split('_')[0]))
         long_d_models.append(int(model_name.split('dmlong')[1].split('_')[0]))
         long_nheads.append(int(model_name.split('nhlong')[1].split('_')[0]))
         long_n_layers.append(int(model_name.split('nllong')[1].split('_')[0]))
@@ -106,24 +120,24 @@ def main():
             test_data_path = os.path.join(model_dir, f'fold_{fold}', 'test_outputs.pth')
             test_data = torch.load(test_data_path, weights_only=False)
             # get the preds and true
-            val_preds_insitu = val_data['lfmc_insitu_preds']
-            val_preds_insitu_std = val_data['lfmc_insitu_std']
-            val_preds_vv = val_data['lfmc_vv_preds']
-            val_preds_vv_std = val_data['lfmc_vv_std']
-            val_preds_vh = val_data['lfmc_vh_preds']
-            val_preds_vh_std = val_data['lfmc_vh_std']
-            val_true_insitu = val_data['lfmc_insitu_true']
-            val_true_vv = val_data['lfmc_vv_true']
-            val_true_vh = val_data['lfmc_vh_true']
-            test_preds_insitu = test_data['lfmc_insitu_preds']
-            test_preds_insitu_std = test_data['lfmc_insitu_std']
-            test_preds_vv = test_data['lfmc_vv_preds']
-            test_preds_vv_std = test_data['lfmc_vv_std']
-            test_preds_vh = test_data['lfmc_vh_preds']
-            test_preds_vh_std = test_data['lfmc_vh_std']
-            test_true_insitu = test_data['lfmc_insitu_true']
-            test_true_vv = test_data['lfmc_vv_true']
-            test_true_vh = test_data['lfmc_vh_true']
+            val_preds_insitu = val_data['lfmc_preds']
+            val_preds_insitu_std = val_data['lfmc_std']
+            val_preds_vv = val_data['vv_preds']
+            val_preds_vv_std = val_data['vv_std']
+            val_preds_vh = val_data['vh_preds']
+            val_preds_vh_std = val_data['vh_std']
+            val_true_insitu = val_data['lfmc_true']
+            val_true_vv = val_data['vv_true']
+            val_true_vh = val_data['vh_true']
+            test_preds_insitu = test_data['lfmc_preds']
+            test_preds_insitu_std = test_data['lfmc_std']
+            test_preds_vv = test_data['vv_preds']
+            test_preds_vv_std = test_data['vv_std']
+            test_preds_vh = test_data['vh_preds']
+            test_preds_vh_std = test_data['vh_std']
+            test_true_insitu = test_data['lfmc_true']
+            test_true_vv = test_data['vv_true']
+            test_true_vh = test_data['vh_true']
             # compute metrics
             val_insitu_mae = np.mean(np.abs(val_preds_insitu - val_true_insitu))
             val_insitu_rmse = np.sqrt(np.mean((val_preds_insitu - val_true_insitu)**2))
@@ -521,8 +535,9 @@ def main():
         'learning_rate': lrs,
         'warmup_steps': warmups,
         'weight_decay': wds,
-        'rs_factor': rsfs,
-        'rs_obs': rsobss,
+        'insitu_obs': iobs,
+        'vv_obs': vvobs,
+        'vh_obs': vhobs,
         'long_d_model': long_d_models,
         'long_nhead': long_nheads,
         'long_num_layers': long_n_layers,
@@ -541,6 +556,7 @@ def main():
     # print this as a nice table
     # sort by lowest rmse (lowest @ top)
     summary_df = summary_df.sort_values(by='test_insitu_rmse', ascending=True)
+    summary_df = summary_df.delete_columns(['model_dir'])
     print('Model Summary Results:')
     console = Console()
     console.print(summary_df)

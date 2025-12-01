@@ -1818,8 +1818,6 @@ def main():
     # train this fold
     for fold, locs in enumerate(fold_locs.items()):
         print(f'Training fold {fold+1}/{n_folds} with {len(locs[1])} locations held out for testing')
-        if fold != 9:
-            continue
         # build the model
         model = LFMCTransformerMultiTaskLongClimate(
             short_input_dim=short_input_dim,
