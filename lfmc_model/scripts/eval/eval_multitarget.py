@@ -15,7 +15,7 @@ from plotting import pred_obs_scatter,map_points
 
 def main():
     # perform analysis across all models in a dir, since these are now batched out
-    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/basic'
+    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarstats'
     model_dirs = [
         os.path.join(base_dir, d)
         for d in os.listdir(base_dir)

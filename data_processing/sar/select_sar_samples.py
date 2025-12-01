@@ -167,7 +167,9 @@ def main():
     vars_to_sample = ['VV', 'VH', 'vv_minus_vh']
     for var in vars_to_sample:
         print(f"Sampling {var}...")
-        sampled_sar = sample_by_pixels_non_nan(sar_ds, var, num_to_sample=100_000, seed=42)
+        # generate a random integer between 1 and 100 to be our seed
+        this_seed = np.random.randint(1, 100)
+        sampled_sar = sample_by_pixels_non_nan(sar_ds, var, num_to_sample=100_000, seed=this_seed)
         var_fmt = var.lower()
         sampled_sar.to_csv(
             f"/scratch/users/trobinet/long_lfmc/trent_datasets/sar/sampled/{var_fmt}_samples.csv",

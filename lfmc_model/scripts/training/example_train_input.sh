@@ -4,19 +4,19 @@
 # but keep it at this size to not overwrite existing outputs
 
 python3 -u train_multitarget_longweather_vvvh.py \
-    --input_data_dir '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_base' \
+    --input_data_dir '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_sarmultitask' \
     --save_dir '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/testing' \
     --batch_size 128 \
     --lr 1e-4 \
     --val_split 0.2 \
     --adam_wd 1e-4 \
-    --d_model 16 \
-    --nhead 1 \
-    --num_layers 1 \
-    --dim_feedforward 32 \
+    --d_model 64 \
+    --nhead 2 \
+    --num_layers 2 \
+    --dim_feedforward 128 \
     --dropout 0.2 \
-    --long_d_model 16 \
-    --long_nhead 1 \
-    --long_num_layers 1 \
-    --long_dim_feedforward 32 \
-    --long_out_dim 16
+    --long_d_model 128 \
+    --long_nhead 4 \
+    --long_num_layers 3 \
+    --long_dim_feedforward 256 \
+    --long_out_dim 32

@@ -176,6 +176,14 @@ class LFMCTransformer(nn.Module):
             long_out_dim if long_out_dim is not None else _long_d_model
         )
 
+        # for gradnorm
+        self.task_weights = nn.Parameter(
+            torch.ones(
+                3,
+                dtype=torch.float32
+            )
+        )
+
         # ----- long branch
         self.long_enc = LongEncoder(
             long_input_dim=long_input_dim,

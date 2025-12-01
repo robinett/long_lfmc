@@ -61,7 +61,7 @@ def main():
             ),
             'landcover_change':os.path.join(
                 scratch_dir,
-                'nlcd/land_cover_change_flag_2016_2021.nc'
+                'nlcd/nlcd_land_cover_change_2016_2021.zarr'
             ),
             #'krishna_stats':os.path.join(
             #    scratch_dir,
@@ -289,16 +289,16 @@ def main():
                 scratch_dir,
                 'sar/sampled/vh_samples.csv'
             ),
-            'vv_minus_vh':os.path.join(
-                scratch_dir,
-                'sar/sampled/vv_minus_vh_samples.csv'
-            ),
+            #'vv_minus_vh':os.path.join(
+            #    scratch_dir,
+            #    'sar/sampled/vv_minus_vh_samples.csv'
+            #),
         },
         'vars':{
             'nfmd':['lfmc'],
             'vv':['VV'],
             'vh':['VH'],
-            'vv_minus_vh':['vv_minus_vh']
+            #'vv_minus_vh':['vv_minus_vh']
         }
     }
     # number of random samples to include from RS data
@@ -327,7 +327,7 @@ def main():
         171, 172, 173, 174, 175, 176, 177, 178, 179, 180
     ]
     inputs_outputs = (
-        'y_InsituVvVhVvminusvh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverfracLandcoverchange_Z_Nlcdclass_180d'
+        'y_InsituVvVh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverfracLandcoverchange_Z_Nlcdclass_180d'
     )
     out_dir = os.path.join(
         scratch_dir,

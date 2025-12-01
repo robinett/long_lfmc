@@ -930,11 +930,11 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     # fill in follwing necessary information for producing the correct dataset
-    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_base'
+    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_sarstats'
     os.makedirs(save_dir, exist_ok=True)
     csv_names = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/compiled/'
-        'y_InsituVvVhVvminusvh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverFrac_Z_Nlcdclass_180d/'
+        'y_InsituVvVh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverfracLandcoverchange_Z_Nlcdclass_180d/'
         'compiled_data_*.csv'
     )
     csv_names = sorted(glob.glob(csv_names))
@@ -962,26 +962,27 @@ if __name__ == "__main__":
         'developed','evergreen_forest',
         'grass','mixed_forest','other',
         'shrub','water','wetlands',
-        #'sar_vv_mean',#'sar_vh_mean',#'sar_vv_minus_vh_mean',
-        #'sar_vv_std',#'sar_vh_std',#'sar_vv_minus_vh_std',
-        #'sar_vv_min',#'sar_vh_min',#'sar_vv_minus_vh_min',
-        #'sar_vv_max',#'sar_vh_max',#'sar_vv_minus_vh_max',
-        #'sar_vv_jan_mean','sar_vh_jan_mean',#'sar_vv_minus_vh_jan_mean',
-        #'sar_vv_feb_mean','sar_vh_feb_mean',#'sar_vv_minus_vh_feb_mean',
-        #'sar_vv_mar_mean','sar_vh_mar_mean',#'sar_vv_minus_vh_mar_mean',
-        #'sar_vv_apr_mean','sar_vh_apr_mean',#'sar_vv_minus_vh_apr_mean',
-        #'sar_vv_may_mean','sar_vh_may_mean',#'sar_vv_minus_vh_may_mean',
-        #'sar_vv_jun_mean','sar_vh_jun_mean',#'sar_vv_minus_vh_jun_mean',
-        #'sar_vv_jul_mean','sar_vh_jul_mean',#'sar_vv_minus_vh_jul_mean',
-        #'sar_vv_aug_mean','sar_vh_aug_mean',#'sar_vv_minus_vh_aug_mean',
-        #'sar_vv_sep_mean','sar_vh_sep_mean',#'sar_vv_minus_vh_sep_mean',
-        #'sar_vv_oct_mean','sar_vh_oct_mean',#'sar_vv_minus_vh_oct_mean',
-        #'sar_vv_nov_mean','sar_vh_nov_mean',#'sar_vv_minus_vh_nov_mean',
-        #'sar_vv_dec_mean','sar_vh_dec_mean',#'sar_vv_minus_vh_dec_mean',
-        #'vv_skewness',#'vh_skewness',#'vv_minus_vh_skewness',
-        #'vv_kurtosis',#'vh_kurtosis',#'vv_minus_vh_kurtosis',
-        #'vv_autocorr1',#'vh_autocorr1',#'vv_minus_vh_autocorr1',
-        #'vv_autocorr2',#'vh_autocorr2',#'vv_minus_vh_autocorr2'
+        'sar_vv_mean','sar_vh_mean',#'sar_vv_minus_vh_mean',
+        'sar_vv_std','sar_vh_std',#'sar_vv_minus_vh_std',
+        'sar_vv_min','sar_vh_min',#'sar_vv_minus_vh_min',
+        'sar_vv_max','sar_vh_max',#'sar_vv_minus_vh_max',
+        'sar_vv_jan_mean','sar_vh_jan_mean',#'sar_vv_minus_vh_jan_mean',
+        'sar_vv_feb_mean','sar_vh_feb_mean',#'sar_vv_minus_vh_feb_mean',
+        'sar_vv_mar_mean','sar_vh_mar_mean',#'sar_vv_minus_vh_mar_mean',
+        'sar_vv_apr_mean','sar_vh_apr_mean',#'sar_vv_minus_vh_apr_mean',
+        'sar_vv_may_mean','sar_vh_may_mean',#'sar_vv_minus_vh_may_mean',
+        'sar_vv_jun_mean','sar_vh_jun_mean',#'sar_vv_minus_vh_jun_mean',
+        'sar_vv_jul_mean','sar_vh_jul_mean',#'sar_vv_minus_vh_jul_mean',
+        'sar_vv_aug_mean','sar_vh_aug_mean',#'sar_vv_minus_vh_aug_mean',
+        'sar_vv_sep_mean','sar_vh_sep_mean',#'sar_vv_minus_vh_sep_mean',
+        'sar_vv_oct_mean','sar_vh_oct_mean',#'sar_vv_minus_vh_oct_mean',
+        'sar_vv_nov_mean','sar_vh_nov_mean',#'sar_vv_minus_vh_nov_mean',
+        'sar_vv_dec_mean','sar_vh_dec_mean',#'sar_vv_minus_vh_dec_mean',
+        'vv_skewness','vh_skewness',#'vv_minus_vh_skewness',
+        'vv_kurtosis','vh_kurtosis',#'vv_minus_vh_kurtosis',
+        'vv_autocorr1','vh_autocorr1',#'vv_minus_vh_autocorr1',
+        'vv_autocorr2','vh_autocorr2',#'vv_minus_vh_autocorr2',
+        'land_cover_change_flag'
     ]
     short_features = [
         'Nadir_Reflectance_Band1_filled',

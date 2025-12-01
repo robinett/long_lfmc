@@ -15,6 +15,8 @@ from sklearn.neighbors import BallTree
 import math
 from torch.utils.data import Sampler
 import argparse
+import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
 sys.path.append(os.path.join(project_root,'lfmc_model','models','transformer'))
@@ -31,6 +33,84 @@ warnings.filterwarnings(
     message="enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.self_attn.num_heads is odd",
     category=UserWarning,
 )
+
+class GradNorm:
+    """
+    GradNorm (Chen et al., 2018) for *T* tasks.
+
+    Call pattern (once *only when you want to* apply GradNorm):
+
+        total_loss, L_grad = grad_norm.update(
+            task_losses,       # list of scalar tensors  [L0, L1, …]
+            task_weights,      # nn.Parameter, len = T
+            model,             # your (possibly DDP-wrapped) nn.Module
+            shared_param_names # optional list[str] names of shared params
+        )
+
+    You then:
+        total_loss.backward(retain_graph=True)
+        L_grad.backward()      # updates task_weights only
+    """
+    def __init__(self, num_tasks: int, alpha: float = 0.5, device="cuda"):
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError("alpha should be in [0, 1]")
+        self.T = num_tasks
+        self.alpha = alpha
+        self.device = torch.device(device)
+        self.L0 = None  # will store initial losses
+    # ------------------------------------------------------------
+    def _unwrap(self, model):
+        """Return the underlying module if model is DDP-wrapped."""
+        return model.module if hasattr(model, "module") else model
+    def _shared_params(self, model, shared_param_names):
+        net = self._unwrap(model)
+        if shared_param_names is None:
+            # heuristic: everything *not* containing "head" is shared
+            return [p for n, p in net.named_parameters()
+                    if "head" not in n and p.requires_grad]
+        return [p for n, p in net.named_parameters()
+                if n in shared_param_names]
+    def _grad_norm(self, scalar, params):
+        grads = torch.autograd.grad(
+            scalar, params,
+            retain_graph=True, create_graph=True, allow_unused=True
+        )
+        return torch.norm(
+            torch.stack([g.norm() for g in grads if g is not None])
+        )
+    # ------------------------------------------------------------
+    def update(
+        self,
+        task_losses,             # list[Tensor] length T
+        task_weights,            # nn.Parameter length T
+        model,                   # nn.Module (DDP or not)
+        shared_param_names=None  # optional list[str]
+    ):
+        """
+        Returns
+        -------
+        total_loss : Tensor  (weighted sum, use for main backward)
+        L_grad     : Tensor  (GradNorm loss, backprop into weights only)
+        """
+        L_vec = torch.stack(task_losses)               # shape (T,)
+        w_pos = F.relu(task_weights)                   # keep ≥ 0
+        total_loss = (w_pos * L_vec).sum()
+        # Record initial (un-weighted) losses once
+        if self.L0 is None:
+            self.L0 = L_vec.detach()
+        # ---------- compute GradNorm quantities ----------
+        shared_params = self._shared_params(model, shared_param_names)
+        G = torch.stack([
+            self._grad_norm(w_pos[i] * L_vec[i], shared_params)
+            for i in range(self.T)
+        ])                                             # (T,)
+        G_bar = G.mean().detach()
+        with torch.no_grad():
+            r = (L_vec.detach() / (self.L0 + 1e-8))
+            r = r / r.mean()                           # relative inverse rate
+        target = G_bar * (r ** self.alpha)
+        L_grad = F.l1_loss(G, target, reduction="sum")
+        return total_loss, L_grad
 
 def get_args():
     parser = argparse.ArgumentParser(
@@ -219,6 +299,8 @@ def pick_sites_stratified(
         (You can also grab df.loc[selected_idx] if you
          want idx/stratifier/etc.)
     """
+    #print(df)
+    #print(goal)
     if df.empty or goal <= 0:
         return []
     if strat_col not in df.columns:
@@ -233,6 +315,7 @@ def pick_sites_stratified(
     # --- 2. ideal quotas per stratum ----------------------------
     ideal = obs_per_stratum / total_obs * goal  # float
     quotas = np.floor(ideal).astype(int)
+    #print(quotas)
     # distribute leftover observations based on largest fractional part
     remainder = goal - int(quotas.sum())
     if remainder > 0:
@@ -306,7 +389,7 @@ def mask_location_data_fast(
     short_data,
     long_data,           # torch.Tensor [N, ...]
     static_data,          # torch.Tensor [N, ...]
-    lfmc_insitu,          # torch.Tensor [N, ...]
+    y,          # torch.Tensor [N, ...]
     source,               # torch.Tensor [N]
     info,                 # pd.DataFrame with 'latitude','longitude'
     stratifier,
@@ -318,8 +401,8 @@ def mask_location_data_fast(
     if len(info) == 0 or len(keep_locs) == 0:
         # nothing to keep or nothing to act on → everything is remaining
         empty = slice(0, 0)
-        return (short_data[empty], long_data[empty], static_data[empty], lfmc_insitu[empty], source[empty], info.iloc[:0],
-                short_data, long_data, static_data, lfmc_insitu, source, info, stratifier)
+        return (short_data[empty], long_data[empty], static_data[empty], y[empty], source[empty], info.iloc[:0],
+                short_data, long_data, static_data, y, source, info, stratifier)
 
     # Prepare coordinates
     all_lats = np.asarray(info["latitude"], dtype=float)
@@ -359,7 +442,7 @@ def mask_location_data_fast(
     kept_short_data   = short_data[m_kept]
     kept_long_data    = long_data[m_kept]
     kept_static_data  = static_data[m_kept]
-    kept_lfmc_insitu  = lfmc_insitu[m_kept]
+    kept_y            = y[m_kept]
     kept_source       = source[m_kept]
     kept_info         = info.loc[mask_kept]
     kept_info         = kept_info.reset_index(drop=True)
@@ -368,15 +451,15 @@ def mask_location_data_fast(
     remaining_short_data   = short_data[m_rem]
     remaining_long_data    = long_data[m_rem]
     remaining_static_data  = static_data[m_rem]
-    remaining_lfmc_insitu  = lfmc_insitu[m_rem]
+    remaining_y            = y[m_rem]
     remaining_source       = source[m_rem]
     remaining_info         = info.loc[mask_remaining]
     remaining_info         = remaining_info.reset_index(drop=True)
     remaining_stratifier   = stratifier[m_rem]
 
     return (
-        kept_short_data, kept_long_data, kept_static_data, kept_lfmc_insitu, kept_source, kept_info, kept_stratifier,
-        remaining_short_data, remaining_long_data, remaining_static_data, remaining_lfmc_insitu, remaining_source, remaining_info, remaining_stratifier
+        kept_short_data, kept_long_data, kept_static_data, kept_y, kept_source, kept_info, kept_stratifier,
+        remaining_short_data, remaining_long_data, remaining_static_data, remaining_y, remaining_source, remaining_info, remaining_stratifier
     )
 
 class GaussianNLLLoss(nn.Module):
@@ -438,7 +521,7 @@ def load_data(center_data_dir):
         os.path.join(center_data_dir, 'X_static.pt'),
         weights_only=False
     )
-    Y_lfmc = torch.load(
+    Y = torch.load(
         os.path.join(center_data_dir, 'Y.pt'),
         weights_only=False
     )
@@ -453,13 +536,13 @@ def load_data(center_data_dir):
     assert not torch.isnan(X_short).any(), "NaN found in X_short"
     assert not torch.isnan(X_long).any(), "NaN found in X_long"
     assert not torch.isnan(X_static).any(), "NaN found in X_static"
-    assert not torch.isnan(Y_lfmc).any(), "NaN found in Y_lfmc"
+    assert not torch.isnan(Y).any(), "NaN found in Y"
     assert not torch.isnan(source).any(), "NaN found in source"
     assert not np.isnan(stratifier).any(), "NaN found in stratifier"
     # load the center info
     center_info = pd.read_csv(os.path.join(center_data_dir, 'info.csv'))
     all_center_data = [
-        X_short, X_long, X_static, Y_lfmc, source, center_info, stratifier
+        X_short, X_long, X_static, Y, source, center_info, stratifier
     ]
     return all_center_data
 
@@ -513,14 +596,14 @@ def create_site_split(
     stratifier = None
 ):
     # split sources
-    insitu = data_info[data_info['source'] == 'nfmd']
-    vv     = data_info[data_info['source'] == 'VV']
-    vh     = data_info[data_info['source'] == 'VH']
+    insitu = data_info[data_info['source_legible'] == 'nfmd']
+    vv     = data_info[data_info['source_legible'] == 'vv']
+    vh     = data_info[data_info['source_legible'] == 'vh']
     # get the index and split by stratifier if provided
     if stratifier is not None:
-        insitu_idx = data_info[data_info['source'] == 'nfmd'].index
-        vv_idx     = data_info[data_info['source'] == 'VV'].index
-        vh_idx     = data_info[data_info['source'] == 'VH'].index
+        insitu_idx = data_info[data_info['source_legible'] == 'nfmd'].index
+        vv_idx     = data_info[data_info['source_legible'] == 'vv'].index
+        vh_idx     = data_info[data_info['source_legible'] == 'vh'].index
         insitu_strat = stratifier[insitu_idx]
         vv_strat     = stratifier[vv_idx]
         vh_strat     = stratifier[vh_idx]
@@ -539,6 +622,9 @@ def create_site_split(
     insitu = clean(insitu)
     vv     = clean(vv)
     vh     = clean(vh)
+    insitu = insitu.reset_index(drop=True)
+    vv     = vv.reset_index(drop=True)
+    vh     = vh.reset_index(drop=True)
     if insitu.empty and vv.empty and vh.empty:
         return []
     # group counts per site (lat, lon)
@@ -584,9 +670,13 @@ def create_site_split(
             ex_idx = row['idx'][0]
             insitu_lcs.append(insitu_strat[ex_idx])
         for idx,row in vv_counts.iterrows():
+            all_idx = row['idx']
+            all_lcs = vv_strat[all_idx]
             ex_idx = row['idx'][0]
             vv_lcs.append(vv_strat[ex_idx])
         for idx,row in vh_counts.iterrows():
+            all_idx = row['idx']
+            all_lcs = vh_strat[all_idx]
             ex_idx = row['idx'][0]
             vh_lcs.append(vh_strat[ex_idx])
         insitu_counts['stratifier'] = insitu_lcs
@@ -645,7 +735,9 @@ def run_model(
     warmup_start_lr=None,
     warmup_end_lr=None,
     lambda_vv=1.0,
-    lambda_vh=1.0
+    lambda_vh=1.0,
+    grad_norm=None,
+    gradnorm_enabled=False
 ):
     pbar = tqdm.tqdm(
         loader,
@@ -669,6 +761,10 @@ def run_model(
     out_true_i = []
     out_true_vv = []
     out_true_vh = []
+    if not gradnorm_enabled:
+        task_weights = [1.0, lambda_vv, lambda_vh]
+    else:
+        task_weights = model.task_weights
     for Xsh_b,Xl_b,Xst_b,Y_b,insitu_b in pbar:
         # move data to device
         Xsh_b = Xsh_b.to(device=device, dtype=torch.float32)
@@ -678,8 +774,23 @@ def run_model(
         insitu_b = insitu_b.to(device=device, dtype=torch.float32)
         Y_b = Y_b.view(-1)
         insitu_b = insitu_b.view(-1)
+        if (
+            not train_model or
+            insitu_b.sum().item() == 0
+        ):
+            use_gradnorm = False
+        #elif global_step < warmup_steps:
+        #    use_gradnorm = (global_step % 20 == 0)
+        else:
+            use_gradnorm = (global_step % 200 == 0)
         if train_model:
-            preds = model(Xsh_b, Xl_b, Xst_b)
+            optimizer.zero_grad(set_to_none=True)
+            if use_gradnorm:
+                with torch.backends.cudnn.flags(enabled=False), \
+                    sdpa_kernel(SDPBackend.MATH):
+                    preds = model(Xsh_b, Xl_b, Xst_b)
+            else:
+                preds = model(Xsh_b, Xl_b, Xst_b)
         else:
             with torch.no_grad():
                 preds = model(Xsh_b, Xl_b, Xst_b)
@@ -694,6 +805,9 @@ def run_model(
         m_i = insitu_b == 0
         m_vv = insitu_b == 1
         m_vh = insitu_b == 2
+        # task weights from gradnorm
+        if gradnorm_enabled:
+            task_weights = model.task_weights
         if loss_fn is not None:
             loss_i = loss_fn(mu_i_b, logv_i_b, Y_b, mask=m_i)
             loss_vv = loss_fn(mu_vv_b, logv_vv_b, Y_b, mask=m_vv)
@@ -701,52 +815,80 @@ def run_model(
             n_i = int(m_i.sum().item())
             n_vv = int(m_vv.sum().item())
             n_vh = int(m_vh.sum().item())
+            loss_i = loss_i * n_i
+            loss_vv = loss_vv * n_vv
+            loss_vh = loss_vh * n_vh
             n_i_tot += n_i
             n_vv_tot += n_vv
             n_vh_tot += n_vh
             n_samples = n_i + n_vv + n_vh
             n_samples_tot += n_samples
-            denominator = n_i + lambda_vv * n_vv + lambda_vh * n_vh
-            total_loss = (
-                n_i * loss_i + 
-                lambda_vv * n_vv * loss_vv + 
-                lambda_vh * n_vh * loss_vh
-            ) / denominator
-            if n_i > 0:
-                running_loss_insitu += loss_i.item() * n_i
-            if n_vv > 0:
-                running_loss_vv += loss_vv.item() * n_vv
-            if n_vh > 0:
-                running_loss_vh += loss_vh.item() * n_vh
+            task_losses = [loss_i, loss_vv, loss_vh]
+            if train_model and use_gradnorm:
+                total_loss, L_grad = grad_norm.update(
+                    task_losses, task_weights, model
+                )
+            else:
+                total_loss = (
+                    task_weights[0] * loss_i +
+                    task_weights[1] * loss_vv +
+                    task_weights[2] * loss_vh
+                )
+            #denominator = n_i + lambda_vv * n_vv + lambda_vh * n_vh
+            #total_loss = (
+            #    n_i * loss_i + 
+            #    lambda_vv * n_vv * loss_vv + 
+            #    lambda_vh * n_vh * loss_vh
+            #) / denominator
+            #if n_i > 0:
+            #    running_loss_insitu += loss_i.item() * n_i
+            #if n_vv > 0:
+            #    running_loss_vv += loss_vv.item() * n_vv
+            #if n_vh > 0:
+            #    running_loss_vh += loss_vh.item() * n_vh
         if train_model:
             if global_step < warmup_steps:
                 this_t = global_step / warmup_steps
                 lr = warmup_start_lr * ((warmup_end_lr / warmup_start_lr) ** this_t)
                 for param_group in optimizer.param_groups:
                     param_group['lr'] = lr
-            optimizer.zero_grad(set_to_none=True)
-            total_loss.backward()
+            if use_gradnorm:
+                total_loss.backward(retain_graph=True)
+                L_grad.backward()
+            else:
+                total_loss.backward()
+                if task_weights.grad is not None:
+                    task_weights.grad.zero_()
             optimizer.step()
+            with torch.no_grad():
+                if gradnorm_enabled and use_gradnorm:
+                    task_weights.clamp_(min=1e-6)
+                    task_weights *= 3.0 / task_weights.sum()
             global_step += 1
         out_mu_i.append(mu_i_b.detach().cpu())
         out_logv_i.append(logv_i_b.detach().cpu())
         out_mu_vv.append(mu_vv_b.detach().cpu())
         out_logv_vv.append(logv_vv_b.detach().cpu())
+        out_mu_vh.append(mu_vh_b.detach().cpu())
+        out_logv_vh.append(logv_vh_b.detach().cpu())
         out_true_i.append(Y_b[m_i].detach().cpu())
         out_true_vv.append(Y_b[m_vv].detach().cpu())
-    # calculate running loss
+        out_true_vh.append(Y_b[m_vh].detach().cpu())
+        if loss_fn is not None:
+            running_loss += total_loss.item() * n_samples
+            running_loss_insitu += loss_i.item()
+            if n_vv > 0:
+                running_loss_vv += loss_vv.item()
+            if n_vh > 0:
+                running_loss_vh += loss_vh.item()
     if loss_fn is not None and n_samples_tot > 0.0:
-        running_loss = running_loss_insitu + running_loss_vv * lambda_vv + running_loss_vh * lambda_vh
-        running_loss /= (n_i_tot + lambda_vv * n_vv_tot + lambda_vh * n_vh_tot)
-        running_loss_insitu /= n_i_tot
+        if n_i_tot > 0:
+            running_loss /= n_samples_tot
+            running_loss_insitu /= n_i_tot
         if n_vv_tot > 0:
             running_loss_vv /= n_vv_tot
-        else:
-            running_loss_vv = 0.0
         if n_vh_tot > 0:
             running_loss_vh /= n_vh_tot
-        else:
-            running_loss_vh = 0.0
     else:
         running_loss = None
         running_loss_insitu = None
@@ -770,7 +912,7 @@ def run_model(
         true_vv = np.array([])
     if len(out_mu_vh) > 0:
         mu_vh = torch.cat(out_mu_vh).squeeze().numpy()
-        logv_vh = torch.cat(out_logv_h).squeeze().numpy()
+        logv_vh = torch.cat(out_logv_vh).squeeze().numpy()
         true_vh = torch.cat(out_true_vh).squeeze().numpy()
     else:
         mu_vh = np.array([])
@@ -810,6 +952,7 @@ def train_fold_k(
     warmup_start_lr,
     val_split,
     rs_factor,
+    grad_norm,
     plot_distributions=False
 ):
     this_fold_num = fold_test_locs[0]
@@ -824,19 +967,19 @@ def train_fold_k(
     short_data = data[0]
     long_data = data[1]
     static_data = data[2]
-    lfmc = data[3]
+    y = data[3]
     source = data[4]
     info = data[5]
     stratifier = data[6]
     (
-        test_short_data, test_long_data, test_static_data, test_lfmc, test_source, test_info, test_stratifier,
-        remaining_short_data, remaining_long_data, remaining_static_data, remaining_lfmc, remaining_source, remaining_info, remaining_stratifier
+        test_short_data, test_long_data, test_static_data, test_y, test_source, test_info, test_stratifier,
+        remaining_short_data, remaining_long_data, remaining_static_data, remaining_y, remaining_source, remaining_info, remaining_stratifier
     ) = mask_location_data_fast(
         this_locs,
         short_data,
         long_data,
         static_data,
-        lfmc,
+        y,
         source,
         info,
         stratifier
@@ -845,7 +988,6 @@ def train_fold_k(
     remaining_insitu_obs = remaining_info[remaining_info['source_legible'] == 'nfmd'].shape[0]
     remaining_vv_obs = remaining_info[remaining_info['source_legible'] == 'vv'].shape[0]
     remaining_vh_obs = remaining_info[remaining_info['source_legible'] == 'vh'].shape[0]
-    
     num_val_obs_insitu = remaining_insitu_obs * val_split
     num_val_obs_vv = remaining_vv_obs * val_split
     num_val_obs_vh = remaining_vh_obs * val_split
@@ -859,14 +1001,14 @@ def train_fold_k(
     val_locs = np.array(val_locs)
     # perform the same masking as was done for the test sites
     (
-        val_short_data, val_long_data, val_static_data, val_lfmc, val_source, val_info, val_stratifier,
-        train_short_data, train_long_data, train_static_data, train_lfmc, train_source, train_info, train_stratifier
+        val_short_data, val_long_data, val_static_data, val_y, val_source, val_info, val_stratifier,
+        train_short_data, train_long_data, train_static_data, train_y, train_source, train_info, train_stratifier
     ) = mask_location_data_fast(
         val_locs,
         remaining_short_data,
         remaining_long_data,
         remaining_static_data,
-        remaining_lfmc,
+        remaining_y,
         remaining_source,
         remaining_info,
         remaining_stratifier
@@ -921,8 +1063,12 @@ def train_fold_k(
     train_long_mean = np.nanmean(train_long_data, axis=(0,1))
     train_static_mean = np.nanmean(train_static_data, axis=(0,1))
     train_static_std = np.nanstd(train_static_data, axis=(0,1))
-    y_mean = np.nanmean(train_lfmc)
-    y_std = np.nanstd(train_lfmc)
+    lfmc_mean = np.nanmean(train_y[train_source == 0])
+    lfmc_std = np.nanstd(train_y[train_source == 0])
+    vv_mean = np.nanmean(train_y[train_source == 1])
+    vv_std = np.nanstd(train_y[train_source == 1])
+    vh_mean = np.nanmean(train_y[train_source == 2])
+    vh_std = np.nanstd(train_y[train_source == 2])
     for v,var in enumerate(var_names['short_vars']):
         if (
             '_sin' in var or
@@ -983,9 +1129,15 @@ def train_fold_k(
         train_static_data[:,:,v] = (train_static_data[:,:,v] - train_static_mean[v]) / train_static_std[v]
         val_static_data[:,:,v] = (val_static_data[:,:,v] - train_static_mean[v]) / train_static_std[v]
         test_static_data[:,:,v] = (test_static_data[:,:,v] - train_static_mean[v]) / train_static_std[v]
-    train_lfmc = (train_lfmc - y_mean) / y_std
-    val_lfmc = (val_lfmc - y_mean) / y_std
-    test_lfmc = (test_lfmc - y_mean) / y_std
+    train_y[train_source == 0] = (train_y[train_source == 0] - lfmc_mean) / lfmc_std
+    val_y[val_source == 0] = (val_y[val_source == 0] - lfmc_mean) / lfmc_std
+    test_y[test_source == 0] = (test_y[test_source == 0] - lfmc_mean) / lfmc_std
+    train_y[train_source == 1] = (train_y[train_source == 1] - vv_mean) / vv_std
+    val_y[val_source == 1] = (val_y[val_source == 1] - vv_mean) / vv_std
+    test_y[test_source == 1] = (test_y[test_source == 1] - vv_mean) / vv_std
+    train_y[train_source == 2] = (train_y[train_source == 2] - vh_mean) / vh_std
+    val_y[val_source == 2] = (val_y[val_source == 2] - vh_mean) / vh_std
+    test_y[test_source == 2] = (test_y[test_source == 2] - vh_mean) / vh_std
     # save the normalization parameters for later use
     norm_params = {
         'train_short_mean': train_short_mean.tolist(),
@@ -994,8 +1146,12 @@ def train_fold_k(
         'train_long_std': train_long_std.tolist(),
         'train_static_mean': train_static_mean.tolist(),
         'train_static_std': train_static_std.tolist(),
-        'y_mean': y_mean.tolist(),
-        'y_std': y_std.tolist()
+        'lfmc_mean': lfmc_mean.tolist(),
+        'lfmc_std': lfmc_std.tolist(),
+        'vv_mean': vv_mean.tolist(),
+        'vv_std': vv_std.tolist(),
+        'vh_mean': vh_mean.tolist(),
+        'vh_std': vh_std.tolist(),
     }
     # save the normalization parameters to disk
     with open(os.path.join(fold_save_dir, 'norm_params.json'), 'w') as f:
@@ -1011,17 +1167,26 @@ def train_fold_k(
         raise ValueError("NaN found in train_long_data")
     if torch.isnan(train_static_data).any():
         raise ValueError("NaN found in train_static_data")
-    if torch.isnan(train_lfmc).any():
-        raise ValueError("NaN found in train_lfmc")
+    if torch.isnan(train_y).any():
+        raise ValueError("NaN found in train_y")
     train_dataset = TensorDataset(
         train_short_data,
         train_long_data,
         train_static_data,
-        train_lfmc,
+        train_y,
         train_source
     )
+    # make a combined stratifier label that is unique per land cover type and source
+    train_stratifier_np = np.asarray(train_stratifier)
+    train_source_np = np.asarray(train_source)
+    train_joint_stratifier = np.stack([train_stratifier_np, train_source_np], axis=1)
+    _,train_joint_stratifier = np.unique(
+        train_joint_stratifier,
+        axis=0,
+        return_inverse=True
+    )
     batch_sampler = StratifiedBatchSampler(
-        labels=train_stratifier,
+        labels=train_joint_stratifier,
         batch_size=batch_size,
         shuffle=True,
     )
@@ -1034,7 +1199,7 @@ def train_fold_k(
         val_short_data,
         val_long_data,
         val_static_data,
-        val_lfmc,
+        val_y,
         val_source
     )
     val_loader = DataLoader(
@@ -1047,7 +1212,7 @@ def train_fold_k(
         test_short_data,
         test_long_data,
         test_static_data,
-        test_lfmc,
+        test_y,
         test_source
     )
     test_loader = DataLoader(
@@ -1102,7 +1267,9 @@ def train_fold_k(
             warmup_start_lr=warmup_start_lr,
             warmup_end_lr=warmup_end_lr,
             lambda_vv=rs_factor,
-            lambda_vh=rs_factor
+            lambda_vh=rs_factor,
+            grad_norm=grad_norm,
+            gradnorm_enabled=True
         )
         train_loss.append(this_train_loss)
         train_loss_insitu.append(this_train_loss_insitu)
@@ -1138,7 +1305,8 @@ def train_fold_k(
             criterion,
             train_model=False,
             lambda_vv=rs_factor,
-            lambda_vh=rs_factor
+            lambda_vh=rs_factor,
+            gradnorm_enabled=True
         )
         val_loss.append(this_val_loss)
         val_loss_insitu.append(this_val_loss_insitu)
@@ -1149,9 +1317,9 @@ def train_fold_k(
         print(f'Validation vv loss: {this_val_loss_vv:.4f}')
         print(f'Validation vh loss: {this_val_loss_vh:.4f}')
         # denorm
-        lfmc_i_val_only = mu_i_val[val_source.numpy() == 0 ] * y_std + y_mean
-        lfmc_std_i_val_only = np.sqrt(np.exp(logv_i_val[val_source.numpy() == 0])) * y_std
-        lfmc_i_val_true = true_i * y_std + y_mean
+        lfmc_val_only = mu_i_val[val_source == 0] * lfmc_std + lfmc_mean
+        lfmc_std_val_only = np.sqrt(np.exp(logv_i_val[val_source == 0])) * lfmc_std
+        lfmc_val_true = true_i * lfmc_std + lfmc_mean
         ## get mixture
         #mu_mix_val, logv_mix_val = fuse_gaussians(
         #    mu_i_val,
@@ -1160,10 +1328,10 @@ def train_fold_k(
         #    logv_rs_val,
         #)
         # calculate metrics of interet
-        val_mae = np.mean(np.abs(lfmc_i_val_only - lfmc_i_val_true))
-        val_r2 = r2_score(lfmc_i_val_true, lfmc_i_val_only)
-        val_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_i_val_only) + ((lfmc_i_val_true - lfmc_i_val_only) ** 2) / (lfmc_std_i_val_only ** 2)))
-        val_rmse = np.sqrt(np.mean((lfmc_i_val_only - lfmc_i_val_true) ** 2))
+        val_mae = np.mean(np.abs(lfmc_val_only - lfmc_val_true))
+        val_r2 = r2_score(lfmc_val_true, lfmc_val_only)
+        val_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_val_only) + ((lfmc_val_true - lfmc_val_only) ** 2) / (lfmc_std_val_only ** 2)))
+        val_rmse = np.sqrt(np.mean((lfmc_val_only - lfmc_val_true) ** 2))
         ## and for the mixed data
         #lfmc_mix_val = mu_mix_val[val_source.numpy() == 1 ] * y_std + y_mean
         #lfmc_std_mix_val = np.sqrt(np.exp(logv_mix_val[val_source.numpy() == 1])) * y_std
@@ -1173,13 +1341,13 @@ def train_fold_k(
         #val_rmse_mix = np.sqrt(np.mean((lfmc_mix_val - lfmc_i_val_true) ** 2))
         # and for vv data
         if len(true_vv) > 0:
-            lfmc_vv_val_only = mu_vv_val[val_source.numpy() == 1] * y_std + y_mean
-            lfmc_std_vv_val_only = np.sqrt(np.exp(logv_vv_val[val_source.numpy() == 1])) * y_std
-            lfmc_vv_val_true = true_vv * y_std + y_mean
-            val_mae_vv = np.mean(np.abs(lfmc_vv_val_only - lfmc_vv_val_true))
-            val_r2_vv = r2_score(lfmc_vv_val_true, lfmc_vv_val_only)
-            val_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_vv_val_only) + ((lfmc_vv_val_true - lfmc_vv_val_only) ** 2) / (lfmc_std_vv_val_only ** 2)))
-            val_rmse_rs = np.sqrt(np.mean((lfmc_rs_val_only - lfmc_rs_val_true) ** 2))
+            vv_val_only = mu_vv_val[val_source == 1] * vv_std + vv_mean
+            vv_std_val_only = np.sqrt(np.exp(logv_vv_val[val_source == 1])) * vv_std
+            vv_val_true = true_vv * vv_std + vv_mean
+            val_mae_vv = np.mean(np.abs(vv_val_only - vv_val_true))
+            val_r2_vv = r2_score(vv_val_true, vv_val_only)
+            val_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vv_std_val_only) + ((vv_val_true - vv_val_only) ** 2) / (vv_std_val_only ** 2)))
+            val_rmse_vv = np.sqrt(np.mean((vv_val_only - vv_val_true) ** 2))
             ## also calculate the mixtures
             #lfmc_rs_mix_val = mu_mix_val[val_source.numpy() == 0] * y_std + y_mean
             #lfmc_std_rs_mix_val = np.sqrt(np.exp(logv_mix_val[val_source.numpy() == 0])) * y_std
@@ -1188,17 +1356,18 @@ def train_fold_k(
             #val_nll_rs_mix = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_rs_mix_val) + ((lfmc_rs_val_true - lfmc_rs_mix_val) ** 2) / (lfmc_std_rs_mix_val ** 2)))
             #val_rmse_rs_mix = np.sqrt(np.mean((lfmc_rs_mix_val - lfmc_rs_val_true) ** 2))
         if len(true_vh) > 0:
-            lfmc_vh_val_only = mu_vh_val[val_source.numpy() == 2] * y_std + y_mean
-            lfmc_std_vh_val_only = np.sqrt(np.exp(logv_vh_val[val_source.numpy() == 2])) * y_std
-            lfmc_vh_val_true = true_vh * y_std + y_mean
-            val_mae_vh = np.mean(np.abs(lfmc_vh_val_only - lfmc_vh_val_true))
-            val_r2_vh = r2_score(lfmc_vh_val_true, lfmc_vh_val_only)
-            val_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_vh_val_only) + ((lfmc_vh_val_true - lfmc_vh_val_only) ** 2) / (lfmc_std_vh_val_only ** 2)))
-            val_rmse_vh = np.sqrt(np.mean((lfmc_vh_val_only - lfmc_vh_val_true) ** 2))
+            vh_val_only = mu_vh_val[val_source == 2] * vh_std + vh_mean
+            vh_std_val_only = np.sqrt(np.exp(logv_vh_val[val_source == 2])) * vh_std
+            vh_val_true = true_vh * vh_std + vh_mean
+            val_mae_vh = np.mean(np.abs(vh_val_only - vh_val_true))
+            val_r2_vh = r2_score(vh_val_true, vh_val_only)
+            val_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vh_std_val_only) + ((vh_val_true - vh_val_only) ** 2) / (vh_std_val_only ** 2)))
+            val_rmse_vh = np.sqrt(np.mean((vh_val_only - vh_val_true) ** 2))
         # average values for sanity check
         #avg_val_pred = np.mean(lfmc_i_val)
         #avg_val_true = np.mean(lfmc_i_val_true)
         #avg_val_std = np.mean(lfmc_std_i_val)
+        print(f'task weights: {model.task_weights.detach().cpu().numpy()}')
         print(
             f'Validation MAE: {val_mae:.4f}, RMSE: {val_rmse:.4f}, R2: {val_r2:.4f}, NLL: {val_nll:.4f}'
         )
@@ -1274,45 +1443,68 @@ def train_fold_k(
         criterion,
         train_model=False,
         lambda_vv=rs_factor,
-        lambda_vh=rs_factor
+        lambda_vh=rs_factor,
+        gradnorm_enabled=True
     )
-    lfmc_i_val_only = mu_i_val[val_source.numpy() == 0] * y_std + y_mean
-    lfmc_std_i_val_only = np.sqrt(np.exp(logv_i_val[val_source.numpy() == 0])) * y_std
-    lfmc_i_val_true = true_i * y_std + y_mean
+    # denorm
+    lfmc_val_only = mu_i_val[val_source == 0] * lfmc_std + lfmc_mean
+    lfmc_std_val_only = np.sqrt(np.exp(logv_i_val[val_source == 0])) * lfmc_std
+    lfmc_val_true = true_i * lfmc_std + lfmc_mean
+    ## get mixture
+    #mu_mix_val, logv_mix_val = fuse_gaussians(
+    #    mu_i_val,
+    #    logv_i_val,
+    #    mu_rs_val,
+    #    logv_rs_val,
+    #)
     # calculate metrics of interet
-    val_mae = np.mean(np.abs(lfmc_i_val_only - lfmc_i_val_true))
-    val_r2 = r2_score(lfmc_i_val_true, lfmc_i_val_only)
-    val_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_i_val_only) + ((lfmc_i_val_true - lfmc_i_val_only) ** 2) / (lfmc_std_i_val_only ** 2)))
-    val_rmse = np.sqrt(np.mean((lfmc_i_val_only - lfmc_i_val_true) ** 2))
+    val_mae = np.mean(np.abs(lfmc_val_only - lfmc_val_true))
+    val_r2 = r2_score(lfmc_val_true, lfmc_val_only)
+    val_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_val_only) + ((lfmc_val_true - lfmc_val_only) ** 2) / (lfmc_std_val_only ** 2)))
+    val_rmse = np.sqrt(np.mean((lfmc_val_only - lfmc_val_true) ** 2))
+    ## and for the mixed data
+    #lfmc_mix_val = mu_mix_val[val_source.numpy() == 1 ] * y_std + y_mean
+    #lfmc_std_mix_val = np.sqrt(np.exp(logv_mix_val[val_source.numpy() == 1])) * y_std
+    #val_mae_mix = np.mean(np.abs(lfmc_mix_val - lfmc_i_val_true))
+    #val_r2_mix = r2_score(lfmc_i_val_true, lfmc_mix_val)
+    #val_nll_mix = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_mix_val) + ((lfmc_i_val_true - lfmc_mix_val) ** 2) / (lfmc_std_mix_val ** 2)))
+    #val_rmse_mix = np.sqrt(np.mean((lfmc_mix_val - lfmc_i_val_true) ** 2))
     # and for vv data
     if len(true_vv) > 0:
-        lfmc_vv_val_only = mu_vv_val[val_source.numpy() == 1] * y_std + y_mean
-        lfmc_std_vv_val_only = np.sqrt(np.exp(logv_vv_val[val_source.numpy() == 1])) * y_std
-        lfmc_vv_val_true = true_vv * y_std + y_mean
-        val_mae_vv = np.mean(np.abs(lfmc_vv_val_only - lfmc_vv_val_true))
-        val_r2_vv = r2_score(lfmc_vv_val_true, lfmc_vv_val_only)
-        val_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_vv_val_only) + ((lfmc_vv_val_true - lfmc_vv_val_only) ** 2) / (lfmc_std_vv_val_only ** 2)))
-        val_rmse_vv = np.sqrt(np.mean((lfmc_vv_val_only - lfmc_vv_val_true) ** 2))
+        vv_val_only = mu_vv_val[val_source == 1] * vv_std + vv_mean
+        vv_std_val_only = np.sqrt(np.exp(logv_vv_val[val_source == 1])) * vv_std
+        vv_val_true = true_vv * vv_std + vv_mean
+        val_mae_vv = np.mean(np.abs(vv_val_only - vv_val_true))
+        val_r2_vv = r2_score(vv_val_true, vv_val_only)
+        val_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vv_std_val_only) + ((vv_val_true - vv_val_only) ** 2) / (vv_std_val_only ** 2)))
+        val_rmse_vv = np.sqrt(np.mean((vv_val_only - vv_val_true) ** 2))
+        ## also calculate the mixtures
+        #lfmc_rs_mix_val = mu_mix_val[val_source.numpy() == 0] * y_std + y_mean
+        #lfmc_std_rs_mix_val = np.sqrt(np.exp(logv_mix_val[val_source.numpy() == 0])) * y_std
+        #val_mae_rs_mix = np.mean(np.abs(lfmc_rs_mix_val - lfmc_rs_val_true))
+        #val_r2_rs_mix = r2_score(lfmc_rs_val_true, lfmc_rs_mix_val)
+        #val_nll_rs_mix = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_rs_mix_val) + ((lfmc_rs_val_true - lfmc_rs_mix_val) ** 2) / (lfmc_std_rs_mix_val ** 2)))
+        #val_rmse_rs_mix = np.sqrt(np.mean((lfmc_rs_mix_val - lfmc_rs_val_true) ** 2))
     else:
-        lfmc_vv_val_only = np.nan
-        lfmc_std_vv_val_only = np.nan
-        lfmc_vv_val_true = np.nan
+        vv_val_only = np.array([])
+        vv_std_val_only = np.array([])
+        vv_val_true = np.array([])
         val_mae_vv = np.nan
         val_r2_vv = np.nan
         val_nll_vv = np.nan
         val_rmse_vv = np.nan
     if len(true_vh) > 0:
-        lfmc_vh_val_only = mu_vh_val[val_source.numpy() == 2] * y_std + y_mean
-        lfmc_std_vh_val_only = np.sqrt(np.exp(logv_vh_val[val_source.numpy() == 2])) * y_std
-        lfmc_vh_val_true = true_vh * y_std + y_mean
-        val_mae_vh = np.mean(np.abs(lfmc_vh_val_only - lfmc_vh_val_true))
-        val_r2_vh = r2_score(lfmc_vh_val_true, lfmc_vh_val_only)
-        val_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_vh_val_only) + ((lfmc_vh_val_true - lfmc_vh_val_only) ** 2) / (lfmc_std_vh_val_only ** 2)))
-        val_rmse_vh = np.sqrt(np.mean((lfmc_vh_val_only - lfmc_vh_val_true) ** 2))
+        vh_val_only = mu_vh_val[val_source == 2] * vh_std + vh_mean
+        vh_std_val_only = np.sqrt(np.exp(logv_vh_val[val_source == 2])) * vh_std
+        vh_val_true = true_vh * vh_std + vh_mean
+        val_mae_vh = np.mean(np.abs(vh_val_only - vh_val_true))
+        val_r2_vh = r2_score(vh_val_true, vh_val_only)
+        val_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vh_std_val_only) + ((vh_val_true - vh_val_only) ** 2) / (vh_std_val_only ** 2)))
+        val_rmse_vh = np.sqrt(np.mean((vh_val_only - vh_val_true) ** 2))
     else:
-        lfmc_vh_val_only = np.nan
-        lfmc_std_vh_val_only = np.nan
-        lfmc_vh_val_true = np.nan
+        vh_val_only = np.array([])
+        vh_std_val_only = np.array([])
+        vh_val_true = np.array([])
         val_mae_vh = np.nan
         val_r2_vh = np.nan
         val_nll_vh = np.nan
@@ -1324,14 +1516,23 @@ def train_fold_k(
     print(
         f'Validation MAE: {val_mae:.4f}, RMSE: {val_rmse:.4f}, R2: {val_r2:.4f}, NLL: {val_nll:.4f}'
     )
+    #print(
+    #    f'Validation Mixture MAE: {val_mae_mix:.4f}, RMSE: {val_rmse_mix:.4f}, R2: {val_r2_mix:.4f}, NLL: {val_nll_mix:.4f}'
+    #)
     if len(true_vv) > 0:
         print(
             f'Validation VV MAE: {val_mae_vv:.4f}, RMSE: {val_rmse_vv:.4f}, R2: {val_r2_vv:.4f}, NLL: {val_nll_vv:.4f}'
         )
+        #print(
+        #    f'Validation VV Mixture MAE: {val_mae_vv_mix:.4f}, RMSE: {val_rmse_vv_mix:.4f}, R2: {val_r2_vv_mix:.4f}, NLL: {val_nll_vv_mix:.4f}'
+        #)
     if len(true_vh) > 0:
         print(
             f'Validation VH MAE: {val_mae_vh:.4f}, RMSE: {val_rmse_vh:.4f}, R2: {val_r2_vh:.4f}, NLL: {val_nll_vh:.4f}'
         )
+        #print(
+        #    f'Validation VH Mixture MAE: {val_mae_vh_mix:.4f}, RMSE: {val_rmse_vh_mix:.4f}, R2: {val_r2_vh_mix:.4f}, NLL: {val_nll_vh_mix:.4f}'
+        #)
     # run the test
     (
         model,
@@ -1356,64 +1557,78 @@ def train_fold_k(
         criterion,
         train_model=False,
         lambda_vv=rs_factor,
-        lambda_vh=rs_factor
+        lambda_vh=rs_factor,
+        gradnorm_enabled=True
     )
     # denorm
     if len(mu_i_test) == 0:
         test_loss = np.nan
         test_loss_insitu = np.nan
-        test_loss_rs = np.nan
-        lfmc_i_test_only = np.nan
-        lfmc_std_i_test_only = np.nan
-        lfmc_vv_test_only = np.nan
-        lfmc_std_vv_test_only = np.nan
-        lfmc_vh_test_only = np.nan
-        lfmc_std_vh_test_only = np.nan
-        lfmc_i_test_true = np.nan
-        lfmc_vv_test_true = np.nan
-        lfmc_vh_test_true = np.nan
+        test_loss_vv = np.nan
+        test_loss_vh = np.nan
+        lfmc_test_only = np.nan
+        lfmc_std_test_only = np.nan
+        vv_test_only = np.nan
+        vv_std_test_only = np.nan
+        vh_test_only = np.nan
+        vh_std_test_only = np.nan
+        lfmc_test_true = np.nan
+        vv_test_true = np.nan
+        vh_test_true = np.nan
         test_mae = np.nan
         test_r2 = np.nan
         test_nll = np.nan
         test_rmse = np.nan
     else:
-        lfmc_i_test_only = mu_i_test[test_source.numpy() == 0] * y_std + y_mean
-        lfmc_std_i_test_only = np.sqrt(np.exp(logv_i_test[test_source.numpy() == 0])) * y_std
-        lfmc_i_test_true = true_i_test * y_std + y_mean
-        # calculate metrics of interet
-        test_mae = np.mean(np.abs(lfmc_i_test_only - lfmc_i_test_true))
-        test_r2 = r2_score(lfmc_i_test_true, lfmc_i_test_only)
-        test_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_i_test_only) + ((lfmc_i_test_true - lfmc_i_test_only) ** 2) / (lfmc_std_i_test_only ** 2)))
-        test_rmse = np.sqrt(np.mean((lfmc_i_test_only - lfmc_i_test_true) ** 2))
+        if len(true_i_test) > 0:
+            lfmc_test_only = mu_i_test[test_source.numpy() == 0] * lfmc_std + lfmc_mean
+            lfmc_std_test_only = np.sqrt(np.exp(logv_i_test[test_source.numpy() == 0])) * lfmc_std
+            lfmc_test_true = true_i_test * lfmc_std + lfmc_mean
+            # calculate metrics of interet
+            print(mu_i_test)
+            print(lfmc_test_only)
+            print(lfmc_test_true)
+            test_mae = np.mean(np.abs(lfmc_test_only - lfmc_test_true))
+            test_r2 = r2_score(lfmc_test_true, lfmc_test_only)
+            test_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_test_only) + ((lfmc_test_true - lfmc_test_only) ** 2) / (lfmc_std_test_only ** 2)))
+            test_rmse = np.sqrt(np.mean((lfmc_test_only - lfmc_test_true) ** 2))
+        else:
+            lfmc_test_only = np.nan
+            lfmc_std_test_only = np.nan
+            lfmc_test_true = np.nan
+            test_mae = np.nan
+            test_r2 = np.nan
+            test_nll = np.nan
+            test_rmse = np.nan
         # and for vv data
         if len(true_vv) > 0:
-            lfmc_vv_test_only = mu_vv_test[test_source.numpy() == 1] * y_std + y_mean
-            lfmc_std_vv_test_only = np.sqrt(np.exp(logv_vv_test[test_source.numpy() == 1])) * y_std
-            lfmc_vv_test_true = true_vv_test * y_std + y_mean
-            test_mae_vv = np.mean(np.abs(lfmc_vv_test_only - lfmc_vv_test_true))
-            test_r2_vv = r2_score(lfmc_vv_test_true, lfmc_vv_test_only)
-            test_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_vv_test_only) + ((lfmc_vv_test_true - lfmc_vv_test_only) ** 2) / (lfmc_std_vv_test_only ** 2)))
-            test_rmse_vv = np.sqrt(np.mean((lfmc_vv_test_only - lfmc_vv_test_true) ** 2))
+            vv_test_only = mu_vv_test[test_source.numpy() == 1] * vv_std + vv_mean
+            vv_std_test_only = np.sqrt(np.exp(logv_vv_test[test_source.numpy() == 1])) * vv_std
+            vv_test_true = true_vv_test * vv_std + vv_mean
+            test_mae_vv = np.mean(np.abs(vv_test_only - vv_test_true))
+            test_r2_vv = r2_score(vv_test_true, vv_test_only)
+            test_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vv_std_test_only) + ((vv_test_true - vv_test_only) ** 2) / (vv_std_test_only ** 2)))
+            test_rmse_vv = np.sqrt(np.mean((vv_test_only - vv_test_true) ** 2))
         else:
-            lfmc_vv_test_only = np.nan
-            lfmc_std_vv_test_only = np.nan
-            lfmc_vv_test_true = np.nan
+            vv_test_only = np.nan
+            vv_std_test_only = np.nan
+            vv_test_true = np.nan
             test_mae_vv = np.nan
             test_r2_vv = np.nan
             test_nll_vv = np.nan
             test_rmse_vv = np.nan
         if len(true_vh) > 0:
-            lfmc_vh_test_only = mu_vh_test[test_source.numpy() == 2] * y_std + y_mean
-            lfmc_std_vh_test_only = np.sqrt(np.exp(logv_vh_test[test_source.numpy() == 2])) * y_std
-            lfmc_vh_test_true = true_vh_test * y_std + y_mean
-            test_mae_vh = np.mean(np.abs(lfmc_vh_test_only - lfmc_vh_test_true))
-            test_r2_vh = r2_score(lfmc_vh_test_true, lfmc_vh_test_only)
-            test_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_vh_test_only) + ((lfmc_vh_test_true - lfmc_vh_test_only) ** 2) / (lfmc_std_vh_test_only ** 2)))
-            test_rmse_vh = np.sqrt(np.mean((lfmc_vh_test_only - lfmc_vh_test_true) ** 2))
+            vh_test_only = mu_vh_test[test_source.numpy() == 2] * vh_std + vh_mean
+            vh_std_test_only = np.sqrt(np.exp(logv_vh_test[test_source.numpy() == 2])) * vh_std
+            vh_test_true = true_vh_test * vh_std + vh_mean
+            test_mae_vh = np.mean(np.abs(vh_test_only - vh_test_true))
+            test_r2_vh = r2_score(vh_test_true, vh_test_only)
+            test_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vh_std_test_only) + ((vh_test_true - vh_test_only) ** 2) / (vh_std_test_only ** 2)))
+            test_rmse_vh = np.sqrt(np.mean((vh_test_only - vh_test_true) ** 2))
         else:
-            lfmc_vh_test_only = np.nan
-            lfmc_std_vh_test_only = np.nan
-            lfmc_vh_test_true = np.nan
+            vh_test_only = np.nan
+            vh_std_test_only = np.nan
+            vh_test_true = np.nan
             test_mae_vh = np.nan
             test_r2_vh = np.nan
             test_nll_vh = np.nan
@@ -1446,15 +1661,15 @@ def train_fold_k(
             'loss_insitu':val_loss_insitu,
             'loss_vv':val_loss_vv,
             'loss_vh':val_loss_vh,
-            'lfmc_insitu_preds':lfmc_i_val_only,
-            'lfmc_insitu_std':lfmc_std_i_val_only,
-            'lfmc_vv_preds':lfmc_vv_val_only,
-            'lfmc_vv_std':lfmc_std_vv_val_only,
-            'lfmc_vh_preds':lfmc_vh_val_only,
-            'lfmc_vh_std':lfmc_std_vh_val_only,
-            'lfmc_insitu_true':lfmc_i_val_true,
-            'lfmc_vv_true':lfmc_vv_val_true,
-            'lfmc_vh_true':lfmc_vh_val_true
+            'lfmc_preds':lfmc_val_only,
+            'lfmc_std':lfmc_std_val_only,
+            'vv_preds':vv_val_only,
+            'vv_std':vv_std_val_only,
+            'vh_preds':vh_val_only,
+            'vh_std':vh_std_val_only,
+            'lfmc_true':lfmc_val_true,
+            'vv_true':vv_val_true,
+            'vh_true':vh_val_true
         },
         os.path.join(fold_save_dir,'val_outputs.pth')
     )
@@ -1464,15 +1679,15 @@ def train_fold_k(
             'loss_insitu':test_loss_insitu,
             'loss_vv':test_loss_vv,
             'loss_vh':test_loss_vh,
-            'lfmc_insitu_preds':lfmc_i_test_only,
-            'lfmc_insitu_std':lfmc_std_i_test_only,
-            'lfmc_vv_preds':lfmc_vv_test_only,
-            'lfmc_vv_std':lfmc_std_vv_test_only,
-            'lfmc_vh_preds':lfmc_vh_test_only,
-            'lfmc_vh_std':lfmc_std_vh_test_only,
-            'lfmc_insitu_true':lfmc_i_test_true,
-            'lfmc_vv_true':lfmc_vv_test_true,
-            'lfmc_vh_true':lfmc_vh_test_true
+            'lfmc_preds':lfmc_test_only,
+            'lfmc_std':lfmc_std_test_only,
+            'vv_preds':vv_test_only,
+            'vv_std':vv_std_test_only,
+            'vh_preds':vh_test_only,
+            'vh_std':vh_std_test_only,
+            'lfmc_true':lfmc_test_true,
+            'vv_true':vv_test_true,
+            'vh_true':vh_test_true
         },
         os.path.join(fold_save_dir,'test_outputs.pth')
     )
@@ -1501,17 +1716,18 @@ def main():
     save_dir = args.save_dir
     # training settings
     batch_size = args.batch_size
-    max_epochs = 3
+    max_epochs = 100
     lr = args.lr
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type != 'cuda':
         print('WARNING: CUDA not available, using CPU. This will be slow!')
-    warmup_steps = 400
+    warmup_steps = 1200
     base_lr = lr
     warmup_start_lr = 1e-6
     val_split = args.val_split
     adam_weight_decay = args.adam_wd
     patience = 8
+    gradnorm_alpha = 1.0
     # model hyperparameters (go back to the github and get what I deleted here)
     d_model = args.d_model
     nhead = args.nhead
@@ -1551,11 +1767,16 @@ def main():
     static_data = datasets[2]
     info = datasets[5]
     stratifier = datasets[6]
-    num_rs_obs = info[info['source'] == 'rs'].shape[0]
+    num_insitu_obs = info[info['source_legible'] == 'nfmd'].shape[0]
+    num_vv_obs = info[info['source_legible'] == 'vv'].shape[0]
+    num_vh_obs = info[info['source_legible'] == 'vh'].shape[0]
+    print(f'Number of insitu observations: {num_insitu_obs}')
+    print(f'Number of VV observations: {num_vv_obs}')
+    print(f'Number of VH observations: {num_vh_obs}')
     this_model_name = (
         f'transformer_dm{d_model}_nh{nhead}_nl{num_layers}_df{dim_feedforward}'
         f'_do{dropout}_bs{batch_size}_lr{lr}_warmup{warmup_steps}'
-        f'_wd{adam_weight_decay}_rsf{rs_factor}_rsobs{num_rs_obs}'
+        f'_wd{adam_weight_decay}_iobs{num_insitu_obs}_vvobs{num_vv_obs}_vhobs{num_vh_obs}'
         f'_dmlong{long_d_model}_nhlong{long_nhead}_nllong{long_num_layers}'
         f'_dflong{long_dim_feedforward}_outlong{long_out_dim}'
         f'_basic'
@@ -1566,18 +1787,9 @@ def main():
         shutil.rmtree(full_save_dir)
     os.makedirs(full_save_dir)
     n_folds = 10
-    total_obs_insitu_obs = (
-        info[info['source_legible'] == 'nfmd'].shape[0]
-    )
-    total_obs_vv_obs = (
-        info[info['source_legible'] == 'vh'].shape[0]
-    )
-    total_obs_vh_obs = (
-        info[info['source_legible'] == 'vh'].shape[0]
-    )
-    desired_insitu_obs_per_fold = total_obs_insitu_obs / n_folds
-    desired_vv_obs_per_fold = total_obs_vv_obs / n_folds
-    desired_vh_obs_per_fold = total_obs_vh_obs / n_folds
+    desired_insitu_obs_per_fold = num_insitu_obs / n_folds
+    desired_vv_obs_per_fold = num_vv_obs / n_folds
+    desired_vh_obs_per_fold = num_vh_obs / n_folds
     fold_locs = {}
     used_sites = []
     for fold in range(n_folds):
@@ -1606,7 +1818,8 @@ def main():
     # train this fold
     for fold, locs in enumerate(fold_locs.items()):
         print(f'Training fold {fold+1}/{n_folds} with {len(locs[1])} locations held out for testing')
-        continue
+        if fold != 9:
+            continue
         # build the model
         model = LFMCTransformerMultiTaskLongClimate(
             short_input_dim=short_input_dim,
@@ -1652,6 +1865,12 @@ def main():
         )
         # build early stopping
         early_stopping = EarlyStopping(patience=patience)
+        # initialize GradNorm
+        grad_norm = GradNorm(
+            num_tasks=3,
+            alpha=gradnorm_alpha,
+            device=device
+        )
         # train on this fold
         train_fold_k(
             model,
@@ -1669,6 +1888,7 @@ def main():
             warmup_start_lr,
             val_split,
             rs_factor,
+            grad_norm,
         )
     # one final version of the model trained on all the data
     print('Training final model on all data')
@@ -1716,6 +1936,11 @@ def main():
     )
     # build early stopping
     early_stopping = EarlyStopping(patience=patience)
+    grad_norm = GradNorm(
+        num_tasks=3,
+        alpha=gradnorm_alpha,
+        device=device
+    )
     # train on this fold
     locs = (9998, [(-9998.0,-9998.0)])  # dummy value to indicate training on all data
     train_fold_k(
@@ -1733,7 +1958,8 @@ def main():
         warmup_steps,
         warmup_start_lr,
         val_split,
-        rs_factor
+        rs_factor,
+        grad_norm,
     )
 
             
