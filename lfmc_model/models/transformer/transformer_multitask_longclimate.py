@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-
-# ---------------- core blocks you already had ----------------
+import sys
 
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=10000):
@@ -110,11 +109,11 @@ class LongEncoder(nn.Module):
         )
         self.pos_enc = SinusoidalPositionalEncoding(d_model)
 
-        if pool == "multihead":
-            self.pool = MultiheadAttnPool(d_model, nhead,
-                                          num_queries, dropout)  # -> [B, d_model]
-        else:
-            self.pool = LinearAttnPool(d_model)                  # -> [B, d_model]
+        #if pool == "multihead":
+        #    self.pool = MultiheadAttnPool(d_model, nhead,
+        #                                  num_queries, dropout)  # -> [B, d_model]
+        #else:
+        self.pool = LinearAttnPool(d_model)                  # -> [B, d_model]
 
         # Optional shrink to out_dim
         self.out_proj = (
@@ -125,7 +124,7 @@ class LongEncoder(nn.Module):
 
     def forward(self, long_hist):       # [B, Tl, Din_long]
         x = self.long_proj(long_hist)   # [B, Tl, d]
-        x = self.pos_enc(x)             # [B, Tl, d]
+        #x = self.pos_enc(x)             # [B, Tl, d]
         x = self.encoder(x)             # [B, Tl, d]
         z_long = self.pool(x)           # [B, d]
         z_long = self.out_proj(z_long)  # [B, out_dim]
@@ -158,7 +157,8 @@ class LFMCTransformer(nn.Module):
                  long_d_model: int = None,
                  long_nhead: int = None,
                  long_dim_feedforward: int = None,
-                 long_out_dim: int = None
+                 long_out_dim: int = None,
+                 num_task_weights: int = 3
         ):
         super().__init__()
 
@@ -179,7 +179,7 @@ class LFMCTransformer(nn.Module):
         # for gradnorm
         self.task_weights = nn.Parameter(
             torch.ones(
-                3,
+                num_task_weights,
                 dtype=torch.float32
             )
         )
@@ -218,10 +218,12 @@ class LFMCTransformer(nn.Module):
             in_dim=self.static_aug_dim, d_model=d_model, hidden=64
         )
 
-        self.pooler = MultiheadAttnPool(
-            d_model=d_model, nhead=nhead,
-            num_queries=num_queries, dropout=dropout
-        )
+        self.pooler = LinearAttnPool(d_model)
+
+        #self.pooler = MultiheadAttnPool(
+        #    d_model=d_model, nhead=nhead,
+        #    num_queries=num_queries, dropout=dropout
+        #)
 
         self.head_insitu = GaussianHead(d_model, dropout)
         self.head_vv     = GaussianHead(d_model, dropout)
@@ -243,19 +245,26 @@ class LFMCTransformer(nn.Module):
 
         # 3) FiLM-condition short seq with augmented static
         x_tok = self.short_proj(short_history)     # [B, Ts, d]
-        gamma, beta = self.film_cond(s_aug)        # [B, d], [B, d]
-        gamma = 0.5 * torch.tanh(gamma)
-        x_tok = (1 + gamma).unsqueeze(1) * x_tok + beta.unsqueeze(1)
+        #gamma, beta = self.film_cond(s_aug)        # [B, d], [B, d]
+        #gamma = 0.5 * torch.tanh(gamma)
+        #x_tok = (1 + gamma).unsqueeze(1) * x_tok + beta.unsqueeze(1)
 
         # 4) pack [static_token | short_seq] and encode
         x_seq = torch.cat([s_tok, x_tok], dim=1)   # [B, Ts+1, d]
-        x_seq = self.pos_enc(x_seq)
+        #x_seq = self.pos_enc(x_seq)
         x_enc = self.encoder(x_seq)                # [B, Ts+1, d]
 
         # 5) pool short tokens + fuse with static token
-        h_met  = self.pooler(x_enc[:, 1:, :])      # [B, d]
-        h_stat = x_enc[:, 0, :]                    # [B, d]
-        h = h_met + h_stat                         # [B, d]
+        #h_met  = self.pooler(x_enc[:, 1:, :])      # [B, d]
+        #h_stat = x_enc[:, 0, :]                    # [B, d]
+        #h_allpooled = self.pooler(x_enc)
+        #h_add = h_met + h_stat          # [B, d]
+        #h_cat = torch.cat([h_met, h_stat], dim=-1)  # [B, 2d]
+        #print(x_seq.shape, x_enc.shape)
+        #print(h_met.shape, h_stat.shape, h_add.shape, h_cat.shape, h_allpooled.shape)
+        #sys.exit()
+        h = self.pooler(x_enc)                     # [B, d]
+
 
         # 6) heads
         mu_i, logv_i = self.head_insitu(h)

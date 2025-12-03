@@ -27,12 +27,17 @@ warnings.filterwarnings(
 
 def main():
     # perform analysis across all models in a dir, since these are now batched out
-    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarmultitask'
+    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/old_models/sarmultitask'
     load_only = False
     model_dirs = [
         os.path.join(base_dir, d)
         for d in os.listdir(base_dir)
         if os.path.isdir(os.path.join(base_dir, d))
+    ]
+    relevant_cols = [
+        'd_model', 'nhead', 'num_layers', 'dim_feedforward', 'dropout',
+        'long_d_model', 'long_nhead', 'long_num_layers', 'long_dim_feedforward', 'long_out',
+        'test_insitu_r2', 'test_insitu_rmse', 'test_vv_r2', 'test_vh_r2'
     ]
     if load_only:
         csv = pd.read_csv(
@@ -40,11 +45,6 @@ def main():
                 base_dir, 'model_summary_results.csv'
             )
         )
-        relevant_cols = [
-            'd_model', 'nhead', 'num_layers', 'dim_feedforward', 'dropout',
-            'long_d_model', 'long_nhead', 'long_num_layers', 'long_dim_feedforward', 'long_out',
-            'test_insitu_r2', 'test_insitu_rmse'
-        ]
         csv_sub = csv[relevant_cols]
         csv_sub = csv_sub.sort_values(by='test_insitu_rmse', ascending=True)
         console = Console()
@@ -74,6 +74,8 @@ def main():
     model_rmses_anom = []
     model_r2s_mean = []
     model_rmses_mean = []
+    model_r2s_vv = []
+    model_r2s_vh = []
     for m,model_dir in enumerate(model_dirs):
         model_name = model_dir.split('/')[-1]
         d_models.append(int(model_name.split('transformer_dm')[1].split('_')[0]))
@@ -169,7 +171,10 @@ def main():
                 test_insitu_r2 = np.nan
             else:
                 test_insitu_r2 = r2_score(test_true_insitu, test_preds_insitu)
-            test_insitu_n = len(test_true_insitu)
+            try:
+                test_insitu_n = len(test_true_insitu)
+            except:
+                test_insitu_n = 0
             test_vv_mae = np.mean(np.abs(test_preds_vv - test_true_vv))
             test_vv_rmse = np.sqrt(np.mean((test_preds_vv - test_true_vv)**2))
             test_vh_mae = np.mean(np.abs(test_preds_vh - test_true_vh))
@@ -228,16 +233,18 @@ def main():
             #    n=test_rs_n
             #)
             # add data to overall
-            all_val_preds_insitu = np.concatenate((all_val_preds_insitu, val_preds_insitu))
-            all_val_true_insitu = np.concatenate((all_val_true_insitu, val_true_insitu))
+            if val_insitu_n > 0:
+                all_val_preds_insitu = np.concatenate((all_val_preds_insitu, val_preds_insitu))
+                all_val_true_insitu = np.concatenate((all_val_true_insitu, val_true_insitu))
             if val_vv_n > 0:
                 all_val_preds_vv = np.concatenate((all_val_preds_vv, val_preds_vv))
                 all_val_true_vv = np.concatenate((all_val_true_vv, val_true_vv))
             if val_vh_n > 0:
                 all_val_preds_vh = np.concatenate((all_val_preds_vh, val_preds_vh))
                 all_val_true_vh = np.concatenate((all_val_true_vh, val_true_vh))
-            all_test_preds_insitu = np.concatenate((all_test_preds_insitu, test_preds_insitu))
-            all_test_true_insitu = np.concatenate((all_test_true_insitu, test_true_insitu))
+            if test_insitu_n > 0:
+                all_test_preds_insitu = np.concatenate((all_test_preds_insitu, test_preds_insitu))
+                all_test_true_insitu = np.concatenate((all_test_true_insitu, test_true_insitu))
             if test_vv_n > 0:
                 all_test_preds_vv = np.concatenate((all_test_preds_vv, test_preds_vv))
                 all_test_true_vv = np.concatenate((all_test_true_vv, test_true_vv))
@@ -308,6 +315,8 @@ def main():
         # keep track of these across models
         model_r2s.append(overall_test_insitu_r2)
         model_rmses.append(overall_test_insitu_rmse)
+        model_r2s_vv.append(overall_test_vv_r2)
+        model_r2s_vh.append(overall_test_vh_r2)
         # make overall plots
         overall_val_insitu_plot_path = os.path.join(model_dir, 'overall_val_insitu_pred_obs_scatter.png')
         pred_obs_scatter(
@@ -549,14 +558,16 @@ def main():
         'test_insitu_rmse_anom': model_rmses_anom,
         'test_insitu_r2_mean': model_r2s_mean,
         'test_insitu_rmse_mean': model_rmses_mean,
+        'test_vv_r2': model_r2s_vv,
+        'test_vh_r2': model_r2s_vh
     })
     # save dataframe
     summary_csv_path = os.path.join(base_dir, 'model_summary_results.csv')
     summary_df.to_csv(summary_csv_path, index=False)
     # print this as a nice table
     # sort by lowest rmse (lowest @ top)
+    summary_df = summary_df[relevant_cols]
     summary_df = summary_df.sort_values(by='test_insitu_rmse', ascending=True)
-    summary_df = summary_df.delete_columns(['model_dir'])
     print('Model Summary Results:')
     console = Console()
     console.print(summary_df)

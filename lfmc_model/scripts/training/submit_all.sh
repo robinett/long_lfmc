@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+
+trap 'echo "Caught Ctrl-C, exiting..."; exit 130' INT
+
 set -euo pipefail
 
 ########################
@@ -6,108 +9,153 @@ set -euo pipefail
 ########################
 
 input_data_dir="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/inputs_sarstats"
+trent_datasets/lfmc_model/data/inputs_base"
 
 save_root="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/outputs/sarstatsnomonthlymeans"
+trent_datasets/lfmc_model/data/outputs/base"
 
 ########################
-# Experiment definitions
-# Each index = one experiment
+# Job throttling config
 ########################
 
-batch_sizes=(128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128 128)
-lrs=(1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4)
-val_splits=(0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2 0.2)
-adam_wds=(1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4 1e-4)
+# Max number of jobs (PENDING + RUNNING)
+# for this user, across the whole cluster.
+max_jobs=8
 
-d_models=(32 64 128 256 32 64 128 256 32 64 128 256 32 64 128 256 32 64 128 256 32 64 128 256 32 64 128 256 32 64 128 256)
-nheads=(1 2 4 8 1 2 4 8 1 2 4 8 1 2 4 8 1 2 4 8 1 2 4 8 1 2 4 8 1 2 4 8)
-num_layers_list=(2 2 3 4 2 2 3 4 2 2 3 4 2 2 3 4 2 2 3 4 2 2 3 4 2 2 3 4 2 2 3 4)
-dim_feedforwards=(64 128 256 512 64 128 256 512 64 128 256 512 64 128 256 512 64 128 256 512 64 128 256 512 64 128 256 512 64 128 256 512)
-dropouts=(0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15 0.15)
-
-long_d_models=(32 32 32 32 64 64 64 64 128 128 128 128 256 256 256 256 32 32 32 32 64 64 64 64 128 128 128 128 256 256 256 256)
-long_nheads=(1 1 1 1 2 2 2 2 4 4 4 4 8 8 8 8 1 1 1 1 2 2 2 2 4 4 4 4 8 8 8 8)
-long_num_layers_list=(2 2 2 2 2 2 2 2 3 3 3 3 4 4 4 4 2 2 2 2 2 2 2 2 3 3 3 3 4 4 4 4)
-long_dim_feedforwards=(64 64 64 64 128 128 128 128 256 256 256 256 512 512 512 512 64 64 64 64 128 128 128 128 256 256 256 256 512 512 512 512)
-long_out_dims=(32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 32 64 64 64 64 64 64 64 64 64 64 64 64 64 64 64 64)
+# How often to re-check (seconds)
+job_check_interval=30
 
 ########################
-# Sanity check: lengths
+# Helper: count jobs
 ########################
 
-num_exps=${#batch_sizes[@]}
+get_job_count() {
+  local user="${USER}"
 
-check_len () {
-  local name="$1"
-  local len="$2"
-  if [[ "${len}" -ne "${num_exps}" ]]; then
-    echo "Error: array '${name}' length" \
-         "(${len}) != num_exps (${num_exps})"
-    exit 1
-  fi
+  squeue -u "${user}" \
+         -t PENDING,RUNNING \
+         -h \
+         -o "%b" \
+    | awk '$0 !~ /\(null\)/ {c++} END {print c+0}'
 }
 
-check_len "lrs"               "${#lrs[@]}"
-check_len "val_splits"        "${#val_splits[@]}"
-check_len "adam_wds"          "${#adam_wds[@]}"
-check_len "d_models"          "${#d_models[@]}"
-check_len "nheads"            "${#nheads[@]}"
-check_len "num_layers_list"   "${#num_layers_list[@]}"
-check_len "dim_feedforwards"  "${#dim_feedforwards[@]}"
-check_len "dropouts"          "${#dropouts[@]}"
-check_len "long_d_models"     "${#long_d_models[@]}"
-check_len "long_nheads"       "${#long_nheads[@]}"
-check_len "long_num_layers_list" \
-           "${#long_num_layers_list[@]}"
-check_len "long_dim_feedforwards" \
-           "${#long_dim_feedforwards[@]}"
-check_len "long_out_dims"     "${#long_out_dims[@]}"
+wait_for_slot() {
+  local limit="$1"
 
-echo "Submitting ${num_exps} experiments..."
+  while true; do
+    local n
+    n=$(get_job_count)
+    echo "Current job count: ${n}" >&2
+    if (( n < limit )); then
+      break
+    fi
+    echo "Have ${n} jobs; waiting for a slot..." >&2
+    sleep "${job_check_interval}"
+  done
+}
 
 ########################
-# Submission loop (zip)
+# Hyperparameter grids
 ########################
 
-for ((i=0; i< num_exps; i++)); do
-  batch_size=${batch_sizes[$i]}
-  lr=${lrs[$i]}
-  val_split=${val_splits[$i]}
-  adam_wd=${adam_wds[$i]}
+# things that we won't specify a grid search for
+num_tasks=1
 
-  d_model=${d_models[$i]}
-  nhead=${nheads[$i]}
-  num_layers=${num_layers_list[$i]}
-  dim_feedforward=${dim_feedforwards[$i]}
-  dropout=${dropouts[$i]}
+# Usually you'll keep most of these small/singleton
+batch_sizes=(128)
+lrs=(5e-4 1e-4)
+val_splits=(0.2)
+adam_wds=(1e-4)
+dropouts=(0.15)
 
-  long_d_model=${long_d_models[$i]}
-  long_nhead=${long_nheads[$i]}
-  long_num_layers=${long_num_layers_list[$i]}
-  long_dim_feedforward=${long_dim_feedforwards[$i]}
-  long_out_dim=${long_out_dims[$i]}
+# You only specify dimensions; everything else is derived
+# SHORT encoder
+d_models=(32 64 128)
 
-  run_name="exp${i}_bs${batch_size}_lr${lr}_dm${d_model}_nh${nhead}_nl${num_layers}"
+# LONG encoder
+long_d_models=(32 64 128 256)
 
-  echo "Submitting: ${run_name}"
+# Still explicit: long_out_dim (no rule given)
+long_out_dims=(32 64)
 
-  sbatch train_job.sbatch \
-    --input_data_dir "${input_data_dir}" \
-    --save_dir "${save_root}" \
-    --batch_size "${batch_size}" \
-    --lr "${lr}" \
-    --val_split "${val_split}" \
-    --adam_wd "${adam_wd}" \
-    --d_model "${d_model}" \
-    --nhead "${nhead}" \
-    --num_layers "${num_layers}" \
-    --dim_feedforward "${dim_feedforward}" \
-    --dropout "${dropout}" \
-    --long_d_model "${long_d_model}" \
-    --long_nhead "${long_nhead}" \
-    --long_num_layers "${long_num_layers}" \
-    --long_dim_feedforward "${long_dim_feedforward}" \
-    --long_out_dim "${long_out_dim}"
+########################
+# Submission loop (grid)
+########################
+
+exp_idx=0
+
+for batch_size in "${batch_sizes[@]}"; do
+  for lr in "${lrs[@]}"; do
+    for val_split in "${val_splits[@]}"; do
+      for adam_wd in "${adam_wds[@]}"; do
+        for dropout in "${dropouts[@]}"; do
+
+          # Loop over SHORT model dimensions
+          for d_idx in "${!d_models[@]}"; do
+            d_model=${d_models[$d_idx]}
+
+            # Derived:
+            #   nhead = d / 32
+            #   num_layers = 2, 3, 4, ... per d_models index
+            #   dim_ff = d * 2
+            nhead=$(( d_model / 32 ))
+            num_layers=$(( 2 + d_idx ))
+            dim_feedforward=$(( d_model * 2 ))
+
+            # Loop over LONG model dimensions
+            for long_d_idx in "${!long_d_models[@]}"; do
+              long_d_model=${long_d_models[$long_d_idx]}
+
+              long_nhead=$(( long_d_model / 32 ))
+              long_num_layers=$(( 2 + long_d_idx ))
+              long_dim_feedforward=$(( long_d_model * 2 ))
+
+              for long_out_dim in "${long_out_dims[@]}"; do
+
+                run_name="exp${exp_idx}_bs${batch_size}_\
+dm${d_model}_nh${nhead}_nl${num_layers}_\
+ldm${long_d_model}_lnh${long_nhead}_\
+lnl${long_num_layers}"
+
+                echo "Submitting: ${run_name}"
+
+                # Wait until we have fewer than max_jobs jobs
+                wait_for_slot "${max_jobs}"
+
+                sbatch \
+                  --job-name="${run_name}" \
+                  train_job.sbatch \
+                  --input_data_dir "${input_data_dir}" \
+                  --save_dir "${save_root}" \
+                  --batch_size "${batch_size}" \
+                  --lr "${lr}" \
+                  --val_split "${val_split}" \
+                  --adam_wd "${adam_wd}" \
+                  --d_model "${d_model}" \
+                  --nhead "${nhead}" \
+                  --num_layers "${num_layers}" \
+                  --dim_feedforward "${dim_feedforward}" \
+                  --dropout "${dropout}" \
+                  --long_d_model "${long_d_model}" \
+                  --long_nhead "${long_nhead}" \
+                  --long_num_layers "${long_num_layers}" \
+                  --long_dim_feedforward \
+                    "${long_dim_feedforward}" \
+                  --long_out_dim "${long_out_dim}" \
+                  --num_gradnorm_tasks "${num_tasks}"
+
+                exp_idx=$((exp_idx + 1))
+
+                sleep 30
+
+              done
+            done
+          done
+
+        done
+      done
+    done
+  done
 done
+
+echo "Submitted ${exp_idx} experiments."

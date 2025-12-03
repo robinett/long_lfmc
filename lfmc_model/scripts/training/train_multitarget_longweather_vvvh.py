@@ -196,6 +196,12 @@ def get_args():
         type=int,
         help='Dimensionality of the output layer in the long-term model',
     )
+    parser.add_argument(
+        '--num_gradnorm_tasks',
+        type=int,
+        default=3,
+        help='Number of tasks for gradient normalization',
+    )
     args = parser.parse_args()
     return args
 
@@ -734,10 +740,7 @@ def run_model(
     global_step=0,
     warmup_start_lr=None,
     warmup_end_lr=None,
-    lambda_vv=1.0,
-    lambda_vh=1.0,
     grad_norm=None,
-    gradnorm_enabled=False
 ):
     pbar = tqdm.tqdm(
         loader,
@@ -761,10 +764,6 @@ def run_model(
     out_true_i = []
     out_true_vv = []
     out_true_vh = []
-    if not gradnorm_enabled:
-        task_weights = [1.0, lambda_vv, lambda_vh]
-    else:
-        task_weights = model.task_weights
     for Xsh_b,Xl_b,Xst_b,Y_b,insitu_b in pbar:
         # move data to device
         Xsh_b = Xsh_b.to(device=device, dtype=torch.float32)
@@ -774,6 +773,12 @@ def run_model(
         insitu_b = insitu_b.to(device=device, dtype=torch.float32)
         Y_b = Y_b.view(-1)
         insitu_b = insitu_b.view(-1)
+        if train_model:
+            if global_step < warmup_steps:
+                this_t = global_step / warmup_steps
+                lr = warmup_start_lr * ((warmup_end_lr / warmup_start_lr) ** this_t)
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr
         if (
             not train_model or
             insitu_b.sum().item() == 0
@@ -782,7 +787,11 @@ def run_model(
         #elif global_step < warmup_steps:
         #    use_gradnorm = (global_step % 20 == 0)
         else:
-            use_gradnorm = (global_step % 200 == 0)
+            use_gradnorm = (global_step % 50 == 0) 
+            if use_gradnorm:
+                optimizer.param_groups[2]['lr'] = 1e-2
+            else:
+                optimizer.param_groups[2]['lr'] = 0.0
         if train_model:
             optimizer.zero_grad(set_to_none=True)
             if use_gradnorm:
@@ -806,8 +815,7 @@ def run_model(
         m_vv = insitu_b == 1
         m_vh = insitu_b == 2
         # task weights from gradnorm
-        if gradnorm_enabled:
-            task_weights = model.task_weights
+        #task_weights = model.task_weights
         if loss_fn is not None:
             loss_i = loss_fn(mu_i_b, logv_i_b, Y_b, mask=m_i)
             loss_vv = loss_fn(mu_vv_b, logv_vv_b, Y_b, mask=m_vv)
@@ -823,47 +831,43 @@ def run_model(
             n_vh_tot += n_vh
             n_samples = n_i + n_vv + n_vh
             n_samples_tot += n_samples
-            task_losses = [loss_i, loss_vv, loss_vh]
+            if grad_norm.T == 1:
+                task_losses = [loss_i]
+            elif grad_norm.T == 2:
+                task_losses = [loss_i, loss_vh]
+            elif grad_norm.T == 3:
+                task_losses = [loss_i, loss_vv, loss_vh]
             if train_model and use_gradnorm:
                 total_loss, L_grad = grad_norm.update(
-                    task_losses, task_weights, model
+                    task_losses, model.task_weights, model
                 )
             else:
-                total_loss = (
-                    task_weights[0] * loss_i +
-                    task_weights[1] * loss_vv +
-                    task_weights[2] * loss_vh
-                )
-            #denominator = n_i + lambda_vv * n_vv + lambda_vh * n_vh
-            #total_loss = (
-            #    n_i * loss_i + 
-            #    lambda_vv * n_vv * loss_vv + 
-            #    lambda_vh * n_vh * loss_vh
-            #) / denominator
-            #if n_i > 0:
-            #    running_loss_insitu += loss_i.item() * n_i
-            #if n_vv > 0:
-            #    running_loss_vv += loss_vv.item() * n_vv
-            #if n_vh > 0:
-            #    running_loss_vh += loss_vh.item() * n_vh
+                if grad_norm.T == 1:
+                    total_loss = model.task_weights[0] * loss_i
+                elif grad_norm.T == 2:
+                    total_loss = (
+                        model.task_weights[0] * loss_i +
+                        model.task_weights[1] * loss_vh
+                    )
+                elif grad_norm.T == 3:
+                    total_loss = (
+                        model.task_weights[0] * loss_i +
+                        model.task_weights[1] * loss_vv +
+                        model.task_weights[2] * loss_vh
+                    )
         if train_model:
-            if global_step < warmup_steps:
-                this_t = global_step / warmup_steps
-                lr = warmup_start_lr * ((warmup_end_lr / warmup_start_lr) ** this_t)
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = lr
             if use_gradnorm:
                 total_loss.backward(retain_graph=True)
                 L_grad.backward()
             else:
                 total_loss.backward()
-                if task_weights.grad is not None:
-                    task_weights.grad.zero_()
+                if model.task_weights.grad is not None:
+                    model.task_weights.grad.zero_()
             optimizer.step()
             with torch.no_grad():
-                if gradnorm_enabled and use_gradnorm:
-                    task_weights.clamp_(min=1e-6)
-                    task_weights *= 3.0 / task_weights.sum()
+                if use_gradnorm:
+                    model.task_weights.clamp_(min=1e-6)
+                    model.task_weights *= grad_norm.T / model.task_weights.sum()
             global_step += 1
         out_mu_i.append(mu_i_b.detach().cpu())
         out_logv_i.append(logv_i_b.detach().cpu())
@@ -1065,10 +1069,18 @@ def train_fold_k(
     train_static_std = np.nanstd(train_static_data, axis=(0,1))
     lfmc_mean = np.nanmean(train_y[train_source == 0])
     lfmc_std = np.nanstd(train_y[train_source == 0])
-    vv_mean = np.nanmean(train_y[train_source == 1])
-    vv_std = np.nanstd(train_y[train_source == 1])
-    vh_mean = np.nanmean(train_y[train_source == 2])
-    vh_std = np.nanstd(train_y[train_source == 2])
+    if vv_train > 0:
+        vv_mean = np.nanmean(train_y[train_source == 1])
+        vv_std = np.nanstd(train_y[train_source == 1])
+    else:
+        vv_mean = np.array(np.nan)
+        vv_std = np.array(np.nan)
+    if vh_train > 0:
+        vh_mean = np.nanmean(train_y[train_source == 2])
+        vh_std = np.nanstd(train_y[train_source == 2])
+    else:
+        vh_mean = np.array(np.nan)
+        vh_std = np.array(np.nan)
     for v,var in enumerate(var_names['short_vars']):
         if (
             '_sin' in var or
@@ -1132,12 +1144,14 @@ def train_fold_k(
     train_y[train_source == 0] = (train_y[train_source == 0] - lfmc_mean) / lfmc_std
     val_y[val_source == 0] = (val_y[val_source == 0] - lfmc_mean) / lfmc_std
     test_y[test_source == 0] = (test_y[test_source == 0] - lfmc_mean) / lfmc_std
-    train_y[train_source == 1] = (train_y[train_source == 1] - vv_mean) / vv_std
-    val_y[val_source == 1] = (val_y[val_source == 1] - vv_mean) / vv_std
-    test_y[test_source == 1] = (test_y[test_source == 1] - vv_mean) / vv_std
-    train_y[train_source == 2] = (train_y[train_source == 2] - vh_mean) / vh_std
-    val_y[val_source == 2] = (val_y[val_source == 2] - vh_mean) / vh_std
-    test_y[test_source == 2] = (test_y[test_source == 2] - vh_mean) / vh_std
+    if vv_train > 0:
+        train_y[train_source == 1] = (train_y[train_source == 1] - vv_mean) / vv_std
+        val_y[val_source == 1] = (val_y[val_source == 1] - vv_mean) / vv_std
+        test_y[test_source == 1] = (test_y[test_source == 1] - vv_mean) / vv_std
+    if vh_train > 0:
+        train_y[train_source == 2] = (train_y[train_source == 2] - vh_mean) / vh_std
+        val_y[val_source == 2] = (val_y[val_source == 2] - vh_mean) / vh_std
+        test_y[test_source == 2] = (test_y[test_source == 2] - vh_mean) / vh_std
     # save the normalization parameters for later use
     norm_params = {
         'train_short_mean': train_short_mean.tolist(),
@@ -1266,11 +1280,9 @@ def train_fold_k(
             global_step=global_step,
             warmup_start_lr=warmup_start_lr,
             warmup_end_lr=warmup_end_lr,
-            lambda_vv=rs_factor,
-            lambda_vh=rs_factor,
             grad_norm=grad_norm,
-            gradnorm_enabled=True
         )
+        print(f'learning rate: {optimizer.param_groups[0]["lr"]:.6f}')
         train_loss.append(this_train_loss)
         train_loss_insitu.append(this_train_loss_insitu)
         train_loss_vv.append(this_train_loss_vv)
@@ -1279,7 +1291,8 @@ def train_fold_k(
         print(f'Training insitu loss: {this_train_loss_insitu:.4f}')
         print(f'Training vv loss: {this_train_loss_vv:.4f}')
         print(f'Training vh loss: {this_train_loss_vh:.4f}')
-        scheduler.step()
+        if global_step > warmup_steps:
+            scheduler.step()
         # run the validation
         model.eval()
         (
@@ -1304,9 +1317,7 @@ def train_fold_k(
             device,
             criterion,
             train_model=False,
-            lambda_vv=rs_factor,
-            lambda_vh=rs_factor,
-            gradnorm_enabled=True
+            grad_norm=grad_norm,
         )
         val_loss.append(this_val_loss)
         val_loss_insitu.append(this_val_loss_insitu)
@@ -1367,7 +1378,7 @@ def train_fold_k(
         #avg_val_pred = np.mean(lfmc_i_val)
         #avg_val_true = np.mean(lfmc_i_val_true)
         #avg_val_std = np.mean(lfmc_std_i_val)
-        print(f'task weights: {model.task_weights.detach().cpu().numpy()}')
+        print(f'task weights: {model.task_weights}')
         print(
             f'Validation MAE: {val_mae:.4f}, RMSE: {val_rmse:.4f}, R2: {val_r2:.4f}, NLL: {val_nll:.4f}'
         )
@@ -1442,9 +1453,7 @@ def train_fold_k(
         device,
         criterion,
         train_model=False,
-        lambda_vv=rs_factor,
-        lambda_vh=rs_factor,
-        gradnorm_enabled=True
+        grad_norm=grad_norm,
     )
     # denorm
     lfmc_val_only = mu_i_val[val_source == 0] * lfmc_std + lfmc_mean
@@ -1556,9 +1565,7 @@ def train_fold_k(
         device,
         criterion,
         train_model=False,
-        lambda_vv=rs_factor,
-        lambda_vh=rs_factor,
-        gradnorm_enabled=True
+        grad_norm=grad_norm,
     )
     # denorm
     if len(mu_i_test) == 0:
@@ -1721,7 +1728,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type != 'cuda':
         print('WARNING: CUDA not available, using CPU. This will be slow!')
-    warmup_steps = 1200
+    #warmup_steps = 1200
     base_lr = lr
     warmup_start_lr = 1e-6
     val_split = args.val_split
@@ -1770,6 +1777,9 @@ def main():
     num_insitu_obs = info[info['source_legible'] == 'nfmd'].shape[0]
     num_vv_obs = info[info['source_legible'] == 'vv'].shape[0]
     num_vh_obs = info[info['source_legible'] == 'vh'].shape[0]
+    # make warmup the first 3 epochs
+    batches_per_epoch = (num_insitu_obs + num_vv_obs + num_vh_obs) / batch_size * 0.7
+    warmup_steps = int(3 * batches_per_epoch)
     print(f'Number of insitu observations: {num_insitu_obs}')
     print(f'Number of VV observations: {num_vv_obs}')
     print(f'Number of VH observations: {num_vh_obs}')
@@ -1833,13 +1843,16 @@ def main():
             long_nhead=long_nhead,
             long_num_layers=long_num_layers,
             long_dim_feedforward=long_dim_feedforward,
-            long_out_dim=long_out_dim
+            long_out_dim=long_out_dim,
+            num_task_weights=args.num_gradnorm_tasks,
         ).to(device)
         # build the optimizer
         decay, no_decay = [], []
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue  # frozen weights
+            elif 'task_weights' in name:
+                continue
             if (
                 ('bias' in name) or
                 ('norm' in name.lower()) or
@@ -1851,7 +1864,8 @@ def main():
         optimizer = torch.optim.AdamW(
             [
                 {'params': decay, 'weight_decay': adam_weight_decay},
-                {'params': no_decay, 'weight_decay': 0.0}
+                {'params': no_decay, 'weight_decay': 0.0},
+                {'params': model.task_weights, 'weight_decay': 0.0}
             ],
             lr=lr
         )
@@ -1865,7 +1879,7 @@ def main():
         early_stopping = EarlyStopping(patience=patience)
         # initialize GradNorm
         grad_norm = GradNorm(
-            num_tasks=3,
+            num_tasks=args.num_gradnorm_tasks,
             alpha=gradnorm_alpha,
             device=device
         )
@@ -1904,7 +1918,8 @@ def main():
         long_nhead=long_nhead,
         long_num_layers=long_num_layers,
         long_dim_feedforward=long_dim_feedforward,
-        long_out_dim=long_out_dim
+        long_out_dim=long_out_dim,
+        num_task_weights=args.num_gradnorm_tasks
     ).to(device)
     # build the optimizer
     decay, no_decay = [], []
@@ -1914,7 +1929,8 @@ def main():
         if (
             ('bias' in name) or
             ('norm' in name.lower()) or
-            ('bn' in name.lower())
+            ('bn' in name.lower()) or
+            (param is model.task_weights)
         ):
             no_decay.append(param)
         else:
@@ -1935,7 +1951,7 @@ def main():
     # build early stopping
     early_stopping = EarlyStopping(patience=patience)
     grad_norm = GradNorm(
-        num_tasks=3,
+        num_tasks=args.num_gradnorm_tasks,
         alpha=gradnorm_alpha,
         device=device
     )
