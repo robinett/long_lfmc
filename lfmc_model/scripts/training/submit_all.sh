@@ -9,10 +9,10 @@ set -euo pipefail
 ########################
 
 input_data_dir="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/inputs_sarstats_all"
+trent_datasets/lfmc_model/data/inputs_sarmultitask_vhonly"
 
 save_root="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/outputs/sarstats_all"
+trent_datasets/lfmc_model/data/outputs/sarmultitask_vhonly_gradnorm"
 
 ########################
 # Job throttling config
@@ -21,9 +21,6 @@ trent_datasets/lfmc_model/data/outputs/sarstats_all"
 # Max number of jobs (PENDING + RUNNING)
 # for this user, across the whole cluster.
 max_jobs=8
-
-# How often to re-check (seconds)
-job_check_interval=30
 
 ########################
 # Helper: count jobs
@@ -50,7 +47,11 @@ wait_for_slot() {
       break
     fi
     echo "Have ${n} jobs; waiting for a slot..." >&2
-    sleep "${job_check_interval}"
+    # for sleep between 25 and 40 seconds (only running one job array)
+    sleep $(( 25 + RANDOM % 16 ))
+    # for sleep between 1 and 5 minutes
+    # (if running multiple job arrays and need to ensure things are spread out)
+    sleep $(( 60 + RANDOM % 241 ))
   done
 }
 
@@ -59,7 +60,7 @@ wait_for_slot() {
 ########################
 
 # things that we won't specify a grid search for
-num_tasks=1
+num_tasks=2
 
 # Usually you'll keep most of these small/singleton
 batch_sizes=(128)
@@ -142,11 +143,17 @@ lnl${long_num_layers}"
                   --long_dim_feedforward \
                     "${long_dim_feedforward}" \
                   --long_out_dim "${long_out_dim}" \
-                  --num_gradnorm_tasks "${num_tasks}"
+                  --num_tasks "${num_tasks}" \
+                  --task_weight_type 'gradnorm' \
+                  --manual_task_weights 10.0 1.0
 
                 exp_idx=$((exp_idx + 1))
 
-                sleep 30
+                # for sleep between 25 and 40 seconds (only running one job array)
+                sleep $(( 25 + RANDOM % 16 ))
+                # for sleep between 1 and 5 minutes
+                # (if running multiple job arrays and need to ensure things are spread out)
+                sleep $(( 60 + RANDOM % 241 ))
 
               done
             done

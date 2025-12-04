@@ -34,6 +34,15 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
+def check_tensor(name, x):
+    print(
+        name,
+        "nan:", torch.isnan(x).any().item(),
+        "inf:", torch.isinf(x).any().item(),
+        "min:", x.min().item(),
+        "max:", x.max().item()
+    )
+
 class GradNorm:
     """
     GradNorm (Chen et al., 2018) for *T* tasks.
@@ -197,10 +206,22 @@ def get_args():
         help='Dimensionality of the output layer in the long-term model',
     )
     parser.add_argument(
-        '--num_gradnorm_tasks',
+        '--num_tasks',
         type=int,
-        default=3,
         help='Number of tasks for gradient normalization',
+    )
+    parser.add_argument(
+        '--task_weight_type',
+        type=str,
+        choices=['default', 'manual', 'gradnorm'],
+        help='Type of task weighting to use',
+    )
+    parser.add_argument(
+        '--manual_task_weights',
+        type=float,
+        nargs='+',
+        default=None,
+        help='Manual task weights (must match num_tasks)',
     )
     args = parser.parse_args()
     return args
@@ -740,6 +761,8 @@ def run_model(
     global_step=0,
     warmup_start_lr=None,
     warmup_end_lr=None,
+    num_tasks=None,
+    task_weight_type=None,
     grad_norm=None,
 ):
     pbar = tqdm.tqdm(
@@ -782,8 +805,11 @@ def run_model(
         if (
             not train_model or
             insitu_b.sum().item() == 0
+            or task_weight_type != 'gradnorm'
         ):
             use_gradnorm = False
+            if optimizer is not None:
+                optimizer.param_groups[2]['lr'] = 0.0
         #elif global_step < warmup_steps:
         #    use_gradnorm = (global_step % 20 == 0)
         else:
@@ -831,25 +857,25 @@ def run_model(
             n_vh_tot += n_vh
             n_samples = n_i + n_vv + n_vh
             n_samples_tot += n_samples
-            if grad_norm.T == 1:
+            if num_tasks == 1:
                 task_losses = [loss_i]
-            elif grad_norm.T == 2:
+            elif num_tasks == 2:
                 task_losses = [loss_i, loss_vh]
-            elif grad_norm.T == 3:
+            elif num_tasks == 3:
                 task_losses = [loss_i, loss_vv, loss_vh]
             if train_model and use_gradnorm:
                 total_loss, L_grad = grad_norm.update(
                     task_losses, model.task_weights, model
                 )
             else:
-                if grad_norm.T == 1:
+                if num_tasks == 1:
                     total_loss = model.task_weights[0] * loss_i
-                elif grad_norm.T == 2:
+                elif num_tasks == 2:
                     total_loss = (
                         model.task_weights[0] * loss_i +
                         model.task_weights[1] * loss_vh
                     )
-                elif grad_norm.T == 3:
+                elif num_tasks == 3:
                     total_loss = (
                         model.task_weights[0] * loss_i +
                         model.task_weights[1] * loss_vv +
@@ -955,7 +981,8 @@ def train_fold_k(
     warmup_steps,
     warmup_start_lr,
     val_split,
-    rs_factor,
+    num_tasks,
+    task_weight_type,
     grad_norm,
     plot_distributions=False
 ):
@@ -1273,13 +1300,15 @@ def train_fold_k(
             model,
             train_loader,
             device,
-            criterion,
+            loss_fn=criterion,
             train_model=True,
             optimizer=optimizer,
             warmup_steps=warmup_steps,
             global_step=global_step,
             warmup_start_lr=warmup_start_lr,
             warmup_end_lr=warmup_end_lr,
+            num_tasks=num_tasks,
+            task_weight_type=task_weight_type,
             grad_norm=grad_norm,
         )
         print(f'learning rate: {optimizer.param_groups[0]["lr"]:.6f}')
@@ -1315,9 +1344,10 @@ def train_fold_k(
             model,
             val_loader,
             device,
-            criterion,
+            loss_fn=criterion,
             train_model=False,
-            grad_norm=grad_norm,
+            num_tasks=num_tasks,
+            task_weight_type=task_weight_type,
         )
         val_loss.append(this_val_loss)
         val_loss_insitu.append(this_val_loss_insitu)
@@ -1451,9 +1481,10 @@ def train_fold_k(
         model,
         val_loader,
         device,
-        criterion,
+        loss_fn=criterion,
         train_model=False,
-        grad_norm=grad_norm,
+        num_tasks=num_tasks,
+        task_weight_type=task_weight_type,
     )
     # denorm
     lfmc_val_only = mu_i_val[val_source == 0] * lfmc_std + lfmc_mean
@@ -1563,9 +1594,10 @@ def train_fold_k(
         model,
         test_loader,
         device,
-        criterion,
+        loss_fn=criterion,
         train_model=False,
-        grad_norm=grad_norm,
+        num_tasks=num_tasks,
+        task_weight_type=task_weight_type,
     )
     # denorm
     if len(mu_i_test) == 0:
@@ -1735,13 +1767,13 @@ def main():
     adam_weight_decay = args.adam_wd
     patience = 8
     gradnorm_alpha = 1.0
+    num_tasks = args.num_tasks
     # model hyperparameters (go back to the github and get what I deleted here)
     d_model = args.d_model
     nhead = args.nhead
     num_layers = args.num_layers
     dim_feedforward = args.dim_feedforward
     dropout = args.dropout
-    rs_factor = 1.0 # weighting for RS loss
     # long model hyperparameters
     long_d_model = args.long_d_model
     long_nhead = args.long_nhead
@@ -1844,7 +1876,7 @@ def main():
             long_num_layers=long_num_layers,
             long_dim_feedforward=long_dim_feedforward,
             long_out_dim=long_out_dim,
-            num_task_weights=args.num_gradnorm_tasks,
+            num_task_weights=num_tasks
         ).to(device)
         # build the optimizer
         decay, no_decay = [], []
@@ -1877,12 +1909,19 @@ def main():
         )
         # build early stopping
         early_stopping = EarlyStopping(patience=patience)
-        # initialize GradNorm
-        grad_norm = GradNorm(
-            num_tasks=args.num_gradnorm_tasks,
-            alpha=gradnorm_alpha,
-            device=device
-        )
+        # initialize our task weights
+        task_weight_type = args.task_weight_type
+        if task_weight_type == 'manual':
+            for i in range(num_tasks):
+                model.task_weights.data[i] = args.manual_task_weights[i]
+        if task_weight_type == 'gradnorm':
+            grad_norm = GradNorm(
+                num_tasks=args.num_tasks,
+                alpha=gradnorm_alpha,
+                device=device
+            )
+        else:
+            grad_norm = None
         # train on this fold
         train_fold_k(
             model,
@@ -1899,7 +1938,8 @@ def main():
             warmup_steps,
             warmup_start_lr,
             val_split,
-            rs_factor,
+            num_tasks,
+            task_weight_type,
             grad_norm,
         )
     # one final version of the model trained on all the data
@@ -1919,18 +1959,19 @@ def main():
         long_num_layers=long_num_layers,
         long_dim_feedforward=long_dim_feedforward,
         long_out_dim=long_out_dim,
-        num_task_weights=args.num_gradnorm_tasks
+        num_task_weights=num_tasks
     ).to(device)
     # build the optimizer
     decay, no_decay = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue  # frozen weights
+        elif 'task_weights' in name:
+            continue
         if (
             ('bias' in name) or
             ('norm' in name.lower()) or
-            ('bn' in name.lower()) or
-            (param is model.task_weights)
+            ('bn' in name.lower())
         ):
             no_decay.append(param)
         else:
@@ -1938,7 +1979,8 @@ def main():
     optimizer = torch.optim.AdamW(
         [
             {'params': decay, 'weight_decay': adam_weight_decay},
-            {'params': no_decay, 'weight_decay': 0.0}
+            {'params': no_decay, 'weight_decay': 0.0},
+            {'params': model.task_weights, 'weight_decay': 0.0}
         ],
         lr=lr
     )
@@ -1950,11 +1992,19 @@ def main():
     )
     # build early stopping
     early_stopping = EarlyStopping(patience=patience)
-    grad_norm = GradNorm(
-        num_tasks=args.num_gradnorm_tasks,
-        alpha=gradnorm_alpha,
-        device=device
-    )
+    # initialize our task weights
+    task_weight_type = args.task_weight_type
+    if task_weight_type == 'manual':
+        for i in range(num_tasks):
+            model.task_weights.data[i] = args.manual_task_weights[i]
+    if task_weight_type == 'gradnorm':
+        grad_norm = GradNorm(
+            num_tasks=args.num_tasks,
+            alpha=gradnorm_alpha,
+            device=device
+        )
+    else:
+        grad_norm = None
     # train on this fold
     locs = (9998, [(-9998.0,-9998.0)])  # dummy value to indicate training on all data
     train_fold_k(
@@ -1972,7 +2022,8 @@ def main():
         warmup_steps,
         warmup_start_lr,
         val_split,
-        rs_factor,
+        num_tasks,
+        task_weight_type,
         grad_norm,
     )
 

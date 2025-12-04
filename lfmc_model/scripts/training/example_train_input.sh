@@ -4,7 +4,7 @@
 # but keep it at this size to not overwrite existing outputs
 
 python3 -u train_multitarget_longweather_vvvh.py \
-    --input_data_dir '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_base' \
+    --input_data_dir '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_sarmultitask_vhonly' \
     --save_dir '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/testing' \
     --batch_size 128 \
     --lr 1e-4 \
@@ -20,4 +20,6 @@ python3 -u train_multitarget_longweather_vvvh.py \
     --long_num_layers 3 \
     --long_dim_feedforward 512 \
     --long_out_dim 32 \
-    --num_gradnorm_tasks 1
+    --num_tasks 2 \
+    --task_weight_type 'gradnorm' \
+    --manual_task_weights 1.0 10.0

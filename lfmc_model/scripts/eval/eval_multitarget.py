@@ -27,15 +27,15 @@ warnings.filterwarnings(
 
 def main():
     # perform analysis across all models in a dir, since these are now batched out
-    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/old_models/sarmultitask'
-    load_only = False
+    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarstats_all'
+    load_only = True
     model_dirs = [
         os.path.join(base_dir, d)
         for d in os.listdir(base_dir)
         if os.path.isdir(os.path.join(base_dir, d))
     ]
     relevant_cols = [
-        'd_model', 'nhead', 'num_layers', 'dim_feedforward', 'dropout',
+        'd_model', 'nhead', 'num_layers', 'dim_feedforward', 'dropout', 'learning_rate',
         'long_d_model', 'long_nhead', 'long_num_layers', 'long_dim_feedforward', 'long_out',
         'test_insitu_r2', 'test_insitu_rmse', 'test_vv_r2', 'test_vh_r2'
     ]
