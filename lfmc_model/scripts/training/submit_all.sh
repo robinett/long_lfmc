@@ -9,10 +9,10 @@ set -euo pipefail
 ########################
 
 input_data_dir="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/inputs_base"
+trent_datasets/lfmc_model/data/inputs_sarstats_all"
 
 save_root="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/outputs/base"
+trent_datasets/lfmc_model/data/outputs/sarstats_all"
 
 ########################
 # Job throttling config
@@ -36,7 +36,7 @@ get_job_count() {
          -t PENDING,RUNNING \
          -h \
          -o "%b" \
-    | awk '$0 !~ /\(null\)/ {c++} END {print c+0}'
+    | awk '/gres\/gpu/ {c++} END {print c+0}'
 }
 
 wait_for_slot() {

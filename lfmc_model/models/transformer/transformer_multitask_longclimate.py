@@ -4,65 +4,6 @@ import torch.nn.functional as F
 import math
 import sys
 
-class SinusoidalPositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=10000):
-        super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        pos = torch.arange(0, max_len, dtype=torch.float
-                          ).unsqueeze(1)
-        div = torch.exp(torch.arange(0, d_model, 2).float()
-                        * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(pos * div)
-        pe[:, 1::2] = torch.cos(pos * div)
-        self.register_buffer("pe", pe)
-        self.alpha = nn.Parameter(torch.tensor(0.1))
-    def forward(self, x):               # x: [B, T, d]
-        T = x.size(1)
-        return x + self.alpha * self.pe[:T].unsqueeze(0)
-
-class MultiheadAttnPool(nn.Module):
-    def __init__(self, d_model, nhead, num_queries=2, dropout=0.0):
-        super().__init__()
-        self.queries = nn.Parameter(torch.zeros(num_queries,
-                                                d_model))
-        self.mha = nn.MultiheadAttention(embed_dim=d_model,
-                                         num_heads=nhead,
-                                         dropout=dropout,
-                                         batch_first=True)
-        self.out_drop = nn.Dropout(dropout)
-        self.proj = nn.Sequential(
-            nn.Linear(num_queries * d_model, d_model),
-            nn.ReLU()
-        )
-    def forward(self, x):               # x: [B, T, d]
-        B = x.size(0)
-        q = self.queries.unsqueeze(0).expand(B, -1, -1)
-        y, _ = self.mha(q, x, x)        # [B, Q, d]
-        y = self.out_drop(y)
-        return self.proj(y.reshape(B, -1))  # [B, d]
-
-class LinearAttnPool(nn.Module):
-    def __init__(self, d_model):
-        super().__init__()
-        self.attn_proj = nn.Linear(d_model, 1)
-    def forward(self, x):               # x: [B, T, d]
-        w = torch.softmax(self.attn_proj(x), dim=1)
-        return (w * x).sum(dim=1)       # [B, d]
-
-class FiLMConditioner(nn.Module):
-    def __init__(self, in_dim: int, d_model: int, hidden: int=64):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden), nn.SiLU(),
-            nn.Linear(hidden, 2 * d_model)
-        )
-        nn.init.zeros_(self.mlp[-1].weight)
-        nn.init.zeros_(self.mlp[-1].bias)
-    def forward(self, s):               # s: [B, in_dim]
-        film = self.mlp(s)              # [B, 2d]
-        g, b = film.chunk(2, -1)        # [B,d],[B,d]
-        return g, b
-
 class GaussianHead(nn.Module):
     def __init__(self, d_model, dropout=0.0):
         super().__init__()
@@ -96,8 +37,10 @@ class LongEncoder(nn.Module):
                  num_queries: int = 2,
                  out_dim: int = None):
         super().__init__()
+        self.cls_long = nn.Parameter(
+            torch.randn(1, 1, d_model)
+        )
         self.out_dim = out_dim if out_dim is not None else d_model
-
         self.long_proj = nn.Linear(long_input_dim, d_model)
         enc_layer = nn.TransformerEncoderLayer(
             d_model=d_model, nhead=nhead,
@@ -107,14 +50,6 @@ class LongEncoder(nn.Module):
         self.encoder = nn.TransformerEncoder(
             encoder_layer=enc_layer, num_layers=num_layers
         )
-        self.pos_enc = SinusoidalPositionalEncoding(d_model)
-
-        #if pool == "multihead":
-        #    self.pool = MultiheadAttnPool(d_model, nhead,
-        #                                  num_queries, dropout)  # -> [B, d_model]
-        #else:
-        self.pool = LinearAttnPool(d_model)                  # -> [B, d_model]
-
         # Optional shrink to out_dim
         self.out_proj = (
             nn.Identity() if self.out_dim == d_model
@@ -123,11 +58,16 @@ class LongEncoder(nn.Module):
         )
 
     def forward(self, long_hist):       # [B, Tl, Din_long]
-        x = self.long_proj(long_hist)   # [B, Tl, d]
-        #x = self.pos_enc(x)             # [B, Tl, d]
-        x = self.encoder(x)             # [B, Tl, d]
-        z_long = self.pool(x)           # [B, d]
-        z_long = self.out_proj(z_long)  # [B, out_dim]
+        # project
+        x_proj = self.long_proj(long_hist)   # [B, Tl, d]
+        # add learnable cls token
+        cls_token = self.cls_long.expand(x_proj.size(0), 1, x_proj.size(2))  # [B, 1, d]
+        x_cls = torch.cat([cls_token, x_proj], dim=1)  # [B, Tl+1, d]
+        # encode
+        x_enc = self.encoder(x_cls)             # [B, Tl, d]
+        # select cls token output and shrink to out_dim
+        z_cls = x_enc[:, 0, :]                  # [B, d]
+        z_long = self.out_proj(z_cls)  # [B, out_dim]
         return z_long
 
 
@@ -212,13 +152,13 @@ class LFMCTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(
             encoder_layer=enc_layer, num_layers=num_layers
         )
-        self.pos_enc  = SinusoidalPositionalEncoding(d_model)
+        #self.pos_enc  = SinusoidalPositionalEncoding(d_model)
 
-        self.film_cond = FiLMConditioner(
-            in_dim=self.static_aug_dim, d_model=d_model, hidden=64
-        )
+        #self.film_cond = FiLMConditioner(
+        #    in_dim=self.static_aug_dim, d_model=d_model, hidden=64
+        #)
 
-        self.pooler = LinearAttnPool(d_model)
+        #self.pooler = LinearAttnPool(d_model)
 
         #self.pooler = MultiheadAttnPool(
         #    d_model=d_model, nhead=nhead,
@@ -234,7 +174,7 @@ class LFMCTransformer(nn.Module):
                 long_history,       # [B, Tl, Din_long]
                 static_features):   # [B, 1, D_static]
 
-        # 1) long → z_long
+        # 1) encode long history
         z_long = self.long_enc(long_history)       # [B, long_out_dim]
 
         # 2) augment static with z_long
@@ -242,29 +182,18 @@ class LFMCTransformer(nn.Module):
         s_aug = torch.cat([s, z_long], dim=-1)     # [B, D_static+long_out_dim]
         s_tok = self.static_proj(s_aug)            # [B, d]
         s_tok = s_tok.unsqueeze(1)                 # [B, 1, d]
-
-        # 3) FiLM-condition short seq with augmented static
+        
+        # 3) project short history
         x_tok = self.short_proj(short_history)     # [B, Ts, d]
-        #gamma, beta = self.film_cond(s_aug)        # [B, d], [B, d]
-        #gamma = 0.5 * torch.tanh(gamma)
-        #x_tok = (1 + gamma).unsqueeze(1) * x_tok + beta.unsqueeze(1)
 
-        # 4) pack [static_token | short_seq] and encode
+        # 4) concatenate long + static to short and encode
         x_seq = torch.cat([s_tok, x_tok], dim=1)   # [B, Ts+1, d]
-        #x_seq = self.pos_enc(x_seq)
         x_enc = self.encoder(x_seq)                # [B, Ts+1, d]
 
-        # 5) pool short tokens + fuse with static token
-        #h_met  = self.pooler(x_enc[:, 1:, :])      # [B, d]
-        #h_stat = x_enc[:, 0, :]                    # [B, d]
-        #h_allpooled = self.pooler(x_enc)
-        #h_add = h_met + h_stat          # [B, d]
-        #h_cat = torch.cat([h_met, h_stat], dim=-1)  # [B, 2d]
-        #print(x_seq.shape, x_enc.shape)
-        #print(h_met.shape, h_stat.shape, h_add.shape, h_cat.shape, h_allpooled.shape)
-        #sys.exit()
-        h = self.pooler(x_enc)                     # [B, d]
-
+        # 5) use the static+long token as the output representation that we pass to heads.
+        #    this is basically saying that we want the static+long information to be updated
+        #    via the short history information
+        h = x_enc[:, 0, :]                         # [B, d]
 
         # 6) heads
         mu_i, logv_i = self.head_insitu(h)
