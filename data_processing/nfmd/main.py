@@ -13,9 +13,17 @@ def main():
         '/scratch/users/trobinet/long_lfmc/trent_datasets/nfmd/'
         'Site_Metadata.csv'
     )
-    nlcd_raw_fname = (
+    #nlcd_raw_fname = (
+    #    '/scratch/users/trobinet/long_lfmc/trent_datasets/nlcd/'
+    #    'nlcd_2003_2023.zarr'
+    #)
+    nlcd_fname = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/nlcd/'
-        'nlcd_2003_2023.zarr'
+        'nlcd_target_grid_2003_2023.zarr'
+    )
+    species_to_landcover_name = (
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/nfmd/'
+        'species_to_landcover_mapping.csv'
     )
     start = datetime.datetime(2003, 1, 1)
     end = datetime.datetime(2023, 12, 31)
@@ -33,7 +41,8 @@ def main():
     process_nfmd.process(
         orig_csv_fname,
         nfmd_loc_fname,
-        nlcd_raw_fname,
+        nlcd_fname,
+        species_to_landcover_name,
         start,
         end,
         bound_box,

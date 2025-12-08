@@ -12,7 +12,7 @@ input_data_dir="/scratch/users/trobinet/long_lfmc/\
 trent_datasets/lfmc_model/data/inputs_sarmultitask_vhonly"
 
 save_root="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/outputs/sarmultitask_vhonly_gradnorm"
+trent_datasets/lfmc_model/data/outputs/sarmultitask_vhonly_gradnorm_nologv"
 
 ########################
 # Job throttling config
@@ -48,7 +48,7 @@ wait_for_slot() {
     fi
     echo "Have ${n} jobs; waiting for a slot..." >&2
     # for sleep between 25 and 40 seconds (only running one job array)
-    sleep $(( 25 + RANDOM % 16 ))
+    #sleep $(( 25 + RANDOM % 16 ))
     # for sleep between 1 and 5 minutes
     # (if running multiple job arrays and need to ensure things are spread out)
     sleep $(( 60 + RANDOM % 241 ))
@@ -145,12 +145,12 @@ lnl${long_num_layers}"
                   --long_out_dim "${long_out_dim}" \
                   --num_tasks "${num_tasks}" \
                   --task_weight_type 'gradnorm' \
-                  --manual_task_weights 10.0 1.0
+                  --manual_task_weights 1.0 1.0
 
                 exp_idx=$((exp_idx + 1))
 
                 # for sleep between 25 and 40 seconds (only running one job array)
-                sleep $(( 25 + RANDOM % 16 ))
+                #sleep $(( 25 + RANDOM % 16 ))
                 # for sleep between 1 and 5 minutes
                 # (if running multiple job arrays and need to ensure things are spread out)
                 sleep $(( 60 + RANDOM % 241 ))

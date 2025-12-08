@@ -19,6 +19,16 @@ class GaussianHead(nn.Module):
         logv = torch.clamp(logv, -10, 10)
         return mu, logv
 
+import torch.nn as nn
+class LinearHead(nn.Module):
+    def __init__(self, d_in, d_out):
+        super().__init__()
+        self.fc = nn.Linear(d_in, d_out)
+
+    def forward(self, x):
+        return self.fc(x)
+
+
 # ---------------- new: LongEncoder branch (adds out_dim) --------------------
 
 class LongEncoder(nn.Module):
@@ -165,9 +175,13 @@ class LFMCTransformer(nn.Module):
         #    num_queries=num_queries, dropout=dropout
         #)
 
-        self.head_insitu = GaussianHead(d_model, dropout)
-        self.head_vv     = GaussianHead(d_model, dropout)
-        self.head_vh     = GaussianHead(d_model, dropout)
+        #self.head_insitu = GaussianHead(d_model, dropout)
+        #self.head_vv     = GaussianHead(d_model, dropout)
+        #self.head_vh     = GaussianHead(d_model, dropout)
+
+        self.head_insitu = LinearHead(d_model, 1)
+        self.head_vv     = LinearHead(d_model, 1)
+        self.head_vh     = LinearHead(d_model, 1)
 
     def forward(self,
                 short_history,      # [B, Ts, Din_short]
@@ -196,9 +210,15 @@ class LFMCTransformer(nn.Module):
         h = x_enc[:, 0, :]                         # [B, d]
 
         # 6) heads
-        mu_i, logv_i = self.head_insitu(h)
-        mu_vv, logv_vv = self.head_vv(h)
-        mu_vh, logv_vh = self.head_vh(h)
+        #mu_i, logv_i = self.head_insitu(h)
+        #mu_vv, logv_vv = self.head_vv(h)
+        #mu_vh, logv_vh = self.head_vh(h)
+        mu_i = self.head_insitu(h).squeeze(-1)
+        mu_vv = self.head_vv(h).squeeze(-1)
+        mu_vh = self.head_vh(h).squeeze(-1)
+        logv_i = torch.zeros_like(mu_i)
+        logv_vv = torch.zeros_like(mu_vv)
+        logv_vh = torch.zeros_like(mu_vh)
 
         return {
             "mu_insitu": mu_i,

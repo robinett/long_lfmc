@@ -14,7 +14,6 @@ sys.path.append(os.path.join(project_root,'lfmc_model','scripts','training'))
 from transformer_multitask_longclimate import LFMCTransformer
 from train_multitarget_longweather_vvvh import load_data, GaussianNLLLoss, run_model
 
-
 def make_permuted_loader(
     base_loader,feature_idx,pos_in_loader=2
 ):
@@ -100,19 +99,17 @@ def permutation_importance(
         )
     return importance
 
-
-
 def main():
     # data settings
     data_dir = (
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_base'
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_sarstats_onlyandminimal'
     )
     # model settings
-    model_out_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/base'
-    dm = 32
-    nh = 1
-    nl = 2
-    df = 64
+    model_out_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarstats_onlyandminimal'
+    dm = 64
+    nh = 2
+    nl = 3
+    df = 128
     do = 0.15
     bs = 128
     lr = 1e-4
@@ -121,11 +118,11 @@ def main():
     iobs = 33806
     vvobs = 0
     vhobs = 0
-    dmlong = 128
-    nhlong = 4
-    nllong = 4
-    dflong = 256
-    outlong = 32
+    dmlong = 256
+    nhlong = 8
+    nllong = 5
+    dflong = 512
+    outlong = 64
     model_name = (
         f'transformer_dm{dm}_nh{nh}_nl{nl}_df{df}_do{do}'
         f'_bs{bs}_lr{lr}_warmup{warmup}_wd{wd}'
@@ -134,7 +131,7 @@ def main():
         f'_dflong{dflong}_outlong{outlong}_basic'
     )
     # if the anaysis has already been run, just load it, print it, and go
-    load_csv = True
+    load_csv = False
     out_df_path = os.path.join(
         model_out_dir,
         "feature_importance.csv"

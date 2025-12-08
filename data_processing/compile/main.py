@@ -281,10 +281,10 @@ def main():
                 scratch_dir,
                 'nfmd/nfmd_processed.csv'
             ),
-            'vv':os.path.join(
-                scratch_dir,
-                'sar/sampled/vv_samples.csv'
-            ),
+            #'vv':os.path.join(
+            #    scratch_dir,
+            #    'sar/sampled/vv_samples.csv'
+            #),
             'vh':os.path.join(
                 scratch_dir,
                 'sar/sampled/vh_samples.csv'
@@ -296,7 +296,7 @@ def main():
         },
         'vars':{
             'nfmd':['lfmc'],
-            'vv':['VV'],
+            #'vv':['VV'],
             'vh':['VH'],
             #'vv_minus_vh':['vv_minus_vh']
         }
@@ -327,7 +327,7 @@ def main():
         171, 172, 173, 174, 175, 176, 177, 178, 179, 180
     ]
     inputs_outputs = (
-        'y_InsituVvVh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverfracLandcoverchange_Z_Nlcdclass_180d'
+        'y_InsituVh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverfracLandcoverchange_Z_Nlcdclass_180d'
     )
     out_dir = os.path.join(
         scratch_dir,

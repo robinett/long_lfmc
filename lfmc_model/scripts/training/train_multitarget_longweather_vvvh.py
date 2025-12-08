@@ -489,6 +489,54 @@ def mask_location_data_fast(
         remaining_short_data, remaining_long_data, remaining_static_data, remaining_y, remaining_source, remaining_info, remaining_stratifier
     )
 
+class MaskedMSELoss(nn.Module):
+    def __init__(self, reduction: str = "mean"):
+        """
+        MSE loss with masking and finite-value filtering.
+
+        Args:
+            reduction: 'mean' | 'sum' | 'none'
+        """
+        super().__init__()
+        if reduction not in ("mean", "sum", "none"):
+            raise ValueError(f"Invalid reduction: {reduction}")
+        self.reduction = reduction
+
+    def forward(self, pred, target, mask=None):
+        """
+        Args:
+            pred:   (...,) predicted mean
+            target: (...,) ground truth
+            mask:   optional boolean mask for valid entries
+                    (same shape as pred/target) or broadcastable
+        """
+        # start with finite target mask
+        valid = torch.isfinite(target)
+
+        if mask is not None:
+            # allow mask to be float/bool; convert to bool
+            # (e.g., 1/0 or True/False)
+            if mask.dtype != torch.bool:
+                mask = mask != 0
+            valid = valid & mask
+
+        # filter
+        pred = pred[valid]
+        target = target[valid]
+
+        if target.numel() == 0:
+            # no valid targets: return scalar 0 with grad
+            return pred.new_tensor(0.0, requires_grad=True)
+
+        mse = (pred - target) ** 2
+
+        if self.reduction == "mean":
+            return mse.mean()
+        elif self.reduction == "sum":
+            return mse.sum()
+        else:  # 'none'
+            return mse
+
 class GaussianNLLLoss(nn.Module):
     def __init__(self, reduction: str = "mean", eps: float = 1e-6):
         """
@@ -843,9 +891,12 @@ def run_model(
         # task weights from gradnorm
         #task_weights = model.task_weights
         if loss_fn is not None:
-            loss_i = loss_fn(mu_i_b, logv_i_b, Y_b, mask=m_i)
-            loss_vv = loss_fn(mu_vv_b, logv_vv_b, Y_b, mask=m_vv)
-            loss_vh = loss_fn(mu_vh_b, logv_vh_b, Y_b, mask=m_vh)
+            #loss_i = loss_fn(mu_i_b, logv_i_b, Y_b, mask=m_i)
+            #loss_vv = loss_fn(mu_vv_b, logv_vv_b, Y_b, mask=m_vv)
+            #loss_vh = loss_fn(mu_vh_b, logv_vh_b, Y_b, mask=m_vh)
+            loss_i = loss_fn(mu_i_b,Y_b,mask=m_i)
+            loss_vv = loss_fn(mu_vv_b,Y_b,mask=m_vv)
+            loss_vh = loss_fn(mu_vh_b,Y_b,mask=m_vh)
             n_i = int(m_i.sum().item())
             n_vv = int(m_vv.sum().item())
             n_vh = int(m_vh.sum().item())
@@ -1263,8 +1314,9 @@ def train_fold_k(
         pin_memory=True
     )
     # set up the loss functions
-    #criterion = nn.MSELoss()
-    criterion = GaussianNLLLoss(reduction="mean")
+    #criterion = nn.MSELoss(reduction="mean")
+    #criterion = GaussianNLLLoss(reduction="mean")
+    criterion = MaskedMSELoss(reduction="mean")
     # make sure that we have the warmup end lr
     warmup_end_lr = optimizer.param_groups[0]['lr']
     # set up the things that we need to track

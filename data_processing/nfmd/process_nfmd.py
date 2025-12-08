@@ -4,6 +4,16 @@ import numpy as np
 import copy
 import xarray as xr
 from pyproj import Transformer
+import re
+import os
+
+def classify_fast(name,rules):
+    name_l = name.lower()
+    for lc, pats in rules.items():
+        for p in pats:
+            if re.search(p, name_l):
+                return lc
+    return 'no_match'
 
 def get_circle_mask(ds, lat, lon, radius_m=400, transformer=None):
     """
@@ -28,7 +38,8 @@ def get_circle_mask(ds, lat, lon, radius_m=400, transformer=None):
 def process(
     orig_fname,
     nfmd_loc_fname,
-    nlcd_raw_fname,
+    nlcd_fname,
+    species_to_landcover_name,
     start,
     end,
     bound_box,
@@ -51,44 +62,156 @@ def process(
     orig['date'] = pd.to_datetime(orig['date'])
     # we don't want dead fuel moisture. Remove this.
     orig = orig[orig['category'] != 'Dead']
+    #print('fuel type')
+    #print(len(orig['fuel_type'].unique()))
+    #print('category')
+    #print(len(orig['category'].unique()))
+    #print('sub_category')
+    #print(orig['sub_category'].unique())
+    #sys.exit()
+    # if species to landcover doensn't exist, create it
+    if not os.path.exists(species_to_landcover_name):
+        rules = {
+            "evergreen_forest": [
+                r"pine", r"fir", r"spruce", r"hemlock", r"juniper",
+                r"cedar", r"lodgepole", r"pinyon"
+            ],
+            "deciduous_forest": [
+                r"oak", r"maple", r"aspen", r"birch", r"cottonwood",
+                r"willow", r"ash", r"cherry"
+            ],
+            "shrub": [
+                r"sage", r"manzanita", r"rabbitbrush",
+                r"mesquite", r"sumac", r"ceanothus", r"brittle", r"horsebrush"
+            ],
+            "grass": [
+                r"grass", r"grama", r"brome", r"sedge",
+                r"reed", r"pinegrass", r"wildrye", r"squirreltail",
+            ],
+        }
+        species_list = orig['fuel_type'].unique()
+        # standarize
+        draft_map = {
+            species: classify_fast(species, rules)
+            for species in species_list
+        }
+        df_map = pd.DataFrame({
+            'species': list(draft_map.keys()),
+            'landcover': list(draft_map.values())
+        })
+        df_map.to_csv(species_to_landcover_name, index=False)
+        print('Created species to landcover mapping at', species_to_landcover_name)
+        print('Go check it! Exiting.')
+        sys.exit()
+    species_to_landcover = pd.read_csv(species_to_landcover_name)
+    # check if there is still any no_match
+    no_match_species = species_to_landcover[
+        species_to_landcover['landcover'] == 'no_match'
+    ]['species'].values
+    if len(no_match_species) > 0:
+        print('The following species have no landcover match:')
+        for s in no_match_species:
+            print('-', s)
+        print('Please update the species to landcover mapping file at:')
+        print(species_to_landcover_name)
+        print('Exiting.')
+        sys.exit()
+    # add this mapping to orig
+    species_to_landcover_dict = {
+        row['species']: row['landcover']
+        for _, row in species_to_landcover.iterrows()
+    }
+    orig['landcover'] = orig['fuel_type'].map(species_to_landcover_dict)
     loc_data = pd.read_csv(nfmd_loc_fname)
-    loc_data = loc_data.set_index('Site Name')
+    loc_data = loc_data.set_index('Site ID')
     loc_data_idx = sorted(np.array(loc_data.index))
     cols = list(orig.columns)
     cols.append('latitude')
     cols.append('longitude')
     # load up the land cover database so that we can check the surrounding land cover
-    nlcd_full_raw = xr.open_zarr(nlcd_raw_fname)
-    tfm = Transformer.from_crs("EPSG:4326",nlcd_full_raw.rio.crs,always_xy=True)
+    nlcd = xr.open_zarr(nlcd_fname)
+    tfm = Transformer.from_crs("EPSG:4326",nlcd.rio.crs,always_xy=True)
+    tfm_back = Transformer.from_crs(nlcd.rio.crs,"EPSG:4326",always_xy=True)
+    # get rid of any measurements outside the bounds of our target grid
+    for i,row in loc_data.iterrows():
+        this_lat = row['Latitude']
+        this_lon = row['Longitude']
+        this_x,this_y = tfm.transform(this_lon,this_lat)
+        if (
+            this_x < nlcd['x'].min().values or
+            this_x > nlcd['x'].max().values or
+            this_y < nlcd['y'].min().values or
+            this_y > nlcd['y'].max().values
+        ):
+            # remove all entries from orig with this site id
+            orig = orig[orig['site_id'] != i]
     # for each site, go through and eliminate all times outside of relevant
     # time period
     # then check if there are multiple species. if multiple species, check if
     # the species have pearson's r > 0.8. If so, average them at eahc time
     # point. otherwise rid.
     # get the unique site names
-    site_names = orig['site_name'].unique()
+    # instead of using site names, we need to get all lat/lon pairs that are in
+    # common pixels, using the grid from the nlcd data
+    site_ids = orig['site_id'].unique()
+    site_coord_indices = []
+    grid_xs = nlcd['x'].values
+    grid_ys = nlcd['y'].values
+    for s,site in enumerate(site_ids):
+        site_data = orig[orig['site_id'] == site]
+        this_lat = np.array(np.unique(loc_data.loc[site]['Latitude']))
+        this_lon = np.array(np.unique(loc_data.loc[site]['Longitude']))
+        # make sure that the site has only one lat/lon
+        if type(this_lat) == np.ndarray and len(this_lat) != 1:
+            print('Site has multiple latitudes:', site)
+            sys.exit()
+        if type(this_lon) == np.ndarray and len(this_lon) != 1:
+            print('Site has multiple longitudes:', site)
+            sys.exit()
+        x,y = tfm.transform(this_lon,this_lat)
+        # get the corresponding indexes in the nlcd data
+        this_x = nlcd['x'].sel(x=x, method='nearest')
+        this_y = nlcd['y'].sel(y=y, method='nearest')
+        this_x_idx = int(np.where(grid_xs == this_x.values)[0][0])
+        this_y_idx = int(np.where(grid_ys == this_y.values)[0][0])
+        site_coord_indices.append((this_x_idx, this_y_idx))
+    # group sites by their coordinate indices
+    latlon_to_sites = {}
+    for i,idxs in enumerate(site_coord_indices):
+        this_x = grid_xs[idxs[0]]
+        this_y = grid_ys[idxs[1]]
+        this_lat, this_lon = tfm_back.transform(this_x, this_y)
+        if f'{this_lat}_{this_lon}' not in latlon_to_sites:
+            latlon_to_sites[f'{this_lat}_{this_lon}'] = []
+        latlon_to_sites[f'{this_lat}_{this_lon}'].append(site_ids[i])
+    for latlon, sites in latlon_to_sites.items():
+        if len(sites) > 1:
+            print(f'Lat/Lon {latlon} has multiple sites:')
+            for s in sites:
+                print('-', s)
+    #site_names = orig['site_name'].unique()
     final_created = False
     total_samples_removed = 0
-    for s,site in enumerate(site_names):
-        print(f'Processing site {s+1}/{len(site_names)}: {site}')
+    for l,latlon in enumerate(latlon_to_sites.keys()):
+        this_lat = float(latlon.split('_')[0])
+        this_lon = float(latlon.split('_')[1])
+        sites = latlon_to_sites[latlon]
+        #if orig[orig['site_id'] == site]['site_name'].values[0] != 'Red Canyon':
+        #    continue
         # get the data for this site
-        site_data = orig[orig['site_name'] == site]
+        site_data = orig[orig['site_id'].isin(sites)]
+        #site_name = site_data['site_name'].values[0]
+        print(f'Processing pixel {l+1}/{len(latlon_to_sites)}: {latlon}')
         # get the coordinates for this site
-        this_lat = loc_data.loc[site]['Latitude']
-        this_lon = loc_data.loc[site]['Longitude']
-        x,y = tfm.transform(this_lon,this_lat)
-        # make sure that we only got one lat and lon
-        if isinstance(this_lat, pd.Series):
-            this_lat = this_lat.iloc[0]
-            this_lon = this_lon.iloc[0]
-        # check if the coordinates are in the bounding box
-        if (
-            this_lat < bound_box[1] or
-            this_lat > bound_box[3] or
-            this_lon < bound_box[0] or
-            this_lon > bound_box[2]
-        ):
-            continue
+        x,y = tfm.transform(this_lat,this_lon)
+        ## check if the coordinates are in the bounding box
+        #if (
+        #    this_lat < bound_box[1] or
+        #    this_lat > bound_box[3] or
+        #    this_lon < bound_box[0] or
+        #    this_lon > bound_box[2]
+        #):
+        #    continue
         # eliminate data outside of relevant time period
         site_data = site_data[
             (
@@ -143,23 +266,18 @@ def process(
         ]
         for year in years:
             # get the land cover for this year
-            nlcd_full_raw_year = nlcd_full_raw.sel(time=str(year))
-            # mask pixels within 400m of the site
-            circle,sub = get_circle_mask(
-                nlcd_full_raw_year,this_lat,this_lon,radius_m=400,transformer=tfm
-            )
-            # get the values in that circle
-            vals = sub['nlcd'].where(circle,drop=True).values
-            # prevalence of unexpected codes
-            unexpected_codes = {
-                code for code,name in classes_dict.items()
-                if name in unexpected_classes
-            }
-            frac_unexpected = (
-                np.isin(vals, list(unexpected_codes)).mean()
-                if vals.size > 0 else 0.0
-            )
-            if frac_unexpected >= 0.25:
+            nlcd_year = nlcd.sel(
+                x=x, y=y, method='nearest'
+            ).sel(year=str(year))
+            # get the prevalence of unexpected classes
+            total_unexpected_perc = 0.0
+            for c,cla in enumerate(classes):
+                if cla not in unexpected_classes:
+                    continue
+                this_unexpected_perc = nlcd_year[cla].values[0]
+                total_unexpected_perc += this_unexpected_perc
+            if total_unexpected_perc >= 0.25:
+                print(f'Removing year {year} due to unexpected land cover presence: {total_unexpected_perc:.2f}')
                 samples_before = site_data.shape[0]
                 site_data = site_data[site_data['date'].dt.year != year]
                 samples_after = site_data.shape[0]
@@ -172,19 +290,36 @@ def process(
         species_names = site_data['fuel_type'].unique()
         # if there is only one species, just keep it
         if len(species_names) == 1:
-            #print('one species')
+            # if there are dates with multiple entries, take the average for lfmc
+            site_data = site_data.groupby(['date'],as_index=False).agg({
+                'sample_id':'first',
+                'site_id':'first',
+                'category':'first',
+                'sub_category':'first',
+                'method':'first',
+                'sample_status':'first',
+                'site_name':'first',
+                'fuel_type':'first',
+                'lfmc':'mean',
+                'landcover':'first'
+            })
             num_rows = site_data.shape[0]
             lats = np.full(num_rows, this_lat)
             lons = np.full(num_rows, this_lon)
             site_data['latitude'] = lats
             site_data['longitude'] = lons
+            # confirm there are no duplicate date entries
+            date_counts = site_data['date'].value_counts()
+            duplicate_dates = date_counts[date_counts > 1]
+            if duplicate_dates.shape[0] > 0:
+                print(site_data)
+                raise ValueError('Still found duplicate date entries after consolidating species')
             if not final_created:
                 final = copy.deepcopy(site_data)
                 final_created = True
             else:
                 final = pd.concat([final, site_data])
         else:
-            #print('multiple species')
             site_data = site_data.sort_values(by='date')
             pivot_df = site_data.pivot_table(
                 index='date',columns='fuel_type',values='lfmc'
@@ -205,6 +340,22 @@ def process(
                 num_rows = avg_lfmc.shape[0]
                 lats = np.full(num_rows, this_lat)
                 lons = np.full(num_rows, this_lon)
+                # check if the landcover si the same; if not, add 'mixed_sample'
+                landcover_list = [
+                    species_to_landcover_dict[sp]
+                    for sp in species_names
+                ]
+                landcover_set = set(landcover_list)
+                if len(landcover_set) == 1:
+                    landcover = landcover_list[0]
+                else:
+                    landcover = 'mixed_sample'
+                # make sure there are no duplicate date entries
+                date_counts = avg_lfmc.index.value_counts()
+                duplicate_dates = date_counts[date_counts > 1]
+                if duplicate_dates.shape[0] > 0:
+                    print(avg_lfmc)
+                    raise ValueError('Still found duplicate date entries after consolidating species')
                 # create a new dataframe with the averaged lfmc
                 avg_df = pd.DataFrame({
                     'sample_id':site_data['sample_id'].iloc[0],
@@ -218,7 +369,8 @@ def process(
                     'fuel_type':species_str,
                     'lfmc':avg_lfmc.values,
                     'latitude':lats,
-                    'longitude':lons
+                    'longitude':lons,
+                    'landcover':landcover
                 })
                 if not final_created:
                     final = copy.deepcopy(avg_df)
