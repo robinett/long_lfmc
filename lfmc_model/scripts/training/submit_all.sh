@@ -9,10 +9,10 @@ set -euo pipefail
 ########################
 
 input_data_dir="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/inputs_sarmultitask_vhonly"
+trent_datasets/lfmc_model/data/inputs/sarmultitask_vh"
 
 save_root="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/outputs/sarmultitask_vhonly_gradnorm_nologv"
+trent_datasets/lfmc_model/data/outputs/sarmultitask_pixelsites"
 
 ########################
 # Job throttling config

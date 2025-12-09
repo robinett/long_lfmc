@@ -930,11 +930,11 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     # fill in follwing necessary information for producing the correct dataset
-    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs_sarstats_onlyandminimal'
+    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/sarmultitask_vh'
     os.makedirs(save_dir, exist_ok=True)
     csv_names = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/compiled/'
-        'y_InsituVvVh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverfracLandcoverchange_Z_Nlcdclass_180d/'
+        'y_InsituVh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverfracLandcoverchange_Z_Nlcdclass_180d/'
         'compiled_data_*.csv'
     )
     csv_names = sorted(glob.glob(csv_names))
@@ -948,45 +948,45 @@ if __name__ == "__main__":
         'sand',
         'latitude',
         'longitude',
-        #'climate_zone_1',
-        #'climate_zone_2','climate_zone_3',
-        #'climate_zone_4','climate_zone_5',
-        #'climate_zone_6','climate_zone_7',
-        #'climate_zone_8','climate_zone_9',
-        #'climate_zone_10','climate_zone_11',
-        #'climate_zone_12','climate_zone_13',
-        #'climate_zone_14','climate_zone_15',
-        #'climate_zone_16','climate_zone_17',
-        #'climate_zone_18','climate_zone_19',
-        #'climate_zone_20','climate_zone_21',
-        #'climate_zone_22','climate_zone_23',
-        #'climate_zone_24','climate_zone_25',
-        #'climate_zone_26','climate_zone_27',
-        #'climate_zone_28','climate_zone_29',
-        #'barren','crops','deciduous_forest',
-        #'developed','evergreen_forest',
-        #'grass','mixed_forest','other',
-        #'shrub','water','wetlands',
+        'climate_zone_1',
+        'climate_zone_2','climate_zone_3',
+        'climate_zone_4','climate_zone_5',
+        'climate_zone_6','climate_zone_7',
+        'climate_zone_8','climate_zone_9',
+        'climate_zone_10','climate_zone_11',
+        'climate_zone_12','climate_zone_13',
+        'climate_zone_14','climate_zone_15',
+        'climate_zone_16','climate_zone_17',
+        'climate_zone_18','climate_zone_19',
+        'climate_zone_20','climate_zone_21',
+        'climate_zone_22','climate_zone_23',
+        'climate_zone_24','climate_zone_25',
+        'climate_zone_26','climate_zone_27',
+        'climate_zone_28','climate_zone_29',
+        'barren','crops','deciduous_forest',
+        'developed','evergreen_forest',
+        'grass','mixed_forest','other',
+        'shrub','water','wetlands',
         #'sar_vh_mean',
         #'sar_vh_std',
         #'sar_vh_min',
         #'sar_vh_max',
-        'vh_skewness',
+        #'vh_skewness',
         #'vh_kurtosis',
-        'vh_autocorr1',
+        #'vh_autocorr1',
         #'vh_autocorr2',
-        'sar_vh_jan_mean',
-        'sar_vh_feb_mean',
-        'sar_vh_mar_mean',
-        'sar_vh_apr_mean',
-        'sar_vh_may_mean',
-        'sar_vh_jun_mean',
-        'sar_vh_jul_mean',
-        'sar_vh_aug_mean',
-        'sar_vh_sep_mean',
-        'sar_vh_oct_mean',
-        'sar_vh_nov_mean',
-        'sar_vh_dec_mean',
+        #'sar_vh_jan_mean',
+        #'sar_vh_feb_mean',
+        #'sar_vh_mar_mean',
+        #'sar_vh_apr_mean',
+        #'sar_vh_may_mean',
+        #'sar_vh_jun_mean',
+        #'sar_vh_jul_mean',
+        #'sar_vh_aug_mean',
+        #'sar_vh_sep_mean',
+        #'sar_vh_oct_mean',
+        #'sar_vh_nov_mean',
+        #'sar_vh_dec_mean',
         #'sar_vv_mean','sar_vh_mean',#'sar_vv_minus_vh_mean',
         #'sar_vv_std','sar_vh_std',#'sar_vv_minus_vh_std',
         #'sar_vv_min','sar_vh_min',#'sar_vv_minus_vh_min',
@@ -1007,7 +1007,7 @@ if __name__ == "__main__":
         #'vv_kurtosis','vh_kurtosis',#'vv_minus_vh_kurtosis',
         #'vv_autocorr1','vh_autocorr1',#'vv_minus_vh_autocorr1',
         #'vv_autocorr2','vh_autocorr2',#'vv_minus_vh_autocorr2',
-        'land_cover_change_flag'
+        #'land_cover_change_flag'
     ]
     short_features = [
         'Nadir_Reflectance_Band1_filled',
@@ -1024,10 +1024,10 @@ if __name__ == "__main__":
     stratifier = 'nlcd'
     include_lag = True
     #target_cols = ['lfmc']
-    #target_cols = ['lfmc','VH']
-    target_cols = ['lfmc','VV','VH']
-    num_rs_samples = 0
-    #num_rs_samples = 6500.0
+    target_cols = ['lfmc','VH']
+    #target_cols = ['lfmc','VV','VH']
+    #num_rs_samples = 0
+    num_rs_samples = 6500.0
     info_features = [
         'date',
         'latitude',

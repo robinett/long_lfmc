@@ -625,7 +625,7 @@ class EarlyStopping:
     def __init__(
         self,
         patience=5,
-        rmse_delta=0.001,
+        rmse_delta=0.1,
         pr_auc_delta=0.001,
         best_score_delta=0.0001
     ):

@@ -176,34 +176,34 @@ def process(
         this_y_idx = int(np.where(grid_ys == this_y.values)[0][0])
         site_coord_indices.append((this_x_idx, this_y_idx))
     # group sites by their coordinate indices
-    latlon_to_sites = {}
+    lonlat_to_sites = {}
     for i,idxs in enumerate(site_coord_indices):
         this_x = grid_xs[idxs[0]]
         this_y = grid_ys[idxs[1]]
-        this_lat, this_lon = tfm_back.transform(this_x, this_y)
-        if f'{this_lat}_{this_lon}' not in latlon_to_sites:
-            latlon_to_sites[f'{this_lat}_{this_lon}'] = []
-        latlon_to_sites[f'{this_lat}_{this_lon}'].append(site_ids[i])
-    for latlon, sites in latlon_to_sites.items():
+        this_lon, this_lat = tfm_back.transform(this_x, this_y)
+        if f'{this_lon}_{this_lat}' not in lonlat_to_sites:
+            lonlat_to_sites[f'{this_lon}_{this_lat}'] = []
+        lonlat_to_sites[f'{this_lon}_{this_lat}'].append(site_ids[i])
+    for lonlat, sites in lonlat_to_sites.items():
         if len(sites) > 1:
-            print(f'Lat/Lon {latlon} has multiple sites:')
+            print(f'Lon/Lat {lonlat} has multiple sites:')
             for s in sites:
                 print('-', s)
     #site_names = orig['site_name'].unique()
     final_created = False
     total_samples_removed = 0
-    for l,latlon in enumerate(latlon_to_sites.keys()):
-        this_lat = float(latlon.split('_')[0])
-        this_lon = float(latlon.split('_')[1])
-        sites = latlon_to_sites[latlon]
+    for l,lonlat in enumerate(lonlat_to_sites.keys()):
+        this_lon = float(lonlat.split('_')[0])
+        this_lat = float(lonlat.split('_')[1])
+        sites = lonlat_to_sites[lonlat]
         #if orig[orig['site_id'] == site]['site_name'].values[0] != 'Red Canyon':
         #    continue
         # get the data for this site
         site_data = orig[orig['site_id'].isin(sites)]
         #site_name = site_data['site_name'].values[0]
-        print(f'Processing pixel {l+1}/{len(latlon_to_sites)}: {latlon}')
+        print(f'Processing pixel {l+1}/{len(lonlat_to_sites)}: {lonlat}')
         # get the coordinates for this site
-        x,y = tfm.transform(this_lat,this_lon)
+        x,y = tfm.transform(this_lon,this_lat)
         ## check if the coordinates are in the bounding box
         #if (
         #    this_lat < bound_box[1] or
