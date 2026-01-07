@@ -17,13 +17,13 @@ from zarr_build_utils import (
 
 # ---------- CONFIG ----------
 ROOT = Path(
-    "/scratch/users/trobinet/long_lfmc/"
+    "/oak/stanford/groups/konings/trobinet/long_lfmc/"
     "trent_datasets/modis/modis_regridded_gapfilled/"
     "quality_1/interpolated"
 )
 
 OUT = Path(
-    "/scratch/users/trobinet/long_lfmc/trent_datasets/"
+    "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/"
     "modis/modis_regridded_gapfilled/quality_1/interpolated/"
     "modis_all_vars.zarr"
 )

@@ -27,7 +27,7 @@ warnings.filterwarnings(
 
 def main():
     # perform analysis across all models in a dir, since these are now batched out
-    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/base_nologv'
+    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarmultitask_pixelsites'
     load_only = False
     model_dirs = [
         os.path.join(base_dir, d)

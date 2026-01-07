@@ -35,7 +35,7 @@ def open_time_batch(
     import xarray as xr
     with xr.set_options(file_cache_maxsize=2):
         try:
-            ds = xr.open_mfdataset(
+            final_ds = xr.open_mfdataset(
                 files,
                 engine=engine,
                 combine=combine,        # <— use requested mode

@@ -8,6 +8,9 @@ import textwrap
 from typing import Sequence
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import os
+from typing import Sequence, Optional
+import textwrap
 
 def kde_plot(
     data, data_names, save_name, title=None,
@@ -94,88 +97,397 @@ def bar_plot(
     xlabel: str,
     ylabel: str,
     save_path: str,
+    label_with_n: bool = False,
+    sample_counts: Optional[Sequence[float]] = None,
+    subcategory_labels: Optional[Sequence[str]] = None,
 ):
+    """
+    Flexible bar plot: handles 1D and 2D values.
+
+    1D case:
+        categories: length N
+        values:     length N
+
+    2D case (grouped bar plot):
+        categories: length N (groups)
+        values:     shape (N, M)
+        subcategory_labels: length M
+    """
     categories = [str(c) for c in categories]
-    values = list(values)
+    values_arr = np.asarray(values, dtype=float)
 
-    n = len(categories)
-    max_label_len = max((len(c) for c in categories), default=0)
-    use_horizontal = (max_label_len > 25) or (n > 8)
-
-    def wrap_labels(labels, width):
-        return ["\n".join(textwrap.wrap(lbl, width=width, break_long_words=False))
-                if len(lbl) > width else lbl
-                for lbl in labels]
-
-    if use_horizontal:
-        # --- layout heuristics ---
-        wrap_width = max(20, min(42, 2 + int(0.7 * max_label_len)))
-        ylabels = wrap_labels(categories, wrap_width)
-        max_lines = max((lbl.count("\n") + 1 for lbl in ylabels), default=1)
-
-        # more height per bar to prevent overlap; extra width for long labels
-        height = max(4.5, 0.45 * n + 0.25 * max_lines + 1.0)
-        width  = max(10.0, min(24.0, 9.0 + 0.18 * max_label_len))
-        fig, ax = plt.subplots(figsize=(width, height), constrained_layout=False)
-
-        y_pos = np.arange(n)
-        bars = ax.barh(y_pos, values, color="skyblue")
-
-        # tick labels with padding so they don't collide with bars
-        ax.set_yticks(y_pos, ylabels)
-        ax.tick_params(axis="y", labelsize=9, pad=6)
-
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-
-        # pad x-limit so value annotations never clip
-        vmax = max(values) if values else 1.0
-        ax.set_xlim(0, vmax * 1.12 + (2 if vmax < 20 else 0))
-
-        # annotate using bar_label (handles barh nicely) with padding
-        ax.bar_label(bars, labels=[f"{v:g}" for v in values],
-                     padding=3, fontsize=8)
-
-        # add small outer margins + adjust to give left labels breathing room
-        ax.margins(y=0.02)
-        # left margin scales with wrapped label complexity
-        left_margin = min(0.55, 0.18 + 0.03 * max_lines + 0.002 * max_label_len)
-        fig.subplots_adjust(left=left_margin, right=0.98, top=0.98, bottom=0.10)
-
-        plt.savefig(save_path, bbox_inches="tight", dpi=300)
-        plt.close(fig)
-
+    # ---- Shape handling ----
+    if values_arr.ndim == 1:
+        n_cat = len(categories)
+        assert values_arr.shape[0] == n_cat
+        is_grouped = False
+    elif values_arr.ndim == 2:
+        n_cat, n_sub = values_arr.shape
+        assert len(categories) == n_cat
+        is_grouped = True
+        if subcategory_labels is None:
+            subcategory_labels = [f"sub{i}" for i in range(n_sub)]
+        else:
+            subcategory_labels = [str(s) for s in subcategory_labels]
+            assert len(subcategory_labels) == n_sub
     else:
+        raise ValueError("values must be 1D or 2D for bar_plot.")
+
+    # ---- sample_counts handling ----
+    if label_with_n and sample_counts is not None:
+        counts_arr = np.asarray(sample_counts, dtype=float)
+        if not is_grouped:
+            assert counts_arr.shape[0] == values_arr.shape[0]
+        else:
+            assert counts_arr.shape == values_arr.shape
+    else:
+        counts_arr = None
+
+    # ---- helpers ----
+    def wrap_labels(labels, width):
+        return [
+            "\n".join(
+                textwrap.wrap(lbl, width=width, break_long_words=False)
+            ) if len(lbl) > width else lbl
+            for lbl in labels
+        ]
+
+    def make_bar_label(v, cnt=None):
+        if not np.isfinite(v):
+            return ""
+        if label_with_n and cnt is not None:
+            return f"{v:g}\n(n={int(cnt)})"
+        return f"{v:g}"
+
+    # ==================================================
+    # 2D GROUPED BAR PLOT (always vertical)
+    # ==================================================
+    if is_grouped:
+        max_label_len = max((len(c) for c in categories), default=0)
         wrap_width = max(12, min(28, 2 + int(0.45 * max_label_len)))
         xlabels = wrap_labels(categories, wrap_width)
         max_lines = max((lbl.count("\n") + 1 for lbl in xlabels), default=1)
 
-        width  = max(8.5, 0.75 * n + 2.5)
+        width = max(8.5, 0.8 * n_cat + 0.7 * n_sub)
         height = max(5.0, 4.0 + 0.40 * max_lines)
 
-        fig, ax = plt.subplots(figsize=(width, height), constrained_layout=False)
-        x = np.arange(n)
-        bars = ax.bar(x, values, color="skyblue")
+        fig, ax = plt.subplots(figsize=(width, height),
+                               constrained_layout=False)
+
+        x = np.arange(n_cat)
+        bar_width = 0.8 / n_sub
+
+        all_vals_flat = values_arr[np.isfinite(values_arr)]
+        ymax = float(all_vals_flat.max()) if all_vals_flat.size > 0 else 1.0
+        ax.set_ylim(0, ymax * 1.10 + (0.5 if ymax < 10 else 0))
+
+        bars_by_sub = []
+        for j in range(n_sub):
+            offset = (j - (n_sub - 1) / 2.0) * bar_width
+            sub_vals = values_arr[:, j]
+            bars = ax.bar(
+                x + offset,
+                sub_vals,
+                bar_width,
+                label=subcategory_labels[j],
+            )
+            bars_by_sub.append(bars)
 
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_xticks(x, xlabels)
         ax.tick_params(axis="x", labelsize=9, pad=6)
 
-        # pad y-limit so labels above bars fit
-        ymax = max(values) if values else 1.0
-        ax.set_ylim(0, ymax * 1.10 + (0.5 if ymax < 10 else 0))
+        # ---- annotate each subgroup with bar_label (correct use) ----
+        for j in range(n_sub):
+            sub_vals = values_arr[:, j]
+            if counts_arr is not None:
+                sub_counts = counts_arr[:, j]
+            else:
+                sub_counts = [None] * n_cat
 
-        # value labels above bars with small padding
-        ax.bar_label(bars, labels=[f"{v:g}" for v in values],
-                     padding=2, fontsize=8)
+            labels = [
+                make_bar_label(v, cnt)
+                for v, cnt in zip(sub_vals, sub_counts)
+            ]
+            ax.bar_label(
+                bars_by_sub[j],
+                labels=labels,
+                padding=2,
+                fontsize=8,
+            )
 
-        # give bottom more room for wrapped ticks
+        ax.legend(title="", fontsize=8, frameon=False)
+
         bottom_margin = min(0.40, 0.16 + 0.05 * (max_lines - 1))
-        fig.subplots_adjust(left=0.10, right=0.98, top=0.98, bottom=bottom_margin)
+        fig.subplots_adjust(left=0.10, right=0.98,
+                            top=0.98, bottom=bottom_margin)
 
         plt.savefig(save_path, bbox_inches="tight", dpi=300)
         plt.close(fig)
+        return
+
+    # ==================================================
+    # 1D CASE (existing behavior)
+    # ==================================================
+    values_1d = values_arr.tolist()
+    n = len(categories)
+    max_label_len = max((len(c) for c in categories), default=0)
+    use_horizontal = (max_label_len > 25) or (n > 8)
+
+    # Horizontal
+    if use_horizontal:
+        wrap_width = max(20, min(42, 2 + int(0.7 * max_label_len)))
+        ylabels = wrap_labels(categories, wrap_width)
+        max_lines = max((lbl.count("\n") + 1 for lbl in ylabels), default=1)
+
+        height = max(4.5, 0.45 * n + 0.25 * max_lines + 1.0)
+        width = max(10.0, min(24.0, 9.0 + 0.18 * max_label_len))
+        fig, ax = plt.subplots(figsize=(width, height),
+                               constrained_layout=False)
+
+        y_pos = np.arange(n)
+        bars = ax.barh(y_pos, values_1d, color="skyblue")
+
+        ax.set_yticks(y_pos, ylabels)
+        ax.tick_params(axis="y", labelsize=9, pad=6)
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+
+        vmax = max(values_1d) if values_1d else 1.0
+        ax.set_xlim(0, vmax * 1.12 + (2 if vmax < 20 else 0))
+
+        if counts_arr is not None:
+            counts_1d = counts_arr
+        else:
+            counts_1d = [None] * n
+
+        labels = [
+            make_bar_label(v, cnt)
+            for v, cnt in zip(values_1d, counts_1d)
+        ]
+
+        ax.bar_label(bars, labels=labels, padding=3, fontsize=8)
+
+        ax.margins(y=0.02)
+        left_margin = min(0.55, 0.18 + 0.03 * max_lines + 0.002 * max_label_len)
+        fig.subplots_adjust(left=left_margin, right=0.98,
+                            top=0.98, bottom=0.10)
+
+        plt.savefig(save_path, bbox_inches="tight", dpi=300)
+        plt.close(fig)
+
+    # Vertical
+    else:
+        wrap_width = max(12, min(28, 2 + int(0.45 * max_label_len)))
+        xlabels = wrap_labels(categories, wrap_width)
+        max_lines = max((lbl.count("\n") + 1 for lbl in xlabels), default=1)
+
+        width = max(8.5, 0.75 * n + 2.5)
+        height = max(5.0, 4.0 + 0.40 * max_lines)
+
+        fig, ax = plt.subplots(figsize=(width, height),
+                               constrained_layout=False)
+        x = np.arange(n)
+        bars = ax.bar(x, values_1d, color="skyblue")
+
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_xticks(x, xlabels)
+        ax.tick_params(axis="x", labelsize=9, pad=6)
+
+        ymax = max(values_1d) if values_1d else 1.0
+        ax.set_ylim(0, ymax * 1.10 + (0.5 if ymax < 10 else 0))
+
+        if counts_arr is not None:
+            counts_1d = counts_arr
+        else:
+            counts_1d = [None] * n
+
+        labels = [
+            make_bar_label(v, cnt)
+            for v, cnt in zip(values_1d, counts_1d)
+        ]
+
+        ax.bar_label(bars, labels=labels, padding=2, fontsize=8)
+
+        bottom_margin = min(0.40, 0.16 + 0.05 * (max_lines - 1))
+        fig.subplots_adjust(left=0.10, right=0.98,
+                            top=0.98, bottom=bottom_margin)
+
+        plt.savefig(save_path, bbox_inches="tight", dpi=300)
+        plt.close(fig)
+
+#def bar_plot(
+#    categories: Sequence[str],
+#    values: Sequence[float],
+#    xlabel: str,
+#    ylabel: str,
+#    save_path: str,
+#    label_with_n: bool = False,
+#    sample_counts: Optional[Sequence[int]] = None,
+#):
+#    """
+#    If label_with_n is True and sample_counts is provided,
+#    each bar will be labeled like:
+#
+#        "<value>\n(n=XYZ)"
+#    """
+#    categories = [str(c) for c in categories]
+#    values = list(values)
+#
+#    if label_with_n and sample_counts is not None:
+#        sample_counts = [int(n) for n in sample_counts]
+#
+#    n = len(categories)
+#    max_label_len = max((len(c) for c in categories), default=0)
+#    use_horizontal = (max_label_len > 25) or (n > 8)
+#
+#    def wrap_labels(labels, width):
+#        return [
+#            "\n".join(
+#                textwrap.wrap(
+#                    lbl,
+#                    width=width,
+#                    break_long_words=False
+#                )
+#            ) if len(lbl) > width else lbl
+#            for lbl in labels
+#        ]
+#
+#    # --------------------------------------------------
+#    # Horizontal bars
+#    # --------------------------------------------------
+#    if use_horizontal:
+#        wrap_width = max(
+#            20,
+#            min(42, 2 + int(0.7 * max_label_len))
+#        )
+#        ylabels = wrap_labels(categories, wrap_width)
+#        max_lines = max(
+#            (lbl.count("\n") + 1 for lbl in ylabels),
+#            default=1
+#        )
+#
+#        height = max(
+#            4.5,
+#            0.45 * n + 0.25 * max_lines + 1.0
+#        )
+#        width = max(
+#            10.0,
+#            min(24.0, 9.0 + 0.18 * max_label_len)
+#        )
+#        fig, ax = plt.subplots(
+#            figsize=(width, height),
+#            constrained_layout=False
+#        )
+#
+#        y_pos = np.arange(n)
+#        bars = ax.barh(y_pos, values, color="skyblue")
+#
+#        ax.set_yticks(y_pos, ylabels)
+#        ax.tick_params(axis="y", labelsize=9, pad=6)
+#
+#        ax.set_xlabel(xlabel)
+#        ax.set_ylabel(ylabel)
+#
+#        vmax = max(values) if values else 1.0
+#        ax.set_xlim(0, vmax * 1.12 + (2 if vmax < 20 else 0))
+#
+#        # ---- labels on bars ----
+#        if label_with_n and sample_counts is not None:
+#            labels = [
+#                f"{v:g}\n(n={cnt})"
+#                for v, cnt in zip(values, sample_counts)
+#            ]
+#        else:
+#            labels = [f"{v:g}" for v in values]
+#
+#        ax.bar_label(
+#            bars,
+#            labels=labels,
+#            padding=3,
+#            fontsize=8
+#        )
+#
+#        ax.margins(y=0.02)
+#        left_margin = min(
+#            0.55,
+#            0.18 + 0.03 * max_lines + 0.002 * max_label_len
+#        )
+#        fig.subplots_adjust(
+#            left=left_margin,
+#            right=0.98,
+#            top=0.98,
+#            bottom=0.10
+#        )
+#
+#        plt.savefig(save_path, bbox_inches="tight", dpi=300)
+#        plt.close(fig)
+#
+#    # --------------------------------------------------
+#    # Vertical bars
+#    # --------------------------------------------------
+#    else:
+#        wrap_width = max(
+#            12,
+#            min(28, 2 + int(0.45 * max_label_len))
+#        )
+#        xlabels = wrap_labels(categories, wrap_width)
+#        max_lines = max(
+#            (lbl.count("\n") + 1 for lbl in xlabels),
+#            default=1
+#        )
+#
+#        width = max(8.5, 0.75 * n + 2.5)
+#        height = max(5.0, 4.0 + 0.40 * max_lines)
+#
+#        fig, ax = plt.subplots(
+#            figsize=(width, height),
+#            constrained_layout=False
+#        )
+#        x = np.arange(n)
+#        bars = ax.bar(x, values, color="skyblue")
+#
+#        ax.set_xlabel(xlabel)
+#        ax.set_ylabel(ylabel)
+#        ax.set_xticks(x, xlabels)
+#        ax.tick_params(axis="x", labelsize=9, pad=6)
+#
+#        ymax = max(values) if values else 1.0
+#        ax.set_ylim(0, ymax * 1.10 + (0.5 if ymax < 10 else 0))
+#
+#        # ---- labels on bars ----
+#        if label_with_n and sample_counts is not None:
+#            labels = [
+#                f"{v:g}\n(n={cnt})"
+#                for v, cnt in zip(values, sample_counts)
+#            ]
+#        else:
+#            labels = [f"{v:g}" for v in values]
+#
+#        ax.bar_label(
+#            bars,
+#            labels=labels,
+#            padding=2,
+#            fontsize=8
+#        )
+#
+#        bottom_margin = min(
+#            0.40,
+#            0.16 + 0.05 * (max_lines - 1)
+#        )
+#        fig.subplots_adjust(
+#            left=0.10,
+#            right=0.98,
+#            top=0.98,
+#            bottom=bottom_margin
+#        )
+#
+#        plt.savefig(save_path, bbox_inches="tight", dpi=300)
+#        plt.close(fig)
+
 
 from matplotlib.colors import TwoSlopeNorm, Normalize
 
@@ -485,39 +797,389 @@ def generic_scatter(
     rmse=None,
     r2=None,
     n=None,
-    corrclip=None
+    corrclip=None,
+    color_array=None,
+    cmap="viridis",
+    cbar_label="Color Value",
+    alpha=0.5,
+    s=20,
+    cbar_range=None,
+    fontsize=None,
 ):
-    # get rid of nans
+    # mask nans for x, y (and color_array if provided)
     mask = ~np.isnan(x) & ~np.isnan(y)
+    if color_array is not None:
+        mask = mask & ~np.isnan(color_array)
+
     x = x[mask]
     y = y[mask]
+    c = color_array[mask] if color_array is not None else None
+
     plt.figure(figsize=(6, 6))
-    plt.scatter(x, y, alpha=0.5)
-    plt.xlabel(xlabel if xlabel else 'X')
-    plt.ylabel(ylabel if ylabel else 'Y')
+    ax = plt.gca()
+
+    # scatter
+    sc = ax.scatter(
+        x, y,
+        alpha=alpha,
+        c=c,
+        cmap=cmap if color_array is not None else None,
+        s=s,
+        vmin=cbar_range[0] if cbar_range else None,
+        vmax=cbar_range[1] if cbar_range else None,
+    )
+
+    # colorbar
+    if color_array is not None:
+        cbar = plt.colorbar(sc)
+        cbar.set_label(cbar_label, fontsize=fontsize)
+
+        if fontsize is not None:
+            cbar.ax.tick_params(labelsize=fontsize)
+
+    # axis labels
+    ax.set_xlabel(xlabel if xlabel else "X", fontsize=fontsize)
+    ax.set_ylabel(ylabel if ylabel else "Y", fontsize=fontsize)
+
+    # axis tick font sizes
+    if fontsize is not None:
+        ax.tick_params(axis='both', labelsize=fontsize)
+
+    # x/y limits
     if xlim:
-        plt.xlim(xlim)
+        ax.set_xlim(xlim)
     if ylim:
-        plt.ylim(ylim)
-    # compute correlation and best fit line
+        ax.set_ylim(ylim)
+
+    # correlation region
     if corrclip:
-        mask_corr = (x >= corrclip[0]) & (x <= corrclip[1]) & (y >= corrclip[0]) & (y <= corrclip[1])
+        mask_corr = (
+            (x >= corrclip[0]) & (x <= corrclip[1]) &
+            (y >= corrclip[0]) & (y <= corrclip[1])
+        )
         x_corr = x[mask_corr]
         y_corr = y[mask_corr]
     else:
         x_corr = x
         y_corr = y
+
     corr_coef = np.corrcoef(x_corr, y_corr)[0, 1]
     m, b = np.polyfit(x_corr, y_corr, 1)
-    plt.plot(x_corr, m*x_corr + b, color='orange', label=f'Best Fit Line (r={corr_coef:.2f})')
-    plt.legend()
+
+    ax.plot(
+        x_corr,
+        m * x_corr + b,
+        color="orange",
+        label=f"Best Fit Line (r={corr_coef:.2f})",
+    )
+
+    # legend fontsize
+    #ax.legend(fontsize=fontsize)
+
+    # stats text
+    text_kwargs = dict(transform=ax.transAxes, va="top")
+    if fontsize is not None:
+        text_kwargs["fontsize"] = fontsize
+
     if mae is not None:
-        plt.text(0.05, 0.95, f'MAE: {mae:.3f}', transform=plt.gca().transAxes, verticalalignment='top')
+        ax.text(0.05, 0.95, f"MAE: {mae:.3f}", **text_kwargs)
     if rmse is not None:
-        plt.text(0.05, 0.90, f'RMSE: {rmse:.3f}', transform=plt.gca().transAxes, verticalalignment='top')
+        ax.text(0.05, 0.90, f"RMSE: {rmse:.3f}", **text_kwargs)
     if r2 is not None:
-        plt.text(0.05, 0.85, f'R²: {r2:.3f}', transform=plt.gca().transAxes, verticalalignment='top')
+        ax.text(0.05, 0.85, f"R²: {r2:.3f}", **text_kwargs)
     if n is not None:
-        plt.text(0.05, 0.80, f'N: {n}', transform=plt.gca().transAxes, verticalalignment='top')
-    plt.savefig(plot_path, bbox_inches='tight', dpi=300)
+        ax.text(0.05, 0.80, f"N: {n}", **text_kwargs)
+
+    plt.savefig(plot_path, bbox_inches="tight", dpi=300)
     plt.close()
+
+
+#def generic_scatter(
+#    x,
+#    y,
+#    plot_path,
+#    xlabel=None,
+#    ylabel=None,
+#    xlim=None,
+#    ylim=None,
+#    mae=None,
+#    rmse=None,
+#    r2=None,
+#    n=None,
+#    corrclip=None,
+#    color_array=None,
+#    cmap="viridis",
+#    cbar_label="Color Value",
+#    alpha=0.5,
+#    s=20,
+#    cbar_range=None,
+#    fontsize=None,
+#
+#):
+#    # mask nans for x, y (and color_array if provided)
+#    mask = ~np.isnan(x) & ~np.isnan(y)
+#    if color_array is not None:
+#        mask = mask & ~np.isnan(color_array)
+#
+#    x = x[mask]
+#    y = y[mask]
+#    c = color_array[mask] if color_array is not None else None
+#
+#    plt.figure(figsize=(6, 6))
+#
+#    # scatter with color if provided
+#    sc = plt.scatter(
+#        x, y, 
+#        alpha=alpha,
+#        c=c,
+#        cmap=cmap if color_array is not None else None,
+#        s=s,
+#        vmin=cbar_range[0] if cbar_range else None,
+#        vmax=cbar_range[1] if cbar_range else None,
+#    )
+#
+#    # add colorbar only if using color_array
+#    if color_array is not None:
+#        plt.colorbar(
+#            sc,
+#            label=cbar_label,
+#        )
+#
+#    plt.xlabel(xlabel if xlabel else 'X')
+#    plt.ylabel(ylabel if ylabel else 'Y')
+#
+#    if xlim:
+#        plt.xlim(xlim)
+#    if ylim:
+#        plt.ylim(ylim)
+#
+#    # compute correlation and best-fit line
+#    if corrclip:
+#        mask_corr = (
+#            (x >= corrclip[0]) & (x <= corrclip[1]) &
+#            (y >= corrclip[0]) & (y <= corrclip[1])
+#        )
+#        x_corr = x[mask_corr]
+#        y_corr = y[mask_corr]
+#    else:
+#        x_corr = x
+#        y_corr = y
+#
+#    corr_coef = np.corrcoef(x_corr, y_corr)[0, 1]
+#    m, b = np.polyfit(x_corr, y_corr, 1)
+#
+#    plt.plot(
+#        x_corr,
+#        m * x_corr + b,
+#        color='orange',
+#        label=f'Best Fit Line (r={corr_coef:.2f})'
+#    )
+#    plt.legend()
+#
+#    # text stats
+#    ax = plt.gca()
+#    if mae is not None:
+#        ax.text(0.05, 0.95, f'MAE: {mae:.3f}', transform=ax.transAxes, va='top')
+#    if rmse is not None:
+#        ax.text(0.05, 0.90, f'RMSE: {rmse:.3f}', transform=ax.transAxes, va='top')
+#    if r2 is not None:
+#        ax.text(0.05, 0.85, f'R²: {r2:.3f}', transform=ax.transAxes, va='top')
+#    if n is not None:
+#        ax.text(0.05, 0.80, f'N: {n}', transform=ax.transAxes, va='top')
+#
+#    plt.savefig(plot_path, bbox_inches='tight', dpi=300)
+#    plt.close()
+
+#def generic_scatter(
+#    x,
+#    y,
+#    plot_path,
+#    xlabel=None,
+#    ylabel=None,
+#    xlim=None,
+#    ylim=None,
+#    mae=None,
+#    rmse=None,
+#    r2=None,
+#    n=None,
+#    corrclip=None
+#):
+#    # get rid of nans
+#    mask = ~np.isnan(x) & ~np.isnan(y)
+#    x = x[mask]
+#    y = y[mask]
+#    plt.figure(figsize=(6, 6))
+#    plt.scatter(x, y, alpha=0.5)
+#    plt.xlabel(xlabel if xlabel else 'X')
+#    plt.ylabel(ylabel if ylabel else 'Y')
+#    if xlim:
+#        plt.xlim(xlim)
+#    if ylim:
+#        plt.ylim(ylim)
+#    # compute correlation and best fit line
+#    if corrclip:
+#        mask_corr = (x >= corrclip[0]) & (x <= corrclip[1]) & (y >= corrclip[0]) & (y <= corrclip[1])
+#        x_corr = x[mask_corr]
+#        y_corr = y[mask_corr]
+#    else:
+#        x_corr = x
+#        y_corr = y
+#    corr_coef = np.corrcoef(x_corr, y_corr)[0, 1]
+#    m, b = np.polyfit(x_corr, y_corr, 1)
+#    plt.plot(x_corr, m*x_corr + b, color='orange', label=f'Best Fit Line (r={corr_coef:.2f})')
+#    plt.legend()
+#    if mae is not None:
+#        plt.text(0.05, 0.95, f'MAE: {mae:.3f}', transform=plt.gca().transAxes, verticalalignment='top')
+#    if rmse is not None:
+#        plt.text(0.05, 0.90, f'RMSE: {rmse:.3f}', transform=plt.gca().transAxes, verticalalignment='top')
+#    if r2 is not None:
+#        plt.text(0.05, 0.85, f'R²: {r2:.3f}', transform=plt.gca().transAxes, verticalalignment='top')
+#    if n is not None:
+#        plt.text(0.05, 0.80, f'N: {n}', transform=plt.gca().transAxes, verticalalignment='top')
+#    plt.savefig(plot_path, bbox_inches='tight', dpi=300)
+#    plt.close()
+
+
+def heatmap(
+    data,
+    x_labels,
+    y_labels,
+    xlabel,
+    ylabel,
+    save_path,
+    cbar_label=None,
+    vmin=None,
+    vmax=None,
+    figsize=(8, 6),
+    cmap_name="viridis",
+):
+    """
+    Plot a 2D heatmap and save to disk.
+
+    This version guarantees that all categories appearing in
+    either x_labels or y_labels are shown on BOTH axes.
+    The matrix is expanded to a square matrix with the union
+    of labels on each axis, so the diagonal always represents
+    'same category vs same category'.
+
+    Parameters
+    ----------
+    data : 2D array-like (ny, nx)
+        Values to plot.
+    x_labels : sequence
+        Labels for the columns (x-axis, satellite LC).
+    y_labels : sequence
+        Labels for the rows (y-axis, measured LC).
+    xlabel : str
+        X-axis label.
+    ylabel : str
+        Y-axis label.
+    save_path : str
+        Where to save the figure (e.g. '...png').
+    cbar_label : str, optional
+        Label for the colorbar.
+    vmin, vmax : float, optional
+        Color scale limits.
+    figsize : tuple, optional
+        Figure size in inches.
+    """
+    # Ensure array
+    data = np.asarray(data, dtype=float)
+
+    # Normalize labels to strings + lists
+    x_labels = [str(l) for l in x_labels]
+    y_labels = [str(l) for l in y_labels]
+
+    # --------------------------------------------------
+    # Expand to union-of-labels square matrix
+    # --------------------------------------------------
+    # Keep original y order, then append any x-only labels
+    union_labels = list(y_labels)
+    for lbl in x_labels:
+        if lbl not in union_labels:
+            union_labels.append(lbl)
+
+    # If labels already match and matrix is square,
+    # we skip the expansion step.
+    need_expand = (
+        (set(x_labels) != set(y_labels)) or
+        (data.shape[0] != data.shape[1]) or
+        (len(union_labels) != len(x_labels)) or
+        (len(union_labels) != len(y_labels))
+    )
+
+    if need_expand:
+        n_union = len(union_labels)
+        # Start with all NaN (-> gray) for missing pairs
+        new_data = np.full((n_union, n_union), np.nan,
+                           dtype=float)
+
+        union_index = {lbl: i for i, lbl in
+                       enumerate(union_labels)}
+        y_index = {lbl: i for i, lbl in
+                   enumerate(y_labels)}
+        x_index = {lbl: i for i, lbl in
+                   enumerate(x_labels)}
+
+        # Map each existing (y, x) cell into the union grid
+        for y_lbl, yi_old in y_index.items():
+            for x_lbl, xi_old in x_index.items():
+                yi_new = union_index[y_lbl]
+                xi_new = union_index[x_lbl]
+                new_data[yi_new, xi_new] = data[yi_old,
+                                                xi_old]
+
+        data = new_data
+        x_labels = union_labels
+        y_labels = union_labels
+
+    # --------------------------------------------------
+    # Mask NaNs so they can be shown with a "bad" color
+    # --------------------------------------------------
+    data_masked = np.ma.masked_invalid(data)
+
+    #cmap = plt.get_cmap("viridis").copy()
+    cmap = plt.get_cmap(cmap_name).copy()
+    # Gray out missing comparisons
+    cmap.set_bad(color="lightgray")
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    im = ax.imshow(
+        data_masked,
+        aspect="auto",
+        interpolation="nearest",
+        origin="upper",
+        vmin=vmin,
+        vmax=vmax,
+        cmap=cmap,
+    )
+
+    # Tick positions
+    nx = len(x_labels)
+    ny = len(y_labels)
+    ax.set_xticks(np.arange(nx))
+    ax.set_yticks(np.arange(ny))
+
+    # Tick labels
+    ax.set_xticklabels(x_labels,
+                       rotation=45,
+                       ha="right")
+    ax.set_yticklabels(y_labels)
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+
+    # Colorbar
+    cbar = fig.colorbar(im, ax=ax)
+    if cbar_label is not None:
+        cbar.set_label(cbar_label)
+
+    fig.tight_layout()
+
+    # Ensure directory exists, then save
+    os.makedirs(os.path.dirname(save_path),
+                exist_ok=True)
+    fig.savefig(save_path, dpi=300)
+    plt.close(fig)
+

@@ -23,7 +23,7 @@ source /home/users/trobinet/uv_activations/activate_lfmc_process.sh
 cd ~/long_lfmc/data_processing/convert_to_zarr
 mkdir -p logs
 
-COORD_DIR="/scratch/users/trobinet/long_lfmc/daymet_queue_coord"
+COORD_DIR="/scratch/users/trobinet/long_lfmc/trent_datasets/misc/daymet_queue_coord"
 
 python3 -u daymet_to_zarr_worker.py \
   --coord-dir "${COORD_DIR}"

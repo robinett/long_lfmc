@@ -34,11 +34,116 @@ nlcd_dict = {
     95:'wetlands'
 }
 
+def analyze_landcover_of_sites(
+    sites,
+    landcover_df,
+    location_group_name
+):
+    # plot hte landcover distribution of these sites
+    landcover_dist_dict = {}
+    for key,name in nlcd_dict.items():
+        landcover_dist_dict[name] = 0.0
+    for r,row in sites.iterrows():
+        lat = float(row['latitude'])
+        lon = float(row['longitude'])
+        lat  = round(lat,5)
+        lon = round(lon,5)
+        # trim to 6 decimal places to avoid floating point issues
+        lat = round(lat,6)
+        site_mask = (
+            (round(landcover_df['lat'],5)==lat) &
+            (round(landcover_df['lon'],5)==lon)
+        )
+        if r == 0:
+            site_lc_df = landcover_df[site_mask].reset_index(drop=True)
+        else:
+            site_lc_df = pd.concat(
+                [site_lc_df, landcover_df[site_mask].reset_index(drop=True)],
+                ignore_index=True
+            )
+    # map of these sites
+    # get the unique site locations
+    unique_sites = sites[['latitude','longitude']].drop_duplicates().reset_index(drop=True)
+    plotting.map_points(
+        unique_sites['longitude'].values,
+        unique_sites['latitude'].values,
+        np.repeat(1.0, len(unique_sites)),
+        os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'site_locations_{location_group_name}.png'
+        ),
+    )
+    # mean lfmc of these sites
+    mean_lfmc_all = landcover_df['obs'].mean()
+    mean_lfmc_here = site_lc_df['obs'].mean()
+    print('For location group:', location_group_name)
+    print(f'Mean LFMC at all sites: {mean_lfmc_all}')
+    print(f'Mean LFMC at {location_group_name} sites: {mean_lfmc_here}')
+    # std of lfmc at these sites
+    std_lfmc_all = landcover_df['obs'].std()
+    std_lfmc_here = site_lc_df['obs'].std()
+    print(f'Std LFMC at all sites: {std_lfmc_all}')
+    print(f'Std LFMC at {location_group_name} sites: {std_lfmc_here}')
+    # number of measurements
+    num_measurements_all = len(landcover_df)
+    num_sites_all = len(landcover_df[['lat','lon']].drop_duplicates())
+    avg_measurements_all = num_measurements_all / num_sites_all
+    num_measurements_here = len(site_lc_df)
+    num_sites_here = len(site_lc_df[['lat','lon']].drop_duplicates())
+    avg_measurements_here = num_measurements_here / num_sites_here
+    print(f'Num measurements per site at all sites: {avg_measurements_all}')
+    print(f'Num measurements per site at {location_group_name} sites: {avg_measurements_here}')
+    # dominant satellite landcover of these sites
+    sat_lc_counts = site_lc_df['satellite_landcover'].value_counts(normalize=True)
+    plotting.bar_plot(
+        sat_lc_counts.index,
+        sat_lc_counts.values,
+        xlabel='Landcover Type',
+        ylabel='Proportion',
+        save_path=os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'dominant_satellite_landcover_{location_group_name}.png'
+        ),
+    )
+    # measured landcover of these sites
+    measured_lc_counts = site_lc_df['measured_landcover'].value_counts(normalize=True)
+    plotting.bar_plot(
+        measured_lc_counts.index,
+        measured_lc_counts.values,
+        xlabel='Landcover Type',
+        ylabel='Proportion',
+        save_path=os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'measured_landcover_{location_group_name}.png'
+        ),
+    )
+    # satellite heterogenieity of these sites
+    # kde of max landcover fraction satellite
+    plotting.kde_plot(
+        [site_lc_df['highest_lc_perc'].values],
+        'Max Satellite Land Cover Fraction',
+        os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'max_satellite_land_cover_fraction_{location_group_name}.png'
+        )
+    )
+    # representativeness of sampled land cover at these sites
+    # kde of measured landcover fraction at these sites
+    plotting.kde_plot(
+        [site_lc_df['measured_lc_perc'].values],
+        'Measured Land Cover Fraction',
+        os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'measured_land_cover_fraction_{location_group_name}.png'
+        )
+    )
+
 def get_landcover_df(
     model_dir,
     land_cover_single_ds,
     land_cover_frac_ds,
     nfmd_df,
+    site_lc_df_path
 ):
     Transformer = transformer.Transformer.from_crs(
         'epsg:4326',
@@ -53,12 +158,45 @@ def get_landcover_df(
     #     each obs
     #     the measured land cover
     #     the dominant land cover from satellite perspective
-    #        hetero if no land cover > 75%
+    #        hetero if no land cover > 66%
     #     #the fraction of the dominant land cover
     landcover_errors = {}
-    obs_num = 0
     # get all the landcover types that we have fractions for
     land_covers = list(land_cover_frac_ds.data_vars)
+    site_lc_dict = {}
+    final_vars = [
+        'lat',
+        'lon',
+        'date',
+        'obs',
+        'pred',
+        'measured_landcover',
+        'satellite_landcover',
+        'highest_lc_perc',
+        'measured_lc_perc'
+    ]
+    final_var_types = [
+        float,
+        float,
+        str,
+        float,
+        float,
+        str,
+        str,
+        float,
+        float
+    ]
+    # get the number of observations that we are going to have so that we can pre-allocate
+    num_obs = 0
+    for f,fold in enumerate(folds):
+        print(f'Counting observations in fold {f+1}/{len(folds)}')
+        test_info_path = os.path.join(model_dir, f'fold_{fold}', 'test_info.csv')
+        test_info = pd.read_csv(test_info_path)
+        test_info = test_info[test_info['source']=='nfmd'].reset_index(drop=True)
+        num_obs += len(test_info)
+    for var in final_vars:
+        site_lc_dict[var] = [np.nan for _ in range(num_obs)]
+    num_obs_filled = 0
     for f,fold in enumerate(folds):
         print(f'Evaluating fold {f+1}/{len(folds)}')
         test_info_path = os.path.join(model_dir, f'fold_{fold}', 'test_info.csv')
@@ -79,12 +217,11 @@ def get_landcover_df(
         test_info = test_info[test_info['source']=='nfmd'].reset_index(drop=True)
         # get unique lat/lon combinations
         # just take the first 50 of everything for testing
-        test_info = test_info.iloc[0:50]
-        test_true_insitu = test_true_insitu[0:50]
-        test_preds_insitu = test_preds_insitu[0:50]
-        
+        #test_info = test_info.iloc[0:50]
+        #test_true_insitu = test_true_insitu[0:50]
+        #test_preds_insitu = test_preds_insitu[0:50]
         unique_sites = test_info[['latitude','longitude']].drop_duplicates().values
-        site_lc = {}
+        site_lc_preload = {}
         for s,site in enumerate(unique_sites):
             print(f'Pre-loading land cover for site {s+1}/{len(unique_sites)}')
             lat = site[0]
@@ -93,14 +230,16 @@ def get_landcover_df(
                 lon,
                 lat
             )
-            this_site_lcs = land_cover_single_ds.sel(
+            this_site_lcs = land_cover_frac_ds.sel(
                 x=site_x,
                 y=site_y,
                 method='nearest'
             ).load()
-            site_lc[f'{lat}_{lon}'] = this_site_lcs
+            site_lc_preload[f'{lat}_{lon}'] = this_site_lcs
         # loop over each observation to get the relevant information
         for r,row in test_info.iterrows():
+            if r % 100 == 0:
+                print(f'Processing observation {r+1}/{len(test_info)}')
             # match to an observation from nfmc
             this_lat = row['latitude']
             this_lon = row['longitude']
@@ -111,88 +250,356 @@ def get_landcover_df(
                 (pd.to_datetime(nfmd_df['date'])==this_date)
             )
             this_nfmd_obs = nfmd_df[nfmd_mask]
-            print(this_nfmd_obs['latitude'].values)
-            print(this_nfmd_obs['longitude'].values)
-            print(this_nfmd_obs['date'].values)
-            print(this_nfmd_obs['lfmc'].values)
-            print(this_nfmd_obs['site_id'].values)
-            print(this_nfmd_obs['site_name'].values)
-            sys.exit() 
-        
-        
-        sys.exit()
-        # get the error at each site
-        for s,site in enumerate(unique_sites):
-            print(f'Analyzing site {s+1}/{len(unique_sites)}')
-            lat = site[0]
-            lon = site[1]
-            site_mask = (
-                (test_info_insitu['latitude']==lat) &
-                (test_info_insitu['longitude']==lon)
+            # make sure that we only have one observation
+            if len(this_nfmd_obs) != 1:
+                print('Warning: multiple or no NFMD observations found for site/date!')
+                print(f'Lat: {this_lat}, Lon: {this_lon}, Date: {this_date}, Num Obs: {len(this_nfmd_obs)}')
+                continue
+            this_obs = test_true_insitu[r]
+            this_pred = test_preds_insitu[r]
+            this_measured_landcover = this_nfmd_obs['landcover'].values[0]
+            this_sat_lcs = site_lc_preload[f'{this_lat}_{this_lon}'].sel(
+                year=pd.Timestamp(this_date.year,1,1)
             )
-            site_indices = test_info_insitu[site_mask].index.values
-            site_dates = pd.to_datetime(test_info_insitu[site_mask]['date'])
-            site_dates = site_dates.dt.year.astype(str) + '-01-01'
-            site_dates = pd.to_datetime(site_dates)
-            site_true = test_true_insitu[site_indices]
-            site_preds = test_preds_insitu[site_indices]
-            site_num_measurements = len(site_true)
-            site_x, site_y = Transformer.transform(
-                lon,
-                lat
+            highest_lc_perc = this_sat_lcs.to_array().max().values
+            if highest_lc_perc < 0.66:
+                this_sat_lc = 'heterogeneous'
+            else:
+                max_idx = this_sat_lcs.to_array().argmax().values
+                this_sat_lc = land_covers[max_idx]
+            try:
+                measured_lc_perc = this_sat_lcs[this_measured_landcover].values
+            except KeyError:
+                measured_lc_perc = 0.0
+            site_lc_dict['lat'][num_obs_filled] = this_lat
+            site_lc_dict['lon'][num_obs_filled] = this_lon
+            site_lc_dict['date'][num_obs_filled] = this_date
+            site_lc_dict['obs'][num_obs_filled] = this_obs
+            site_lc_dict['pred'][num_obs_filled] = this_pred
+            site_lc_dict['measured_landcover'][num_obs_filled] = this_measured_landcover
+            site_lc_dict['satellite_landcover'][num_obs_filled] = this_sat_lc
+            site_lc_dict['highest_lc_perc'][num_obs_filled] = highest_lc_perc
+            site_lc_dict['measured_lc_perc'][num_obs_filled] = measured_lc_perc
+            num_obs_filled += 1
+    fold_lc_df = pd.DataFrame.from_dict(site_lc_dict)
+    fold_lc_df = fold_lc_df.iloc[0:num_obs_filled].reset_index(drop=True)
+    # save out the land cover dataframe for later analysis
+    fold_lc_df.to_csv(site_lc_df_path, index=False)
+    return fold_lc_df
+
+def plot_landcover_analysis(
+    model_1_landcover_df,
+    model_2_landcover_df,
+    model_3_landcover_df,
+    model_1_gen_name,
+    model_2_gen_name,
+    model_3_gen_name
+):
+    # plot the land cover performance as reported by the sample
+    lc_types = model_1_landcover_df.measured_landcover.unique()
+    lc_rmse_dict = {}
+    lc_rmse_dfs = []
+    all_model_dfs = [
+        model_1_landcover_df,
+        model_2_landcover_df,
+        model_3_landcover_df
+    ]
+    all_model_names = [
+        model_1_gen_name,
+        model_2_gen_name,
+        model_3_gen_name
+    ]
+    for m,model in enumerate(all_model_dfs):
+        lc_rmse_dict[m+1] = {}
+        for lc in lc_types:
+            lc_mask = (model.measured_landcover == lc)
+            lc_obs = model.obs[lc_mask].values
+            lc_preds = model.pred[lc_mask].values
+            model_lc_rmse = np.sqrt(
+                np.mean(
+                    (lc_obs - lc_preds)**2
+                )
             )
-            this_site_lcs = land_cover_single_ds.sel(
-                x=site_x,
-                y=site_y,
-                method='nearest'
+            lc_r2 = r2_score(
+                lc_obs,
+                lc_preds
             )
-            this_site_lc_info = {}
-            for d,date in enumerate(site_dates):
-                if date.year in this_site_lc_info:
-                    this_class_name = this_site_lc_info[date.year]['class_name']
-                    this_frac_today_vals = this_site_lc_info[date.year]['frac_vals']
+            lc_rmse_dict[m+1][lc] = {
+                'rmse': model_lc_rmse,
+                'r2': lc_r2,
+                'num_samples': len(lc_obs)
+            }
+    plotting.bar_plot(
+        lc_types,
+        np.array([
+            [lc_rmse_dict[1][lc]['rmse'] for lc in lc_types],
+            [lc_rmse_dict[2][lc]['rmse'] for lc in lc_types],
+            [lc_rmse_dict[3][lc]['rmse'] for lc in lc_types]
+        ]).T,
+        'Land Cover Type',
+        'RMSE (%)',
+        os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'landcover_rmse_comparison_{model_1_gen_name}_vs_{model_2_gen_name}_vs_{model_3_gen_name}.png'
+        ),
+        label_with_n=True,
+        sample_counts=np.array([
+            [lc_rmse_dict[1][lc]['num_samples'] for lc in lc_types],
+            [lc_rmse_dict[2][lc]['num_samples'] for lc in lc_types],
+            [lc_rmse_dict[3][lc]['num_samples'] for lc in lc_types]
+        ]).T,
+        subcategory_labels=[model_1_gen_name, model_2_gen_name, model_3_gen_name]
+    )
+    # now plot a matrix of performance with landcover as satellite vs measured
+    sat_lc_types = model_1_landcover_df.satellite_landcover.unique()
+    performance_matrices = {}
+    for m,model in enumerate(all_model_dfs):
+        performance_matrix = np.zeros((len(lc_types), len(sat_lc_types)))
+        for i,measured_lc in enumerate(lc_types):
+            for j,sat_lc in enumerate(sat_lc_types):
+                lc_mask = (
+                    (model.measured_landcover == measured_lc) &
+                    (model.satellite_landcover == sat_lc)
+                )
+                lc_obs = model.obs[lc_mask].values
+                lc_preds = model.pred[lc_mask].values
+                if len(lc_obs) == 0:
+                    performance_matrix[i,j] = np.nan
                 else:
-                    this_class = int(this_site_lcs['nlcd'].sel(time=date).values)
-                    this_class_name = nlcd_dict.get(this_class, 'unknown')
-                    this_site_lc_info[date.year] = {}
-                    this_site_lc_info[date.year]['class_name'] = this_class_name
-                    this_frac = land_cover_frac_ds.sel(
-                        x=site_x,
-                        y=site_y,
-                        method='nearest'
+                    lc_rmse = np.sqrt(
+                        np.mean(
+                            (lc_obs - lc_preds)**2
+                        )
                     )
-                    this_frac_today = this_frac.sel(year=date)
-                    this_frac_today_vals = this_frac_today.to_array().values
-                    this_site_lc_info[date.year]['frac_vals'] = this_frac_today_vals
-                this_pred = site_preds[d]
-                this_true = site_true[d]
-                # get the maximum
-                max_frac_idx = np.argmax(this_frac_today_vals)
-                max_frac_lc = land_covers[max_frac_idx]
-                max_frac_percent = this_frac_today_vals[max_frac_idx]
-                # is the max the same land cover as @ the location?
-                same_class = (max_frac_lc == this_class_name)
-                if this_class_name not in landcover_errors:
-                    landcover_errors[this_class_name] = {
-                        'true_values': [],
-                        'predictions': [],
-                        'num_measurements': 0,
-                        'site_classes': [],
-                        'max_fraction_landcovers': [],
-                        'max_fraction_percents': [],
-                        'same_class_flags': []
-                    }
-                landcover_errors[this_class_name]['true_values'].append(this_true)
-                landcover_errors[this_class_name]['predictions'].append(this_pred)
-                landcover_errors[this_class_name]['num_measurements'] += 1
-                landcover_errors[this_class_name]['site_classes'].append(this_class_name)
-                landcover_errors[this_class_name]['max_fraction_landcovers'].append(max_frac_lc)
-                landcover_errors[this_class_name]['max_fraction_percents'].append(max_frac_percent)
-                landcover_errors[this_class_name]['same_class_flags'].append(same_class)
-    # 
-
-
-
+                    performance_matrix[i,j] = lc_rmse
+        performance_matrices[m+1] = performance_matrix
+        this_model_name =  all_model_names[m]
+        plotting.heatmap(
+            performance_matrix,
+            sat_lc_types,
+            lc_types,
+            'Satellite Land Cover',
+            'Measured Land Cover',
+            os.path.join(
+                '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+                f'landcover_performance_matrix_{this_model_name}.png'
+            ),
+            cbar_label='RMSE (%)',
+            vmin=0,
+            vmax=50
+        )
+    # make a heatmap that is the difference between model 1 and model 3
+    performance_matrix_diff = performance_matrices[1] - performance_matrices[3]
+    plotting.heatmap(
+        performance_matrix_diff,
+        sat_lc_types,
+        lc_types,
+        'Satellite Land Cover',
+        'Measured Land Cover',
+        os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'landcover_performance_matrix_diff_{model_1_gen_name}_vs_{model_3_gen_name}.png'
+        ),
+        cbar_label='RMSE (%)',
+        vmin=-10,
+        vmax=10,
+        cmap_name='PiYG'
+    )
+    # bin by the % of the satellite land cover
+    # plot rmse for each of these bins
+    bin_delineations = np.array([
+        [0.0,0.1],
+        [0.1,0.2],
+        [0.2,0.3],
+        [0.3,0.4],
+        [0.4,0.5],
+        [0.5,0.6],
+        [0.6,0.7],
+        [0.7,0.8],
+        [0.8,0.9],
+        [0.9,1.0]
+    ])
+    ulbs_used = []
+    bin_rmse_dict = {}
+    for m,model in enumerate(all_model_dfs):
+        bin_rmse_dict[m+1] = {}
+        lower_limits = bin_delineations[:,0]
+        upper_limits = bin_delineations[:,1]
+        for u,ulb in enumerate(upper_limits):
+            bin_mask = (
+                (model.highest_lc_perc > lower_limits[u]) &
+                (model.highest_lc_perc <= upper_limits[u])
+            )
+            bin_obs = model.obs[bin_mask].values
+            bin_preds = model.pred[bin_mask].values
+            if len(bin_obs) == 0:
+                continue
+            bin_rmse = np.sqrt(
+                np.mean(
+                    (bin_obs - bin_preds)**2
+                )
+            )
+            bin_r2 = r2_score(
+                bin_obs,
+                bin_preds
+            )
+            bin_rmse_dict[m+1][ulb] = {
+                'rmse': bin_rmse,
+                'r2': bin_r2,
+                'num_samples': len(bin_obs)
+            }
+            if ulb not in ulbs_used:
+                ulbs_used.append(ulb)
+    plotting.bar_plot(
+        [str(ulb) for ulb in ulbs_used],
+        np.array([
+            [bin_rmse_dict[1][ulb]['rmse'] for ulb in ulbs_used],
+            [bin_rmse_dict[2][ulb]['rmse'] for ulb in ulbs_used],
+            [bin_rmse_dict[3][ulb]['rmse'] for ulb in ulbs_used]
+        ]).T,
+        'Max Measured Land Cover Fraction',
+        'RMSE (%)',
+        os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'satellite_landcover_bin_rmse_comparison_{model_1_gen_name}_vs_{model_2_gen_name}_vs_{model_3_gen_name}.png'
+        ),
+        label_with_n=True,
+        sample_counts=np.array([
+            [bin_rmse_dict[1][ulb]['num_samples'] for ulb in ulbs_used],
+            [bin_rmse_dict[2][ulb]['num_samples'] for ulb in ulbs_used],
+            [bin_rmse_dict[3][ulb]['num_samples'] for ulb in ulbs_used]
+        ]).T,
+        subcategory_labels=[model_1_gen_name, model_2_gen_name, model_3_gen_name]
+    )
+    # bin by the % of the measured land cover
+    # plot rmse for each of these bins
+    bin_delineations = np.array([
+        [0.0,0.1],
+        [0.1,0.2],
+        [0.2,0.3],
+        [0.3,0.4],
+        [0.4,0.5],
+        [0.5,0.6],
+        [0.6,0.7],
+        [0.7,0.8],
+        [0.8,0.9],
+        [0.9,1.0]
+    ])
+    ulbs_used = []
+    bin_rmse_dict = {}
+    for m,model in enumerate(all_model_dfs):
+        bin_rmse_dict[m+1] = {}
+        lower_limits = bin_delineations[:,0]
+        upper_limits = bin_delineations[:,1]
+        for u,ulb in enumerate(upper_limits):
+            bin_mask = (
+                (model.measured_lc_perc > lower_limits[u]) &
+                (model.measured_lc_perc <= upper_limits[u])
+            )
+            bin_obs = model.obs[bin_mask].values
+            bin_preds = model.pred[bin_mask].values
+            if len(bin_obs) == 0:
+                continue
+            bin_rmse = np.sqrt(
+                np.mean(
+                    (bin_obs - bin_preds)**2
+                )
+            )
+            bin_r2 = r2_score(
+                bin_obs,
+                bin_preds
+            )
+            bin_rmse_dict[m+1][ulb] = {
+                'rmse': bin_rmse,
+                'r2': bin_r2,
+                'num_samples': len(bin_obs)
+            }
+            if ulb not in ulbs_used:
+                ulbs_used.append(ulb)
+    plotting.bar_plot(
+        [str(ulb) for ulb in ulbs_used],
+        np.array([
+            [bin_rmse_dict[1][ulb]['rmse'] for ulb in ulbs_used],
+            [bin_rmse_dict[2][ulb]['rmse'] for ulb in ulbs_used],
+            [bin_rmse_dict[3][ulb]['rmse'] for ulb in ulbs_used]
+        ]).T,
+        'Max Satellite Land Cover Fraction',
+        'RMSE (%)',
+        os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'measured_landcover_bin_rmse_comparison_{model_1_gen_name}_vs_{model_2_gen_name}_vs_{model_3_gen_name}.png'
+        ),
+        label_with_n=True,
+        sample_counts=np.array([
+            [bin_rmse_dict[1][ulb]['num_samples'] for ulb in ulbs_used],
+            [bin_rmse_dict[2][ulb]['num_samples'] for ulb in ulbs_used],
+            [bin_rmse_dict[3][ulb]['num_samples'] for ulb in ulbs_used]
+        ]).T,
+        subcategory_labels=[model_1_gen_name, model_2_gen_name, model_3_gen_name]
+    )
+    
+    
+    agree_lc_rmse_dict = {}
+    for m,model in enumerate(all_model_dfs):
+        agree_lc_rmse_dict[m+1] = {}
+        agree_mask = (model.measured_landcover == model.satellite_landcover)
+        agree_df = model[agree_mask].reset_index(drop=True)
+        agree_lc_types = agree_df.measured_landcover.unique()
+        for lc in agree_lc_types:
+            lc_mask = (agree_df.measured_landcover == lc)
+            lc_obs = agree_df.obs[lc_mask].values
+            lc_preds = agree_df.pred[lc_mask].values
+            lc_rmse = np.sqrt(
+                np.mean(
+                    (lc_obs - lc_preds)**2
+                )
+            )
+            lc_r2 = r2_score(
+                lc_obs,
+                lc_preds
+            )
+            agree_lc_rmse_dict[m+1][lc] = {
+                'rmse': lc_rmse,
+                'r2': lc_r2,
+                'num_samples': len(lc_obs)
+            }
+    # bar plot of rmse by land cover
+    plotting.bar_plot(
+        agree_lc_types,
+        np.array([
+            [agree_lc_rmse_dict[1][lc]['rmse'] for lc in agree_lc_types],
+            [agree_lc_rmse_dict[2][lc]['rmse'] for lc in agree_lc_types],
+            [agree_lc_rmse_dict[3][lc]['rmse'] for lc in agree_lc_types]
+        ]).T,
+        'Land Cover Type',
+        'RMSE (%)',
+        os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'landcover_agreement_rmse_comparison_{model_1_gen_name}_vs_{model_2_gen_name}_vs_{model_3_gen_name}.png'
+        ),
+        label_with_n=True,
+        sample_counts=np.array([
+            [agree_lc_rmse_dict[1][lc]['num_samples'] for lc in agree_lc_types],
+            [agree_lc_rmse_dict[2][lc]['num_samples'] for lc in agree_lc_types],
+            [agree_lc_rmse_dict[3][lc]['num_samples'] for lc in agree_lc_types]
+        ]).T,
+        subcategory_labels=[model_1_gen_name, model_2_gen_name, model_3_gen_name]
+    )
+    
+    
+    
+    #plotting.bar_plot(
+    #    agree_lc_types,
+    #    [agree_lc_rmse_df.loc[lc,'rmse'] for lc in agree_lc_types],
+    #    'Land Cover Type',
+    #    'RMSE (%)',
+    #    os.path.join(
+    #        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+    #        f'landcover_agreement_rmse_{model_gen_name}.png'
+    #    ),
+    #    label_with_n=True,
+    #    sample_counts=[agree_lc_rmse_df.loc[lc,'num_samples'] for lc in agree_lc_types]
+    #)
 
 
 def get_site_error(
@@ -296,7 +703,6 @@ def site_analysis(
         }
     # turn into DataFrame for easier analysis
     comparison_df = pd.DataFrame.from_dict(comparison_dict, orient='index')
-    print(comparison_df)
     if not make_plots:
         return comparison_df
     # correlation between r2 and rmse for each model by site
@@ -337,14 +743,18 @@ def site_analysis(
     # test correlation between rmse/r2 and differences in model performance
     plotting.generic_scatter(
         comparison_df.model_1_rmse.values,
-        np.abs(comparison_df.rmse_diff.values),
+        comparison_df.rmse_diff.values,
         os.path.join(
             '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
-            f'rmse_{model_2_gen_name}_minus_{model_1_gen_name}.png'
+            f'rmse_{model_2_gen_name}_minus_{model_1_gen_name}_vs_{model_1_gen_name}.png'
         ),
-        xlabel=f'Model 1 ({model_1_gen_name}) RMSE',
-        ylabel=f'Model 2 minus Model 1 RMSE Difference',
-        xlim=(0.0,75.0)
+        xlabel=f'{model_1_gen_name} RMSE',
+        ylabel=f'{model_2_gen_name} minus {model_1_gen_name} RMSE Difference',
+        color_array=np.ones_like(comparison_df.model_1_rmse.values),
+        alpha=0.8,
+        s=22,
+        fontsize=20
+        #xlim=(0.0,75.0)
     )
     plotting.generic_scatter(
         #np.clip(comparison_df.model_1_r2.values, 0.0, 1.0),
@@ -453,35 +863,35 @@ def landcover_analysis():
 
 def main():
     # analysis settings
-    analyze_at_sites = False
+    analyze_at_sites = True
     analyze_by_landcover = True
     # model settings
     model_gen_dirs = [
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/base',
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarstats_onlyandminimal',
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarmultitask_vhonly_gradnorm',
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/base_pixelsites',
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarstats_pixelsites',
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarmultitask_pixelsites',
     ]
-    model_1_gen_name = 'base'
-    model_2_gen_name = 'sarstats_onlyandminimal'
-    model_3_gen_name = 'sarmultitask_vhonly_gradnorm'
+    model_1_gen_name = 'base_pixelsites'
+    model_2_gen_name = 'sarstats_pixelsites'
+    model_3_gen_name = 'sarmultitask_pixelsites'
     # settings for the best sarstats model
-    dms = [64,64,32]
-    nh = [2,2,1]
-    nl = [3,3,2]
-    df = [128,128,64]
+    dms = [64,64,64]
+    nh = [2,2,2]
+    nl = [3,3,3]
+    df = [128,128,128]
     do = [0.15,0.15,0.15]
     bs = [128,128,128]
-    lr = [1e-4,1e-4,5e-4]
-    warmup = [554,554,1227]
+    lr = [5e-4,5e-4,5e-4]
+    warmup = [502,502,1175]
     wd = [1e-4,1e-4,1e-4]
-    iobs = [33806,33806,33806]
+    iobs = [30638,30638,30638]
     vvobs = [0,0,0]
     vhobs = [0,0,41024]
-    dmlong = [128,256,128]
-    nhlong = [4,8,4]
-    nllong = [4,5,4]
-    dflong = [256,512,256]
-    outlong = [32,64,32]
+    dmlong = [128,256,32]
+    nhlong = [4,8,1]
+    nllong = [4,5,2]
+    dflong = [256,512,64]
+    outlong = [64,64,32]
     model_1_name = (
         f'transformer_dm{dms[0]}_nh{nh[0]}_nl{nl[0]}_df{df[0]}_do{do[0]}'
         f'_bs{bs[0]}_lr{lr[0]}_warmup{warmup[0]}_wd{wd[0]}'
@@ -511,24 +921,24 @@ def main():
         model_1_site_error = get_site_error(model_1_dir)
         model_2_site_error = get_site_error(model_2_dir)
         model_3_site_error = get_site_error(model_3_dir)
-        model_1_2_comparision_df = site_analysis(
+        model_1_2_comparison_df = site_analysis(
             model_1_site_error,
             model_2_site_error,
             model_1_gen_name,
             model_2_gen_name,
-            make_plots=False
+            make_plots=True
         )
-        model_1_3_comparision_df = site_analysis(
+        model_1_3_comparison_df = site_analysis(
             model_1_site_error,
             model_3_site_error,
             model_1_gen_name,
             model_3_gen_name,
-            make_plots=False
+            make_plots=True
         )
         # other things where we don't want to run a full analysis...
         plotting.generic_scatter(
-            model_1_2_comparision_df.rmse_diff.values,
-            model_1_3_comparision_df.rmse_diff.values,
+            model_1_2_comparison_df.rmse_diff.values,
+            model_1_3_comparison_df.rmse_diff.values,
             os.path.join(
                 '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
                 f'rmse_diff_from_base_{model_2_gen_name}_vs_{model_3_gen_name}.png'
@@ -537,8 +947,8 @@ def main():
             ylabel=f'{model_3_gen_name} RMSE Difference from Base Model'
         )
         plotting.generic_scatter(
-            model_1_2_comparision_df.r2_diff.values,
-            model_1_3_comparision_df.r2_diff.values,
+            model_1_2_comparison_df.r2_diff.values,
+            model_1_3_comparison_df.r2_diff.values,
             os.path.join(
                 '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
                 f'r2_diff_from_base_{model_2_gen_name}_vs_{model_3_gen_name}.png'
@@ -560,23 +970,187 @@ def main():
         nfmd_df = pd.read_csv(
             '/scratch/users/trobinet/long_lfmc/trent_datasets/nfmd/nfmd_processed.csv'
         )
-        model_1_landcover_df = get_landcover_df(
-            model_1_dir,
-            land_cover_single_ds,
-            land_cover_breakdown_ds,
-            nfmd_df
+        site_lc_df_path_model_1 = os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'landcover_analysis_{model_1_gen_name}.csv'
         )
-        model_2_landcover_df = get_landcover_df(
-            model_2_dir,
-            land_cover_single_ds,
-            land_cover_breakdown_ds,
-            nfmd_df
+        site_lc_df_path_model_2 = os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'landcover_analysis_{model_2_gen_name}.csv'
         )
-        model_3_landcover_df = get_landcover_df(
-            model_3_dir,
-            land_cover_single_ds,
-            land_cover_breakdown_ds,
-            nfmd_df
+        site_lc_df_path_model_3 = os.path.join(
+            '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+            f'landcover_analysis_{model_3_gen_name}.csv'
+        )
+        rebuild_lc_dfs = False
+        if rebuild_lc_dfs:
+            model_1_landcover_df = get_landcover_df(
+                model_1_dir,
+                land_cover_single_ds,
+                land_cover_breakdown_ds,
+                nfmd_df,
+                site_lc_df_path_model_1
+            )
+            model_2_landcover_df = get_landcover_df(
+                model_2_dir,
+                land_cover_single_ds,
+                land_cover_breakdown_ds,
+                nfmd_df,
+                site_lc_df_path_model_2
+            )
+            model_3_landcover_df = get_landcover_df(
+                model_3_dir,
+                land_cover_single_ds,
+                land_cover_breakdown_ds,
+                nfmd_df,
+                site_lc_df_path_model_3
+            )
+        model_1_landcover_df = pd.read_csv(site_lc_df_path_model_1)
+        model_2_landcover_df = pd.read_csv(site_lc_df_path_model_2)
+        model_3_landcover_df = pd.read_csv(site_lc_df_path_model_3)
+        # now what do we actaully want to do with these?
+        plot_landcover_analysis(
+            model_1_landcover_df,
+            model_2_landcover_df,
+            model_3_landcover_df,
+            model_1_gen_name,
+            model_2_gen_name,
+            model_3_gen_name
+        )
+        #plot_landcover_analysis(
+        #    model_1_landcover_df,
+        #    model_1_gen_name
+        #)
+        #plot_landcover_analysis(
+        #    model_2_landcover_df,
+        #    model_2_gen_name
+        #)
+        #plot_landcover_analysis(
+        #    model_3_landcover_df,
+        #    model_3_gen_name
+        #)
+        # do some comparison of the sites that seem to be influenced by microwaves
+        # both positive and negative
+        sarstats_help_df = (
+            model_1_2_comparison_df[
+                model_1_2_comparison_df.rmse_diff < -5.0
+            ]
+        )
+        sarstats_help_sites = sarstats_help_df[['latitude','longitude']].drop_duplicates().reset_index(drop=True)
+        sarstats_hurt_df = (
+            model_1_2_comparison_df[
+                model_1_2_comparison_df.rmse_diff > 5.0
+            ]
+        )
+        sarstats_hurt_sites = sarstats_hurt_df[['latitude','longitude']].drop_duplicates().reset_index(drop=True)
+        sarmultitask_help_df = (
+            model_1_3_comparison_df[
+                model_1_3_comparison_df.rmse_diff < -5.0
+            ]
+        )
+        sarmultitask_help_sites = sarmultitask_help_df[['latitude','longitude']].drop_duplicates().reset_index(drop=True)
+        sarmultitask_hurt_df = (
+            model_1_3_comparison_df[
+                model_1_3_comparison_df.rmse_diff > 5.0
+            ]
+        )
+        sarmultitask_hurt_sites = sarmultitask_hurt_df[['latitude','longitude']].drop_duplicates().reset_index(drop=True)
+        microwaves_help_sites = pd.merge(
+            sarstats_help_sites,
+            sarmultitask_help_sites,
+            on=['latitude','longitude'],
+            how='inner'
+        )
+        microwaves_hurt_sites = pd.merge(
+            sarstats_hurt_sites,
+            sarmultitask_hurt_sites,
+            on=['latitude','longitude'],
+            how='inner'
+        )
+        help_vs_hurt = pd.concat(
+            [microwaves_help_sites, microwaves_hurt_sites],
+            axis=0
+        ).reset_index(drop=True)
+        help_vs_hurt['type'] = [0]*len(microwaves_help_sites) + [1]*len(microwaves_hurt_sites)
+        plotting.map_points(
+            help_vs_hurt.longitude.values,
+            help_vs_hurt.latitude.values,
+            np.ones(len(help_vs_hurt)),
+            os.path.join(
+                '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+                f'microwave_help_vs_hurt_sites_{model_2_gen_name}_and_{model_3_gen_name}.png'
+            ),
+            colors=help_vs_hurt['type'].values,
+            cbar_lim=(-0.5,1.5),
+            cmap='bwr',
+            s_min=150,
+            s_max=150
+        )
+        analyze_landcover_of_sites(
+            microwaves_help_sites,
+            model_1_landcover_df,
+            "microwaves_help"
+        )
+        analyze_landcover_of_sites(
+            microwaves_hurt_sites,
+            model_1_landcover_df,
+            "microwaves_hurt"
+        )
+        # try coloring this plot by different thigs...
+        site_rmses = []
+        for site_key in model_1_2_comparison_df.index:
+            site_rmses.append(model_1_site_error[site_key]['rmse'])
+        model_1_site_error_array = np.array(site_rmses)
+        plotting.generic_scatter(
+            model_1_2_comparison_df.rmse_diff.values,
+            model_1_3_comparison_df.rmse_diff.values,
+            os.path.join(
+                '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+                f'rmse_diff_from_base_{model_2_gen_name}_vs_{model_3_gen_name}.png'
+            ),
+            xlabel=f'{model_2_gen_name} RMSE Difference from Base Model',
+            ylabel=f'{model_3_gen_name} RMSE Difference from Base Model',
+            color_array=model_1_site_error_array,
+            alpha=0.8,
+            s=22,
+            cbar_range=[0,50],
+            cbar_label=f'{model_1_gen_name} RMSE',
+            fontsize=20
+        )
+        plotting.generic_scatter(
+            model_1_2_comparison_df.rmse_diff.values,
+            model_1_3_comparison_df.rmse_diff.values,
+            os.path.join(
+                '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+                f'rmse_diff_from_base_nocolor_{model_2_gen_name}_vs_{model_3_gen_name}.png'
+            ),
+            xlabel=f'{model_2_gen_name} RMSE Difference from Base Model',
+            ylabel=f'{model_3_gen_name} RMSE Difference from Base Model',
+            alpha=0.8,
+            s=4,
+            color_array=np.array([0.2]*len(model_1_2_comparison_df))
+        )
+        site_r2s = []
+        for site_key in model_1_2_comparison_df.index:
+            site_r2s.append(model_1_site_error[site_key]['r2'])
+        model_1_site_r2_array = np.array(site_r2s)
+        plotting.generic_scatter(
+            model_1_2_comparison_df.r2_diff.values,
+            model_1_3_comparison_df.r2_diff.values,
+            os.path.join(
+                '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+                f'r2_diff_from_base_{model_2_gen_name}_vs_{model_3_gen_name}.png'
+            ),
+            xlabel=f'{model_2_gen_name} R² Difference from Base Model',
+            ylabel=f'{model_3_gen_name} R² Difference from Base Model',
+            color_array=model_1_site_r2_array,
+            alpha=0.8,
+            s=4,
+            xlim=(-1.1,1.1),
+            ylim=(-1.1,1.1),
+            corrclip=[-1.1,1.1],
+            cbar_range=[0,1],
+            cbar_label=f'{model_1_gen_name} R²'
         )
 
 

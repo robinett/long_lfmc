@@ -4,175 +4,178 @@ import xarray as xr
 import glob
 import sys
 import pandas as pd
+from pyproj import Transformer
+
+np.random.seed(42)
 
 # extract time from filename
 def date_from_path(p): 
     date_re = re.compile(r"(\d{4}-\d{2}-\d{2})")
     return np.datetime64(date_re.search(p).group(1))
 
-def sample_by_pixels_non_nan(
-    ds: xr.Dataset,
-    var_to_sample,
-    num_to_sample: int = 1_000_000,
-    seed: int = 42,
-    pixel_batch_size: int = 10_000,   # number of pixels to evaluate per batch
-    max_pixel_draws_multiplier: int = 50,  # safety cap on draws vs requested samples
-):
-    """
-    Randomly sample unique pixels (y,x). For each selected pixel, take *all* non-NaN
-    LFMC time steps at that pixel, then move to the next pixel. Continue until we've
-    collected exactly `num_to_sample` non-NaN observations (truncating the last pixel
-    if needed). Counts only non-NaN entries toward the total.
-
-    Returns a pandas.DataFrame with columns:
-        ['date', 'latitude', 'longitude', 'lfmc']
-    """
-    # Ensure consistent dimension order
-    da = ds[var_to_sample].transpose("time", "y", "x")
-    T, Y, X = (int(da.sizes[d]) for d in ("time", "y", "x"))
-    total_pixels = Y * X
-
-    if num_to_sample <= 0:
-        return pd.DataFrame(columns=["date", "latitude", "longitude", var_to_sample])
-
-    rng = np.random.default_rng(seed)
-    time_vals_full = ds["time"].values
-
-    # Helper to make xarray do vectorized point indexing
-    def idx_da(a): 
-        return xr.DataArray(a, dims="points")
-
-    # Track which pixels we've already tried (flatten yx -> y*X + x)
-    selected_pixels = set()
-
-    # Output buffers
-    dates_buf = []
-    lats_buf  = []
-    lons_buf  = []
-    var_buf  = []
-
-    # Draw safety
-    # This caps how many pixel *draws* we're willing to try
-    # before concluding that valid coverage is too sparse.
-    max_pixel_draws = max_pixel_draws_multiplier * int(np.ceil(num_to_sample / max(1, T)))
-    pixel_draws = 0
-
-    # Helper: map flat yx -> (y, x)
-    def flat_to_yx(flat_idx):
-        y_idx = flat_idx // X
-        x_idx = flat_idx %  X
-        return y_idx, x_idx
-
-    # Main loop: keep drawing pixels until we hit target or exhaust options
-    total_kept = 0
-    while total_kept < num_to_sample:
-        print(f"Collected {total_kept}/{num_to_sample} samples so far...")
-        # If we've considered all pixels, bail out
-        if len(selected_pixels) >= total_pixels:
-            raise RuntimeError(
-                f"Ran out of pixels ({len(selected_pixels)}/{total_pixels}) "
-                f"with total_kept={total_kept} < num_to_sample={num_to_sample}. "
-                "Coverage may be too sparse."
-            )
-
-        # Draw a batch of candidate pixels (with replacement), then uniquify
-        # and remove those we've already attempted.
-        draw_n = min(
-            pixel_batch_size,
-            total_pixels - len(selected_pixels)
-        )
-        # Overdraw a bit to counter all-NaN pixels
-        draw_n = max(draw_n, 1)
-        flat = rng.integers(0, total_pixels, size=draw_n * 2)
-        pixel_draws += flat.size
-        if pixel_draws > max_pixel_draws * pixel_batch_size:
-            raise RuntimeError(
-                f"Too many pixel draws ({pixel_draws}) for {total_kept} collected samples. "
-                "Data may be very sparse; increase max_pixel_draws_multiplier or lower target."
-            )
-
-        # Keep only new pixels
-        unique_flat = np.unique(flat)
-        mask_new = ~np.isin(unique_flat, list(selected_pixels))
-        new_pix_flat = unique_flat[mask_new]
-        if new_pix_flat.size == 0:
-            continue
-
-        # Convert to y/x arrays
-        y_idx, x_idx = flat_to_yx(new_pix_flat)
-
-        # Grab LFMC for all time at these pixels -> shape (T, P)
-        vals = da.isel(y=idx_da(y_idx), x=idx_da(x_idx)).values  # (T, P)
-        valid_mask = np.isfinite(vals)                            # (T, P)
-
-        # For each pixel (column), collect all non-NaN times
-        # Stop early if we reach num_to_sample.
-        P = new_pix_flat.size
-        for p in range(P):
-            pix_flat = int(new_pix_flat[p])
-            if pix_flat in selected_pixels:
-                continue  # shouldn't happen, but cheap guard
-
-            t_valid = np.nonzero(valid_mask[:, p])[0]
-            if t_valid.size == 0:
-                # Mark pixel as checked (all-NaN) and move on
-                selected_pixels.add(pix_flat)
-                continue
-
-            # Values and times for this pixel
-            var_p = vals[t_valid, p]
-            dates_p = time_vals_full[t_valid]
-
-            # Lat/Lon for this pixel (scalar each, repeat to match t_valid)
-            y_p, x_p = flat_to_yx(pix_flat)
-            lat_p = ds["lat"].values[y_p, x_p]
-            lon_p = ds["lon"].values[y_p, x_p]
-
-            remain = num_to_sample - total_kept
-            if t_valid.size > remain:
-                # Truncate this last pixel to hit target exactly
-                t_valid = t_valid[:remain]
-                var_p = var_p[:remain]
-                dates_p = dates_p[:remain]
-
-            dates_buf.append(dates_p)
-            var_buf.append(var_p)
-            # Repeat scalars per valid time
-            lats_buf.append(np.full_like(var_p, fill_value=lat_p, dtype=float))
-            lons_buf.append(np.full_like(var_p, fill_value=lon_p, dtype=float))
-
-            total_kept += var_p.size
-            selected_pixels.add(pix_flat)
-
-            if total_kept >= num_to_sample:
-                break  # done for this outer batch
-        # continue outer while until we hit target
-    # Build DataFrame
-    out = pd.DataFrame({
-        "date":      np.concatenate(dates_buf),
-        "latitude":  np.concatenate(lats_buf),
-        "longitude": np.concatenate(lons_buf),
-        var_to_sample:  np.concatenate(var_buf),
-    })
-    assert len(out) == num_to_sample, (len(out), num_to_sample)
-    return out
-
-
 def main():
+    # which sampling should we do
+    sample_at_sites = False
+    sample_at_random = True
+    
     # glob pattern to pick up everything
     sar_ds = xr.open_zarr(
-        "/scratch/users/trobinet/long_lfmc/trent_datasets/sar/sar_formatted.zarr",
+        "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_formatted.zarr",
         chunks="auto",
     )
+    lfmc_df = pd.read_csv(
+        "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/nfmd/nfmd_processed.csv"
+    )
     vars_to_sample = ['VV', 'VH', 'vv_minus_vh']
+    trns = Transformer.from_crs('EPSG:4326','EPSG:5070',always_xy=True)
+    trns_back = Transformer.from_crs('EPSG:5070','EPSG:4326',always_xy=True)
+    # load up the land cover data that we are going to use to make sure that we are only drawing
+    # meaningful land cover types
+    land_cover_ds = xr.open_zarr(
+        '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/nlcd/nlcd_target_grid_2003_2023.zarr'
+    )
+    all_land_covers = list(land_cover_ds.data_vars)
+    allowed_landcovers = [
+        'deciduous_forest',
+        'evergreen_forest',
+        'grass',
+        'mixed_forest',
+        'shrub'
+    ]
     for var in vars_to_sample:
-        print(f"Sampling {var}...")
+        if not sample_at_sites:
+            continue
+        print(f"Sampling {var} at sites.")
         # generate a random integer between 1 and 100 to be our seed
         this_seed = np.random.randint(1, 100)
-        sampled_sar = sample_by_pixels_non_nan(sar_ds, var, num_to_sample=100_000, seed=this_seed)
+        # sample all timeseries for locations where we have LFMC samples
+        # get all unique lat/lon combinations
+        all_lats = lfmc_df["latitude"]
+        all_lons = lfmc_df["longitude"]
+        all_lat_lon = pd.DataFrame({"latitude": all_lats, "longitude": all_lons})
+        all_lat_lon = all_lat_lon.drop_duplicates().reset_index(drop=True)
+        for r,row in all_lat_lon.iterrows():
+            if r == 20:
+                break
+            if r % 10 == 0:
+                print(f"Processing site {r}/{len(all_lat_lon)}")
+            this_lat = row["latitude"]
+            this_lon = row["longitude"]
+            this_x, this_y = trns.transform(this_lon, this_lat)
+            sampled_ds = sar_ds[var].sel(x=this_x, y=this_y, method="nearest")
+            this_vals = sampled_ds.values
+            this_dates = sampled_ds.coords["time"].values
+            lats_rep = np.full_like(this_vals, fill_value=this_lat, dtype=float)
+            lons_rep = np.full_like(this_vals, fill_value=this_lon, dtype=float)
+            if r == 0:
+                sampled_sar_at_sites = pd.DataFrame({
+                    "date": this_dates,
+                    "latitude": lats_rep,
+                    "longitude": lons_rep,
+                    var: this_vals
+                })
+            else:
+                df_to_append = pd.DataFrame({
+                    "date": this_dates,
+                    "latitude": lats_rep,
+                    "longitude": lons_rep,
+                    var: this_vals
+                })
+                sampled_sar_at_sites = pd.concat([sampled_sar_at_sites, df_to_append], ignore_index=True)
+        # drop nan pixels
+        sampled_sar_at_sites = sampled_sar_at_sites.dropna()
+        print(sampled_sar_at_sites)
         var_fmt = var.lower()
-        sampled_sar.to_csv(
-            f"/scratch/users/trobinet/long_lfmc/trent_datasets/sar/sampled/{var_fmt}_samples.csv",
+        sampled_sar_at_sites.to_csv(
+            f"/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sampled/{var_fmt}_samples_at_sites.csv"
+        )
+    for var in vars_to_sample:
+        created_df = False
+        if not sample_at_random:
+            continue
+        var_fmt = var.lower()
+        print(f"Sampling {var} at random.")
+        # get all the possible points
+        xs = sar_ds[var].coords["x"].values
+        ys = sar_ds[var].coords["y"].values
+        all_xs, all_ys = np.meshgrid(xs, ys)
+        all_points = pd.DataFrame({"x": all_xs.ravel(), "y": all_ys.ravel()})
+        all_points = all_points.drop_duplicates().reset_index(drop=True)
+        # repeadly sample from this dataframe until we have achieved our goal number of points
+        num_points = len(all_points)
+        perm = np.random.permutation(num_points)
+        batch_size = 100
+        desired_points = 100_000
+        for i in range(0, num_points, batch_size):
+            if created_df and out_df.shape[0] >= desired_points:
+                break
+            # Get the current batch of points
+            idx = perm[i:i+batch_size]
+            batch = all_points.iloc[idx]
+            x_arr = batch["x"].to_numpy()
+            y_arr = batch["y"].to_numpy()
+            # we need to run two checks on these points
+            # first, is the sar data there nan?
+            # second, is the land cover there something that we find acceptable?
+            # start by getting the sar data for each of these points
+            sar_data = sar_ds[var].sel(
+                x=xr.DataArray(x_arr,dims='points'),
+                y=xr.DataArray(y_arr,dims='points'),
+                method="nearest"
+            )
+            # get the dates and check the land cover for each
+            dates = sar_data.coords["time"].values
+            for d,date in enumerate(dates):
+                this_sar = sar_data.sel(time=date).values
+                this_lc = land_cover_ds.sel(
+                    x=xr.DataArray(x_arr, dims="points"),
+                    y=xr.DataArray(y_arr, dims="points"),
+                    method="nearest",
+                )
+                this_lc = this_lc.sel(year=date, method="nearest")
+                lc_arr = this_lc.to_array(dim='landcover').values
+                valid = np.where(~np.isnan(lc_arr))
+                okay_cols = np.unique(valid[1])
+                lc_valid = lc_arr[:,okay_cols]
+                sar_valid = this_sar[okay_cols]
+                x_arr_valid = x_arr[okay_cols]
+                y_arr_valid = y_arr[okay_cols]
+                # get rid of anywhere that doesn't have a sar value
+                valid_locs = np.where(~np.isnan(sar_valid))
+                lc_valid = lc_valid[:,valid_locs].squeeze()
+                sar_valid = sar_valid[valid_locs]
+                x_arr_valid = x_arr_valid[valid_locs]
+                y_arr_valid = y_arr_valid[valid_locs]
+                dom_lc_idx = np.argmax(lc_valid, axis=0)
+                dom_lc = [0 for n in range(len(dom_lc_idx))]
+                idx_okay = [False for n in range(len(dom_lc_idx))]
+                for n in range(len(dom_lc_idx)):
+                    dom_lc[n] = all_land_covers[dom_lc_idx[n]]
+                    if dom_lc[n] in allowed_landcovers:
+                        idx_okay[n] = True
+                final_xs = x_arr_valid[idx_okay]
+                final_ys = y_arr_valid[idx_okay]
+                final_sar = sar_valid[idx_okay]
+                final_date = [date for _ in range(len(final_xs))]
+                lons,lats = trns_back.transform(final_xs, final_ys)
+                if not created_df:
+                    created_df = True
+                    out_df = pd.DataFrame({
+                        "longitude": lons,
+                        "latitude": lats,
+                        "date": final_date,
+                        var_fmt: final_sar
+                    })
+                else:
+                    out_df = pd.concat([out_df, pd.DataFrame({
+                        "longitude": lons,
+                        "latitude": lats,
+                        "date": final_date,
+                        var_fmt: final_sar
+                    })], ignore_index=True)
+                print(out_df)
+        out_df.to_csv(
+            f"/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sampled/{var_fmt}_samples_random.csv",
             index=False
         )
 

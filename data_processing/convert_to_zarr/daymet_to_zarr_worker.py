@@ -22,11 +22,11 @@ from zarr_build_utils import (
 
 # --------- CONFIG (adjust paths/chunks as needed) ----------
 ROOT = Path(
-    "/scratch/users/trobinet/long_lfmc/"
+    "/oak/stanford/groups/konings/trobinet/long_lfmc/"
     "trent_datasets/daymet/daymet_regrid"
 )
 OUT = Path(
-    "/scratch/users/trobinet/long_lfmc/"
+    "/oak/stanford/groups/konings/trobinet/long_lfmc/"
     "trent_datasets/daymet/daymet_all_vars.zarr"
 )
 WRITE_CHUNKS = {"time": 1, "variable": 9999, "y": 512, "x": 512}
@@ -235,10 +235,13 @@ def main():
             preprocess=preprocess_strip_attrs,
             combine="by_coords",
         )
+        print('ds opened')
 
         arr = to_stacked_array(ds, WRITE_CHUNKS)
-        arr = chunk_coords(arr, y=WRITE_CHUNKS["y"], x=WRITE_CHUNKS["x"])
+        print('arr stacked')
 
+        arr = chunk_coords(arr, y=WRITE_CHUNKS["y"], x=WRITE_CHUNKS["x"])
+        print('arr chunked')
         # Ordered write
         write_ordered(arr, ym, seq, coord)
 
