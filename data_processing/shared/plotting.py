@@ -54,7 +54,8 @@ def get_proj(proj):
 def plot_from_xarray(
     load_type, type_obj, var,
     proj_in, proj_out,
-    fname, cmap='rainbow'
+    fname, cmap='rainbow',
+    extent=None
 ):
     # --- load ---
     if load_type == 'fname':
@@ -69,6 +70,8 @@ def plot_from_xarray(
             ds = xr.open_dataset(type_obj, engine='netcdf4')
     elif load_type == 'ds':
         ds = type_obj
+    elif load_type == 'da':
+        ds = type_obj.to_dataset(name=var)
     else:
         raise ValueError("load_type must be 'fname' or 'ds'.")
 
@@ -125,9 +128,14 @@ def plot_from_xarray(
         figsize=(7, 6)
     )
 
-    # extent: western US
-    west_us = [-126, -99, 20, 55]
-    ax.set_extent(west_us, crs=get_proj('EPSG:4326'))
+    # if not extent given, use western US
+    if extent is None:
+        west_us = [-126, -99, 20, 55]
+        ax.set_extent(west_us, crs=get_proj('EPSG:4326'))
+    else:
+        ax.set_extent(extent, crs=coded_in)
+
+
 
     # --- plot as image (2D -> cmap ok) ---
     im = da.plot.imshow(
