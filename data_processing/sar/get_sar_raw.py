@@ -1,3 +1,10 @@
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="urllib3 v2 only supports OpenSSL 1.1.1+.*",
+    module=r"urllib3(\..*)?",
+)
+
 import xarray as xr
 import pandas as pd
 import os
@@ -15,6 +22,9 @@ from tqdm import tqdm
 import shutil
 from dask.diagnostics import ProgressBar
 import copy
+import argparse
+from collections import defaultdict
+import re
 
 here = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.join(here, '..', '..')
@@ -23,14 +33,17 @@ sys.path.append(os.path.join(project_root, 'data_processing','shared'))
 import plotting
 
 
-def bbox_intersects(b1, b2):
-    # b = (minx, miny, maxx, maxy)
-    return not (
-        (b1[2] <= b2[0]) or  # b1 maxx left of b2 minx
-        (b1[0] >= b2[2]) or  # b1 minx right of b2 maxx
-        (b1[3] <= b2[1]) or  # b1 maxy below b2 miny
-        (b1[1] >= b2[3])     # b1 miny above b2 maxy
-    )
+track_re = re.compile(r"_T(?P<track>\d+)-")
+
+def get_track(path: str) -> int:
+    m = track_re.search(os.path.basename(path))
+    if not m:
+        raise ValueError(f"Could not parse track: {path}")
+    return int(m.group("track"))
+
+def chunkify(seq, cap):
+    for i in range(0, len(seq), cap):
+        yield seq[i:i+cap]
 
 def process_range(
     start_date,
@@ -77,35 +90,81 @@ def process_range(
         #results = results[:10]
         vh_urls = []
         mask_urls = []
-        for r,res in enumerate(results):
-            this_urls = res.properties['additionalUrls']
+        skipped = []
+        for r, res in enumerate(results):
+            this_urls = res.properties.get("additionalUrls", []) or []
             this_vh_tif = next(
-                u for u in this_urls
-                if u.endswith('_VH.tif')
+                (u for u in this_urls if u.endswith("_VH.tif")),
+                None,
             )
             this_mask_tif = next(
-                u for u in this_urls
-                if u.endswith('mask.tif')
+                (u for u in this_urls if u.endswith("mask.tif")),
+                None,
             )
+            if this_vh_tif is None or this_mask_tif is None:
+                skipped.append({
+                    "idx": r,
+                    "has_vh": this_vh_tif is not None,
+                    "has_mask": this_mask_tif is not None,
+                    "n_urls": len(this_urls),
+                })
+                continue
             vh_urls.append(this_vh_tif)
             mask_urls.append(this_mask_tif)
-            #print(this_url)
         all_urls = vh_urls + mask_urls
-        print('downloading files')
+        print(f"downloading files: {len(vh_urls)} VH + {len(mask_urls)} masks")
+        if skipped:
+            print(f"skipped {len(skipped)} results missing VH/mask")
+        #vh_urls = []
+        #mask_urls = []
+        #for r,res in enumerate(results):
+        #    this_urls = res.properties['additionalUrls']
+        #    this_vh_tif = next(
+        #        u for u in this_urls
+        #        if u.endswith('_VH.tif')
+        #    )
+        #    this_mask_tif = next(
+        #        u for u in this_urls
+        #        if u.endswith('mask.tif')
+        #    )
+        #    vh_urls.append(this_vh_tif)
+        #    mask_urls.append(this_mask_tif)
+        #    #print(this_url)
+        #all_urls = vh_urls + mask_urls
+        #print('downloading files')
         #for url in tqdm(all_urls, desc="Downloading SAR"):
         #    asf.download_url(url, path=scratch_dir)
-        asf.download_urls(urls=all_urls,path=scratch_dir,processes=24)
+        asf.download_urls(urls=all_urls,path=scratch_dir,processes=4)
         # open these tifs as a single dataset
         # we just do chunk_size files at a time to keep things reasonable
-        chunk_size = 10
-        vh_files = glob.glob(
-            os.path.join(scratch_dir, '*_VH.tif')
+        chunk_cap = 15
+        vh_files = sorted(
+            glob.glob(os.path.join(scratch_dir, "*_VH.tif"))
         )
-        vh_files = sorted(vh_files)
-        num_files = len(vh_files)
-        num_chunks = (num_files // chunk_size) + 1
-        for c in tqdm(range(num_chunks), desc="Processing Chunks"):
-            this_vh_files = vh_files[c*chunk_size:(c+1)*chunk_size]
+        # group by track
+        by_track = defaultdict(list)
+        for f in vh_files:
+            this_track = get_track(f)
+            by_track[this_track].append(f)
+        # build chunks: each chunk is only one track, max 25
+        vh_chunks = []
+        for track in sorted(by_track.keys()):
+            files = sorted(by_track[track])
+            for ch in chunkify(files, chunk_cap):
+                vh_chunks.append((track, ch))
+        #chunk_size = 10
+        #vh_files = glob.glob(
+        #    os.path.join(scratch_dir, '*_VH.tif')
+        #)
+        #vh_files = sorted(vh_files)
+        #num_files = len(vh_files)
+        #num_chunks = (num_files // chunk_size) + 1
+        for c, (track, this_vh_files) in enumerate(
+            tqdm(vh_chunks, desc="Processing Chunks")
+        ):
+            # skip if we are out of files
+            if not this_vh_files:
+                continue
             this_mask_files = []
             for f in this_vh_files:
                 mask_file = f.replace('_VH.tif', '_mask.tif')
@@ -228,19 +287,58 @@ def process_range(
             #    extent=None
             #)
         # save the daily .nc
-        out_ds.rio.to_netcdf(out_path)
+        # but only save if not all empty
+        valid = out_ds['vh_backscatter'].notnull().any()
+        if valid:
+            comp = dict(zlib=True, complevel=4)
+            encoding = {
+                var: comp
+                for var in out_ds.data_vars
+            }
+            out_ds.to_netcdf(out_path, encoding=encoding)
         # clear the scratch directory
-        shutil.rmtree(scratch_dir)
+        for name in os.listdir(scratch_dir):
+            path = os.path.join(scratch_dir, name)
+            shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+        # clear everything in memory here
+        out_ds.close()
+
 
 def main():
+    p = argparse.ArgumentParser(
+        description="Process S1 SAR mosaics to daily 500m .nc4s"
+    )
+    p.add_argument(
+        '--start_date',
+        type=str,
+        required=True,
+        help='Start date in YYYY-MM-DD format'
+    )
+    p.add_argument(
+        '--end_date',
+        type=str,
+        required=True,
+        help='End date in YYYY-MM-DD format'
+    )
+    p.add_argument(
+        '--job_num',
+        type=int,
+        required=True,
+        help='Job number for processing'
+    )
+    args = p.parse_args()
     bounding_box = [
         -130.0,23,-96.5,52.0
     ]
     target_grid_path = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/grid/epsg5070_500m_westUS_grid.nc4'
-    start_date = pd.Timestamp('2018-07-01')
-    end_date = pd.Timestamp.now()
+    start_date = pd.Timestamp(args.start_date)
+    end_date = pd.Timestamp(args.end_date)
     out_dir = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily/'
-    scratch_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/sar/temp/'
+    scratch_dir = f'/scratch/users/trobinet/long_lfmc/trent_datasets/sar/temp/{args.job_num}/'
+    # remove the temp dir if it exists
+    shutil.rmtree(scratch_dir, ignore_errors=True)
+    # re-create scratch dir
+    os.makedirs(scratch_dir)
     process_range(
         start_date,
         end_date,

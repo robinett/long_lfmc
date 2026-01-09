@@ -1,0 +1,41 @@
+#!/bin/bash
+
+set -euo pipefail
+
+# Usage:
+#   bash submit_sar_batches.sh /path/to/your_script.py
+#
+# Example:
+#   bash submit_sar_batches.sh /oak/stanford/groups/konings/trobinet/long_lfmc/data_processing/sar/get_sar_raw.py
+
+PY_SCRIPT="${1:?Pass the path to the python script as arg 1}"
+
+START="2016-01-01"
+END="$(date +%F)"   # "present" = today in local cluster time
+
+# Count how many 6-month chunks we need.
+# We step in 6-month increments starting at START until START_i > END.
+n=0
+cur="$START"
+while true; do
+  if [[ "$(date -d "$cur" +%s)" -gt "$(date -d "$END" +%s)" ]]; then
+    break
+  fi
+  n=$((n+1))
+  cur="$(date -d "$cur + 6 months" +%F)"
+done
+
+if [[ "$n" -le 0 ]]; then
+  echo "No chunks to submit (START=$START, END=$END)."
+  exit 1
+fi
+
+echo "Submitting $n jobs (6-month chunks) from $START to $END"
+echo "Python script: $PY_SCRIPT"
+
+# Submit as a job array: task IDs 0..n-1
+sbatch \
+  --export=ALL,PY_SCRIPT="$PY_SCRIPT",START_DATE="$START",END_DATE="$END" \
+  --array=0-$((n-1)) \
+  sar_process.sbatch
+
