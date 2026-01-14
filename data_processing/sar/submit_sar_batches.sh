@@ -10,8 +10,10 @@ set -euo pipefail
 
 PY_SCRIPT="${1:?Pass the path to the python script as arg 1}"
 
-START="2016-01-01"
-END="$(date +%F)"   # "present" = today in local cluster time
+START="2019-09-01"
+END="2023-12-31"
+#END="$(date +%F)"   # "present" = today in local cluster time
+CHUNK_SIZE=1 # how to chunk up the date range (in months)
 
 # Count how many 6-month chunks we need.
 # We step in 6-month increments starting at START until START_i > END.
@@ -22,7 +24,7 @@ while true; do
     break
   fi
   n=$((n+1))
-  cur="$(date -d "$cur + 6 months" +%F)"
+  cur="$(date -d "$cur + $CHUNK_SIZE months" +%F)"
 done
 
 if [[ "$n" -le 0 ]]; then
@@ -30,12 +32,12 @@ if [[ "$n" -le 0 ]]; then
   exit 1
 fi
 
-echo "Submitting $n jobs (6-month chunks) from $START to $END"
+echo "Submitting $n jobs from $START to $END"
 echo "Python script: $PY_SCRIPT"
 
 # Submit as a job array: task IDs 0..n-1
 sbatch \
-  --export=ALL,PY_SCRIPT="$PY_SCRIPT",START_DATE="$START",END_DATE="$END" \
-  --array=0-$((n-1)) \
+  --export=ALL,PY_SCRIPT="$PY_SCRIPT",START_DATE="$START",END_DATE="$END",CHUNK_SIZE="$CHUNK_SIZE" \
+  --array=0-$((n-1))%10 \
   sar_process.sbatch
 

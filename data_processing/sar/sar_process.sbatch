@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=sar_process
-#SBATCH --time=48:00:00
-#SBATCH --mem=128G
+#SBATCH --time=15:00:00
+#SBATCH --mem=64G
 #SBATCH --output=logs/sar_daily_%A_%a.out
 #SBATCH --error=logs/sar_daily_%A_%a.err
 #SBATCH -p serc
@@ -14,6 +14,7 @@ set -euo pipefail
 : "${PY_SCRIPT:?Missing PY_SCRIPT}"
 : "${START_DATE:?Missing START_DATE}"
 : "${END_DATE:?Missing END_DATE}"
+: "${CHUNK_SIZE:?Missing CHUNK_SIZE}"
 
 TASK_ID="${SLURM_ARRAY_TASK_ID}"
 JOB_NUM="${TASK_ID}"   # pass through to python as job_num
@@ -25,8 +26,10 @@ mkdir -p logs
 source /home/users/trobinet/uv_activations/activate_lfmc_process.sh
 
 # Compute this task's 6-month range
-chunk_start="$(date -d "${START_DATE} + $((6 * TASK_ID)) months" +%F)"
-chunk_end="$(date -d "${chunk_start} + 6 months - 1 day" +%F)"
+#chunk_start="$(date -d "${START_DATE} + $((6 * TASK_ID)) months" +%F)"
+#chunk_end="$(date -d "${chunk_start} + 6 months - 1 day" +%F)"
+chunk_start="$(date -d "${START_DATE} + $((CHUNK_SIZE * TASK_ID)) months" +%F)"
+chunk_end="$(date -d "${chunk_start} + $CHUNK_SIZE months - 1 day" +%F)"
 
 # Clamp to END_DATE (today)
 if [[ "$(date -d "$chunk_end" +%s)" -gt "$(date -d "$END_DATE" +%s)" ]]; then

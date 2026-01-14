@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH -J nlcd_zarr
-#SBATCH -p serc,konings
+#SBATCH -p serc
 #SBATCH -t 12:00:00
 #SBATCH --mem=200G
 #SBATCH -N 1
@@ -15,8 +15,8 @@ set -euo pipefail
 echo "[$(date)] Job starting on $(hostname)"
 mkdir -p "$HOME/long_lfmc/data_processing/nlcd/logs"
 
-# 1) activate poetry env
-source "$HOME/poetry_activations/activate_long_lfmc_process_env.sh"
+# 1) activate uv env
+source "$HOME/uv_activations/activate_lfmc_process.sh"
 
 # 2) cd to working dir
 cd "$HOME/long_lfmc/data_processing/nlcd"

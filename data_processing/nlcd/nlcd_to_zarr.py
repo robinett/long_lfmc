@@ -5,6 +5,7 @@ import rioxarray as rxr
 from numcodecs import Blosc
 import shutil
 import os
+from dask.diagnostics import ProgressBar
 
 def year_from_name(fp: str) -> int:
     for part in fp.split("_"):
@@ -35,7 +36,7 @@ def open_lazy(fp: str) -> xr.DataArray:
 
 def main():
     in_dir = "/scratch/users/trobinet/long_lfmc/trent_datasets/nlcd/nlcd_raw"
-    out_zarr = "/scratch/users/trobinet/long_lfmc/trent_datasets/nlcd/nlcd_2003_2023.zarr"
+    out_zarr = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/nlcd/nlcd_2003_2023.zarr"
     files = sorted(glob.glob(f"{in_dir}/*.tif"))
     if not files:
         raise SystemExit(f"No .tif files found in {in_dir}")
@@ -53,19 +54,20 @@ def main():
     if os.path.exists(out_zarr):
         shutil.rmtree(out_zarr)
     compressor = Blosc(cname="zstd", clevel=5, shuffle=Blosc.BITSHUFFLE)
-    nlcd.to_dataset().to_zarr(
-        out_zarr,
-        mode="w",
-        consolidated=True,
-        zarr_format=2,  # ← use v2; avoids v3 codec API hassles
-        encoding={
-            "nlcd": {
-                "compressor": compressor,     # v2 key
-                "chunks": (1, 2048, 2048),
-                "dtype": "uint8",
-            }
-        },
-    )
+    with ProgressBar():
+        nlcd.to_dataset().to_zarr(
+            out_zarr,
+            mode="w",
+            consolidated=True,
+            #zarr_format=2,  # ← use v2; avoids v3 codec API hassles
+            encoding={
+                "nlcd": {
+                    "compressor": compressor,     # v2 key
+                    "chunks": (1, 2048, 2048),
+                    "dtype": "uint8",
+                }
+            },
+        )
 
 if __name__ == "__main__":
     main()

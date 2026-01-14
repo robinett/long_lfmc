@@ -57,7 +57,7 @@ def process_range(
     start_date_pac = start_date.tz_localize('America/Los_Angeles')
     end_date_pac = end_date.tz_localize('America/Los_Angeles')
     start_date_utc = start_date_pac.tz_convert('UTC')
-    end_date_utc = end_date_pac.tz_convert('UTC')
+    end_date_utc = end_date_pac.tz_convert('UTC') + pd.Timedelta(days=1)
     days_utc = pd.date_range(start=start_date_utc, end=end_date_utc, freq='D')
     tgt_grid = xr.open_dataset(target_grid_path)
     for d,date_utc in enumerate(days_utc):
@@ -77,16 +77,26 @@ def process_range(
         date_utc_iso_end = (date_utc + pd.Timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
         lon_min, lat_min, lon_max, lat_max = bounding_box
         geom = box(lon_min, lat_min, lon_max, lat_max)
-        results = asf.geo_search(
-            dataset="OPERA-S1",
-            processingLevel="RTC",
-            #beamMode="IW",
-            polarization="VH",
-            flightDirection="DESCENDING",
-            start=date_utc_iso,
-            end=date_utc_iso_end,
-            intersectsWith=geom.wkt,
-        )
+        max_tries = 10
+        sleep_seconds = 60
+        for attempt in range(1,max_tries+1):
+            try:
+                results = asf.geo_search(
+                    dataset="OPERA-S1",
+                    processingLevel="RTC",
+                    #beamMode="IW",
+                    polarization="VH",
+                    flightDirection="DESCENDING",
+                    start=date_utc_iso,
+                    end=date_utc_iso_end,
+                    intersectsWith=geom.wkt,
+                )
+                break  # If successful, exit the loop
+            except Exception as e:
+                print(f"Attempt {attempt} failed for search: {e}")
+                if attempt == max_tries:
+                    raise
+                print(f"Retrying search in {sleep_seconds} seconds...")
         #results = results[:10]
         vh_urls = []
         mask_urls = []
@@ -134,7 +144,20 @@ def process_range(
         #print('downloading files')
         #for url in tqdm(all_urls, desc="Downloading SAR"):
         #    asf.download_url(url, path=scratch_dir)
-        asf.download_urls(urls=all_urls,path=scratch_dir,processes=4)
+        max_tries = 20
+        sleep_seconds = 100
+        for attempt in range(1,max_tries+1):
+            try:
+                asf.download_urls(urls=all_urls,path=scratch_dir,processes=1)
+                break  # If successful, exit the loop
+            except Exception as e:
+                print(f"Attempt {attempt} failed for download: {e}")
+                if attempt == max_tries:
+                    raise
+                # remove everything for the temp file so we don't get confused
+                for name in os.listdir(scratch_dir):
+                    os.remove(os.path.join(scratch_dir, name))
+                print(f"Retrying download in {sleep_seconds} seconds...")
         # open these tifs as a single dataset
         # we just do chunk_size files at a time to keep things reasonable
         chunk_cap = 15
