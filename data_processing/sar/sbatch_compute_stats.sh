@@ -6,7 +6,7 @@
 #SBATCH --time=12:00:00             # Wall time limit (hh:mm:ss)
 #SBATCH --partition=serc,konings    # Partition name
 #SBATCH --nodes=1                   # Number of nodes
-#SBATCH --mem=100GB                  # Memory per node
+#SBATCH --mem=200GB                  # Memory per node
 #SBATCH --mail-type=BEGIN,END,FAIL  # email me
 #SBATCH --mail-user=trobinet@stanford.edu
 

@@ -7,6 +7,8 @@ import pandas as pd
 import rioxarray
 import numpy as np
 import calendar
+from dask.diagnostics import ProgressBar
+import shutil
 
 # Add the parent directory to the path to import plotting
 sys.path.append(
@@ -151,51 +153,57 @@ def nan_skew(x, axis=0):
 def main(ds_path,plots_path,save_stats_path):
     # --- helper: write-or-append a small Dataset to Zarr ---
     def write_vars(ds_piece: xr.Dataset, zpath: str):
-        ds_piece = ds_piece.chunk({"y": 256, "x": 256})
+        ds_piece = ds_piece.chunk({"y": 512, "x": 512})
         mode = "w" if not os.path.exists(zpath) else "a"
         os.makedirs(os.path.dirname(zpath), exist_ok=True)
         ds_piece.to_zarr(zpath, mode=mode)
 
     # open source (unchanged)
     sar_ds = xr.open_zarr(ds_path, chunks='auto')
+    #with ProgressBar():
+    #    sar_ds.load()
+
+    # get rid of the save stats path if it already exists so that we aren't double-writing
+    if os.path.exists(save_stats_path):
+        shutil.rmtree(save_stats_path)
 
     print('computing statistics on dataset')
 
     # ---------------- counts ----------------
     print('computing num_obs')
     num_obs = xr.Dataset({
-        'num_obs_vv': sar_ds['VV'].count(dim='time'),
-        'num_obs_vh': sar_ds['VH'].count(dim='time'),
-        'num_obs_vv_minus_vh': sar_ds['vv_minus_vh'].count(dim='time'),
+        #'num_obs_vv': sar_ds['VV'].count(dim='time'),
+        'num_obs_vh': sar_ds['vh_backscatter'].count(dim='time'),
+        #'num_obs_vv_minus_vh': sar_ds['vv_minus_vh'].count(dim='time'),
     })
     write_vars(num_obs, save_stats_path)
-    plotting.plot_from_xarray(
-        load_type='ds',
-        type_obj=num_obs,
-        var='num_obs_vv',
-        proj_in='EPSG:5070',
-        proj_out='EPSG:5070',
-        fname=os.path.join(plots_path, 'num_obs_vv.png'),
-        cmap='YlOrBr'
-    )
+    #plotting.plot_from_xarray(
+    #    load_type='ds',
+    #    type_obj=num_obs,
+    #    var='num_obs_vh',
+    #    proj_in='EPSG:5070',
+    #    proj_out='EPSG:5070',
+    #    fname=os.path.join(plots_path, 'num_obs_vh.png'),
+    #    cmap='YlOrBr'
+    #)
 
     # ---------------- mean ----------------
     print('computing means')
     means = xr.Dataset({
-        'sar_vv_mean': sar_ds['VV'].mean(dim='time', skipna=True),
-        'sar_vh_mean': sar_ds['VH'].mean(dim='time', skipna=True),
-        'sar_vv_minus_vh_mean': sar_ds['vv_minus_vh'].mean(dim='time', skipna=True),
+        #'sar_vv_mean': sar_ds['VV'].mean(dim='time', skipna=True),
+        'sar_vh_mean': sar_ds['vh_backscatter'].mean(dim='time', skipna=True),
+        #'sar_vv_minus_vh_mean': sar_ds['vv_minus_vh'].mean(dim='time', skipna=True),
     })
     write_vars(means, save_stats_path)
-    plotting.plot_from_xarray(
-        load_type='ds',
-        type_obj=means,
-        var='sar_vv_mean',
-        proj_in='EPSG:5070',
-        proj_out='EPSG:5070',
-        fname=os.path.join(plots_path, 'sar_vv_mean.png'),
-        cmap='YlOrBr'
-    )
+    #plotting.plot_from_xarray(
+    #    load_type='ds',
+    #    type_obj=means,
+    #    var='sar_vv_mean',
+    #    proj_in='EPSG:5070',
+    #    proj_out='EPSG:5070',
+    #    fname=os.path.join(plots_path, 'sar_vv_mean.png'),
+    #    cmap='YlOrBr'
+    #)
     plotting.plot_from_xarray(
         load_type='ds',
         type_obj=means,
@@ -205,75 +213,75 @@ def main(ds_path,plots_path,save_stats_path):
         fname=os.path.join(plots_path, 'sar_vh_mean.png'),
         cmap='YlOrBr'
     )
-    plotting.plot_from_xarray(
-        load_type='ds',
-        type_obj=means,
-        var='sar_vv_minus_vh_mean',
-        proj_in='EPSG:5070',
-        proj_out='EPSG:5070',
-        fname=os.path.join(plots_path, 'sar_vv_minus_vh_mean.png'),
-        cmap='YlOrBr'
-    )
+    #plotting.plot_from_xarray(
+    #    load_type='ds',
+    #    type_obj=means,
+    #    var='sar_vv_minus_vh_mean',
+    #    proj_in='EPSG:5070',
+    #    proj_out='EPSG:5070',
+    #    fname=os.path.join(plots_path, 'sar_vv_minus_vh_mean.png'),
+    #    cmap='YlOrBr'
+    #)
 
     # ---------------- std ----------------
     print('computing std')
     stds = xr.Dataset({
-        'sar_vv_std': sar_ds['VV'].std(dim='time', skipna=True),
-        'sar_vh_std': sar_ds['VH'].std(dim='time', skipna=True),
-        'sar_vv_minus_vh_std': sar_ds['vv_minus_vh'].std(dim='time', skipna=True),
+        #'sar_vv_std': sar_ds['VV'].std(dim='time', skipna=True),
+        'sar_vh_std': sar_ds['vh_backscatter'].std(dim='time', skipna=True),
+        #'sar_vv_minus_vh_std': sar_ds['vv_minus_vh'].std(dim='time', skipna=True),
     })
     write_vars(stds, save_stats_path)
     plotting.plot_from_xarray(
         load_type='ds',
         type_obj=stds,
-        var='sar_vv_std',
+        var='sar_vh_std',
         proj_in='EPSG:5070',
         proj_out='EPSG:5070',
-        fname=os.path.join(plots_path, 'sar_vv_std.png'),
+        fname=os.path.join(plots_path, 'sar_vh_std.png'),
         cmap='YlOrBr'
     )
 
     # ---------------- min ----------------
     print('computing min')
     mins = xr.Dataset({
-        'sar_vv_min': sar_ds['VV'].min(dim='time', skipna=True),
-        'sar_vh_min': sar_ds['VH'].min(dim='time', skipna=True),
-        'sar_vv_minus_vh_min': sar_ds['vv_minus_vh'].min(dim='time', skipna=True),
+        #'sar_vv_min': sar_ds['VV'].min(dim='time', skipna=True),
+        'sar_vh_min': sar_ds['vh_backscatter'].min(dim='time', skipna=True),
+        #'sar_vv_minus_vh_min': sar_ds['vv_minus_vh'].min(dim='time', skipna=True),
     })
     write_vars(mins, save_stats_path)
 
     # ---------------- max ----------------
     print('computing max')
     maxs = xr.Dataset({
-        'sar_vv_max': sar_ds['VV'].max(dim='time', skipna=True),
-        'sar_vh_max': sar_ds['VH'].max(dim='time', skipna=True),
-        'sar_vv_minus_vh_max': sar_ds['vv_minus_vh'].max(dim='time', skipna=True),
+        #'sar_vv_max': sar_ds['VV'].max(dim='time', skipna=True),
+        'sar_vh_max': sar_ds['vh_backscatter'].max(dim='time', skipna=True),
+        #'sar_vv_minus_vh_max': sar_ds['vv_minus_vh'].max(dim='time', skipna=True),
     })
     write_vars(maxs, save_stats_path)
 
-    # ---------------- monthly climatology: VV ----------------
-    print('computing monthly climatological means for VV')
-    vv_monthly = sar_ds['VV'].groupby('time.month').mean(dim='time', skipna=True)
-    for i, month_name in enumerate(calendar.month_abbr[1:], start=1):
-        print(f'  VV {month_name}')
-        var = f'sar_vv_{month_name.lower()}_mean'
-        write_vars(xr.Dataset({var: vv_monthly.sel(month=i)}), save_stats_path)
+    ## ---------------- monthly climatology: VV ----------------
+    #print('computing monthly climatological means for VV')
+    #vv_monthly = sar_ds['VV'].groupby('time.month').mean(dim='time', skipna=True)
+    #for i, month_name in enumerate(calendar.month_abbr[1:], start=1):
+    #    print(f'  VV {month_name}')
+    #    var = f'sar_vv_{month_name.lower()}_mean'
+    #    write_vars(xr.Dataset({var: vv_monthly.sel(month=i)}), save_stats_path)
 
     # ---------------- monthly climatology: VH ----------------
     print('computing monthly climatological means for VH')
-    vh_monthly = sar_ds['VH'].groupby('time.month').mean(dim='time', skipna=True)
+    vh_monthly = sar_ds['vh_backscatter'].groupby('time.month').mean(dim='time', skipna=True)
     for i, month_name in enumerate(calendar.month_abbr[1:], start=1):
-        print(f'  VH {month_name}')
+        print(f'  vh {month_name}')
         var = f'sar_vh_{month_name.lower()}_mean'
         write_vars(xr.Dataset({var: vh_monthly.sel(month=i)}), save_stats_path)
 
-    # ---------------- monthly climatology: VV - VH ----------------
-    print('computing monthly climatological means for VV - VH')
-    dv_monthly = sar_ds['vv_minus_vh'].groupby('time.month').mean(dim='time', skipna=True)
-    for i, month_name in enumerate(calendar.month_abbr[1:], start=1):
-        print(f'  VV-VH {month_name}')
-        var = f'sar_vv_minus_vh_{month_name.lower()}_mean'
-        write_vars(xr.Dataset({var: dv_monthly.sel(month=i)}), save_stats_path)
+    ## ---------------- monthly climatology: VV - VH ----------------
+    #print('computing monthly climatological means for VV - VH')
+    #dv_monthly = sar_ds['vv_minus_vh'].groupby('time.month').mean(dim='time', skipna=True)
+    #for i, month_name in enumerate(calendar.month_abbr[1:], start=1):
+    #    print(f'  VV-VH {month_name}')
+    #    var = f'sar_vv_minus_vh_{month_name.lower()}_mean'
+    #    write_vars(xr.Dataset({var: dv_monthly.sel(month=i)}), save_stats_path)
 
     # ---------------- pixelwise skew/kurt/ACF via apply_ufunc (unchanged) ----------------
     def _nan_stats_1d(a, lags=(1, 2)):
@@ -322,25 +330,26 @@ def main(ds_path,plots_path,save_stats_path):
             {"skew": skew, "kurtosis": kurt, "autocorr_lag1": ac1, "autocorr_lag2": ac2}
         )
 
-    vv = sar_ds["VV"]; vh = sar_ds["VH"]; dv = vv - vh
+    #vv = sar_ds["VV"]; vh = sar_ds["VH"]; dv = vv - vh
+    vh = sar_ds["vh_backscatter"]
 
-    print('computing pixelwise stats for VV')
-    vv_stats = reduce_all_stats(vv).rename({
-        "skew":"vv_skewness","kurtosis":"vv_kurtosis",
-        "autocorr_lag1":"vv_autocorr1","autocorr_lag2":"vv_autocorr2"
-    })
-    write_vars(vv_stats, save_stats_path)
-    plotting.plot_from_xarray(
-        load_type='ds',
-        type_obj=vv_stats,
-        var='vv_skewness',
-        proj_in='EPSG:5070',
-        proj_out='EPSG:5070',
-        fname=os.path.join(plots_path, 'vv_skewness.png'),
-        cmap='RdBu',
-    )
+    #print('computing pixelwise stats for VV')
+    #vv_stats = reduce_all_stats(vv).rename({
+    #    "skew":"vv_skewness","kurtosis":"vv_kurtosis",
+    #    "autocorr_lag1":"vv_autocorr1","autocorr_lag2":"vv_autocorr2"
+    #})
+    #write_vars(vv_stats, save_stats_path)
+    #plotting.plot_from_xarray(
+    #    load_type='ds',
+    #    type_obj=vv_stats,
+    #    var='vv_skewness',
+    #    proj_in='EPSG:5070',
+    #    proj_out='EPSG:5070',
+    #    fname=os.path.join(plots_path, 'vv_skewness.png'),
+    #    cmap='RdBu',
+    #)
 
-    print('computing pixelwise stats for VH')
+    print('computing pixelwise stats for vh')
     vh_stats = reduce_all_stats(vh).rename({
         "skew":"vh_skewness","kurtosis":"vh_kurtosis",
         "autocorr_lag1":"vh_autocorr1","autocorr_lag2":"vh_autocorr2"
@@ -356,21 +365,21 @@ def main(ds_path,plots_path,save_stats_path):
         cmap='RdBu',
     )
 
-    print('computing pixelwise stats for VV - VH')
-    dv_stats = reduce_all_stats(dv).rename({
-        "skew":"vv_minus_vh_skewness","kurtosis":"vv_minus_vh_kurtosis",
-        "autocorr_lag1":"vv_minus_vh_autocorr1","autocorr_lag2":"vv_minus_vh_autocorr2"
-    })
-    write_vars(dv_stats, save_stats_path)
-    plotting.plot_from_xarray(
-        load_type='ds',
-        type_obj=dv_stats,
-        var='vv_minus_vh_skewness',
-        proj_in='EPSG:5070',
-        proj_out='EPSG:5070',
-        fname=os.path.join(plots_path, 'vv_minus_vh_skewness.png'),
-        cmap='RdBu',
-    )
+    #print('computing pixelwise stats for VV - VH')
+    #dv_stats = reduce_all_stats(dv).rename({
+    #    "skew":"vv_minus_vh_skewness","kurtosis":"vv_minus_vh_kurtosis",
+    #    "autocorr_lag1":"vv_minus_vh_autocorr1","autocorr_lag2":"vv_minus_vh_autocorr2"
+    #})
+    #write_vars(dv_stats, save_stats_path)
+    #plotting.plot_from_xarray(
+    #    load_type='ds',
+    #    type_obj=dv_stats,
+    #    var='vv_minus_vh_skewness',
+    #    proj_in='EPSG:5070',
+    #    proj_out='EPSG:5070',
+    #    fname=os.path.join(plots_path, 'vv_minus_vh_skewness.png'),
+    #    cmap='RdBu',
+    #)
 
     print(f"Saved (incrementally) to {save_stats_path}")
     #sar_ds = xr.open_zarr(ds_path, chunks='auto')
@@ -583,7 +592,7 @@ def main(ds_path,plots_path,save_stats_path):
 if __name__ == "__main__":
     # Define the path to the SAR files
     sar_files_path = (
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/sar/'
+        '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/'
         'sar_500m.zarr'
     )
     krishna_plots_path = (
@@ -591,7 +600,7 @@ if __name__ == "__main__":
         'plots'
     )
     save_stats_path = (
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/sar/'
+        '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/'
         'sar_stats.zarr'
     )
     main(sar_files_path, krishna_plots_path, save_stats_path)
