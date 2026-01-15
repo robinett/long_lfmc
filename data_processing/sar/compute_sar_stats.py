@@ -584,7 +584,7 @@ if __name__ == "__main__":
     # Define the path to the SAR files
     sar_files_path = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/sar/'
-        'sar_formatted.zarr'
+        'sar_500m.zarr'
     )
     krishna_plots_path = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/sar/'

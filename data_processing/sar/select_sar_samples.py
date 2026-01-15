@@ -20,13 +20,14 @@ def main():
     
     # glob pattern to pick up everything
     sar_ds = xr.open_zarr(
-        "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_formatted.zarr",
+        "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_500m.zarr",
         chunks="auto",
     )
     lfmc_df = pd.read_csv(
         "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/nfmd/nfmd_processed.csv"
     )
-    vars_to_sample = ['VV', 'VH', 'vv_minus_vh']
+    #vars_to_sample = ['VV', 'VH', 'vv_minus_vh']
+    vars_to_sample = ['vh_backscatter']
     trns = Transformer.from_crs('EPSG:4326','EPSG:5070',always_xy=True)
     trns_back = Transformer.from_crs('EPSG:5070','EPSG:4326',always_xy=True)
     # load up the land cover data that we are going to use to make sure that we are only drawing
@@ -55,8 +56,6 @@ def main():
         all_lat_lon = pd.DataFrame({"latitude": all_lats, "longitude": all_lons})
         all_lat_lon = all_lat_lon.drop_duplicates().reset_index(drop=True)
         for r,row in all_lat_lon.iterrows():
-            if r == 20:
-                break
             if r % 10 == 0:
                 print(f"Processing site {r}/{len(all_lat_lon)}")
             this_lat = row["latitude"]
@@ -104,10 +103,17 @@ def main():
         # repeadly sample from this dataframe until we have achieved our goal number of points
         num_points = len(all_points)
         perm = np.random.permutation(num_points)
-        batch_size = 100
+        # for reference, batch size of 1000 gives about 1800 points per month
+        batch_size = 500
+        # stops at whichever comes first: desired points or max batches
         desired_points = 100_000
+        max_batches = 1
+        # our counter
+        batch_num = 1
         for i in range(0, num_points, batch_size):
             if created_df and out_df.shape[0] >= desired_points:
+                break
+            if batch_num > max_batches:
                 break
             # Get the current batch of points
             idx = perm[i:i+batch_size]
@@ -125,7 +131,13 @@ def main():
             )
             # get the dates and check the land cover for each
             dates = sar_data.coords["time"].values
+            last_month = 0
             for d,date in enumerate(dates):
+                this_month = pd.to_datetime(date).month
+                if this_month != last_month:
+                    print(f'Processing {date} for batch {batch_num}')
+                    print(f'Current number of samples: {out_df.shape[0]}' if created_df else 'No samples yet')
+                    last_month = this_month
                 this_sar = sar_data.sel(time=date).values
                 this_lc = land_cover_ds.sel(
                     x=xr.DataArray(x_arr, dims="points"),
@@ -142,16 +154,26 @@ def main():
                 y_arr_valid = y_arr[okay_cols]
                 # get rid of anywhere that doesn't have a sar value
                 valid_locs = np.where(~np.isnan(sar_valid))
+                if valid_locs[0].size == 0:
+                    continue
                 lc_valid = lc_valid[:,valid_locs].squeeze()
                 sar_valid = sar_valid[valid_locs]
                 x_arr_valid = x_arr_valid[valid_locs]
                 y_arr_valid = y_arr_valid[valid_locs]
                 dom_lc_idx = np.argmax(lc_valid, axis=0)
+                dom_lc_perc = np.max(lc_valid, axis=0)
+                if type(dom_lc_idx) != np.ndarray:
+                    dom_lc_idx = [dom_lc_idx]
+                    dom_lc_perc = [dom_lc_perc]
+                
+                #    dom_lc = [0]
+                #    idx_okay = [False]
+                #else:
                 dom_lc = [0 for n in range(len(dom_lc_idx))]
                 idx_okay = [False for n in range(len(dom_lc_idx))]
                 for n in range(len(dom_lc_idx)):
                     dom_lc[n] = all_land_covers[dom_lc_idx[n]]
-                    if dom_lc[n] in allowed_landcovers:
+                    if dom_lc[n] in allowed_landcovers and dom_lc_perc[n] >= 0.5:
                         idx_okay[n] = True
                 final_xs = x_arr_valid[idx_okay]
                 final_ys = y_arr_valid[idx_okay]
@@ -173,7 +195,11 @@ def main():
                         "date": final_date,
                         var_fmt: final_sar
                     })], ignore_index=True)
-                print(out_df)
+            print(out_df)
+            batch_num += 1
+        lat_lon_combos = list(zip(out_df["longitude"], out_df["latitude"]))
+        unique_lat_lon_combos = list(set(lat_lon_combos))
+        print(f"Sampled {len(out_df)} points from {len(unique_lat_lon_combos)} unique locations")
         out_df.to_csv(
             f"/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sampled/{var_fmt}_samples_random.csv",
             index=False
