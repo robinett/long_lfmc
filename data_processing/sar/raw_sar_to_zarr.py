@@ -7,6 +7,7 @@ import sys
 import os
 import shutil
 from tqdm import tqdm
+import zarr
 
 date_re = re.compile(r"s1_(\d{8})\.nc$")
 
@@ -21,19 +22,36 @@ def add_time(ds, fp):
 def main():
     raw_dir = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily"
     out_zarr = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_500m.zarr"
+    consolidate_only = False
+    if consolidate_only:
+        zarr.convenience.consolidate_metadata(out_zarr)
+        print('Zarr metadata consolidated. Exiting.')
+        sys.exit()
     # if out_zarr exists, get rid of it
     if os.path.exists(out_zarr):
-        shutil.rmtree(out_zarr)
+        # make sure the user is cool
+        response = input(f"{out_zarr} exists. Are you okay deleting it? (y/n) ")
+        if response.lower() == "n":
+            print("Exiting.")
+            sys.exit()
+        elif response.lower() == "y":
+            shutil.rmtree(out_zarr)
+        else:
+            print('Unacceptable response. Exiting.')
+            sys.exit()
     files = sorted(glob.glob(f"{raw_dir}/s1_*.nc"))
-    files = files[:950] # while we are still finishing downloading all of our sar files
-    #print(files[:950])
-    #sys.exit()
+    files = files[1400:1700] # while we are still finishing downloading all of our sar files
     first = True
     for i, fp in enumerate(tqdm(files, desc="Adding SAR file to zarr")):
         #print(i, len(files), fp)
         ds = xr.open_dataset(
             fp,
             cache=False,
+        )
+        # apply our range filtering to be reasonable
+        vh_range = [-35.0, 0.0]
+        ds = ds.where(
+            (ds["vh_backscatter"] >= vh_range[0]) & (ds["vh_backscatter"] <= vh_range[1])
         )
         # chunk the dataset
         ds = add_time(ds, fp)
@@ -50,6 +68,8 @@ def main():
             ds.to_zarr(out_zarr, mode=mode)
         ds.close()
         first = False
+    # consolidate zarr
+    zarr.consolidate_metadata(out_zarr)
 
 if __name__ == "__main__":
     main()

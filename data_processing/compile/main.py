@@ -27,40 +27,41 @@ def main():
     )
     # general scratch directory for this project
     scratch_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets'
+    oak_dir = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets'
     # get all the information that we need for the features and labels
     features = {
         'dirs':{
             'daymet':os.path.join(
-                scratch_dir,
+                oak_dir,
                 'daymet/daymet_all_vars.zarr'
             ),
             'modis':os.path.join(
-                scratch_dir,
+                oak_dir,
                 'modis/modis_regridded_gapfilled/quality_1/interpolated',
                 'modis_all_vars.zarr'
             ),
             'static':os.path.join(
-                scratch_dir,
+                oak_dir,
                 'static/static_features_500m_epsg5070_float32.nc'
             ),
             'climate_zone':os.path.join(
-                scratch_dir,
+                oak_dir,
                 'climate_zones/climate_zone_per_pixel_westUS.nc4'
             ),
             'sar_stats':os.path.join(
-                scratch_dir,
+                oak_dir,
                 'sar/sar_stats.zarr'
             ),
             'landcover_frac':os.path.join(
-                scratch_dir,
+                oak_dir,
                 'nlcd/nlcd_target_grid_2003_2023.zarr'
             ),
             'nlcd_class':os.path.join(
-                scratch_dir,
+                oak_dir,
                 'nlcd/nlcd_2003_2023.zarr'
             ),
             'landcover_change':os.path.join(
-                scratch_dir,
+                oak_dir,
                 'nlcd/nlcd_land_cover_change_2016_2021.zarr'
             ),
             #'krishna_stats':os.path.join(
@@ -100,30 +101,30 @@ def main():
             ],
             'climate_zone':['climate_zone'],
             'sar_stats':[
-                'sar_vv_mean',
+                #'sar_vv_mean',
                 'sar_vh_mean',
-                'sar_vv_minus_vh_mean',
-                'sar_vv_std',
+                #'sar_vv_minus_vh_mean',
+                #'sar_vv_std',
                 'sar_vh_std',
-                'sar_vv_minus_vh_std',
-                'sar_vv_min',
+                #'sar_vv_minus_vh_std',
+                #'sar_vv_min',
                 'sar_vh_min',
-                'sar_vv_minus_vh_min',
-                'sar_vv_max',
+                #'sar_vv_minus_vh_min',
+                #'sar_vv_max',
                 'sar_vh_max',
-                'sar_vv_minus_vh_max',
-                'sar_vv_jan_mean',
-                'sar_vv_feb_mean',
-                'sar_vv_mar_mean',
-                'sar_vv_apr_mean',
-                'sar_vv_may_mean',
-                'sar_vv_jun_mean',
-                'sar_vv_jul_mean',
-                'sar_vv_aug_mean',
-                'sar_vv_sep_mean',
-                'sar_vv_oct_mean',
-                'sar_vv_nov_mean',
-                'sar_vv_dec_mean',
+                #'sar_vv_minus_vh_max',
+                #'sar_vv_jan_mean',
+                #'sar_vv_feb_mean',
+                #'sar_vv_mar_mean',
+                #'sar_vv_apr_mean',
+                #'sar_vv_may_mean',
+                #'sar_vv_jun_mean',
+                #'sar_vv_jul_mean',
+                #'sar_vv_aug_mean',
+                #'sar_vv_sep_mean',
+                #'sar_vv_oct_mean',
+                #'sar_vv_nov_mean',
+                #'sar_vv_dec_mean',
                 'sar_vh_jan_mean',
                 'sar_vh_feb_mean',
                 'sar_vh_mar_mean',
@@ -136,30 +137,30 @@ def main():
                 'sar_vh_oct_mean',
                 'sar_vh_nov_mean',
                 'sar_vh_dec_mean',
-                'sar_vv_minus_vh_jan_mean',
-                'sar_vv_minus_vh_feb_mean',
-                'sar_vv_minus_vh_mar_mean',
-                'sar_vv_minus_vh_apr_mean',
-                'sar_vv_minus_vh_may_mean',
-                'sar_vv_minus_vh_jun_mean',
-                'sar_vv_minus_vh_jul_mean',
-                'sar_vv_minus_vh_aug_mean',
-                'sar_vv_minus_vh_sep_mean',
-                'sar_vv_minus_vh_oct_mean',
-                'sar_vv_minus_vh_nov_mean',
-                'sar_vv_minus_vh_dec_mean',
-                'vv_skewness',
+                #'sar_vv_minus_vh_jan_mean',
+                #'sar_vv_minus_vh_feb_mean',
+                #'sar_vv_minus_vh_mar_mean',
+                #'sar_vv_minus_vh_apr_mean',
+                #'sar_vv_minus_vh_may_mean',
+                #'sar_vv_minus_vh_jun_mean',
+                #'sar_vv_minus_vh_jul_mean',
+                #'sar_vv_minus_vh_aug_mean',
+                #'sar_vv_minus_vh_sep_mean',
+                #'sar_vv_minus_vh_oct_mean',
+                #'sar_vv_minus_vh_nov_mean',
+                #'sar_vv_minus_vh_dec_mean',
+                #'vv_skewness',
                 'vh_skewness',
-                'vv_minus_vh_skewness',
-                'vv_kurtosis',
+                #'vv_minus_vh_skewness',
+                #'vv_kurtosis',
                 'vh_kurtosis',
-                'vv_minus_vh_kurtosis',
-                'vv_autocorr1',
+                #'vv_minus_vh_kurtosis',
+                #'vv_autocorr1',
                 'vh_autocorr1',
-                'vv_minus_vh_autocorr1',
-                'vv_autocorr2',
+                #'vv_minus_vh_autocorr1',
+                #'vv_autocorr2',
                 'vh_autocorr2',
-                'vv_minus_vh_autocorr2'
+                #'vv_minus_vh_autocorr2'
             ],
             'landcover_frac':[
                 'barren',
@@ -278,17 +279,21 @@ def main():
     labels = {
         'dirs':{
             'nfmd':os.path.join(
-                scratch_dir,
+                oak_dir,
                 'nfmd/nfmd_processed.csv'
             ),
             #'vv':os.path.join(
             #    scratch_dir,
             #    'sar/sampled/vv_samples.csv'
             #),
-            'vh':os.path.join(
-                scratch_dir,
-                'sar/sampled/vh_samples.csv'
+            'vh_at_sites':os.path.join(
+                oak_dir,
+                'sar/sampled/vh_backscatter_samples_at_sites.csv'
             ),
+            'vh_at_random':os.path.join(
+                oak_dir,
+                'sar/sampled/vh_backscatter_samples_random.csv'
+            )
             #'vv_minus_vh':os.path.join(
             #    scratch_dir,
             #    'sar/sampled/vv_minus_vh_samples.csv'
@@ -297,12 +302,14 @@ def main():
         'vars':{
             'nfmd':['lfmc'],
             #'vv':['VV'],
-            'vh':['VH'],
+            'vh_at_sites':['vh_backscatter'],
+            'vh_at_random':['vh_backscatter'],
             #'vv_minus_vh':['vv_minus_vh']
         }
     }
     # number of random samples to include from RS data
-    num_samples_if_available = 6500
+    # WE CONTROL THIS NOW IN THE SAMPLING; JUST TAKE ALL
+    num_samples_if_available = 100000000.0
     # what does should be included? 0 is current day, 1 is previous day, 5 is 5
     # days before, etc.
     # this is only relevant for transformer

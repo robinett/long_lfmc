@@ -9,6 +9,7 @@ import numpy as np
 import calendar
 from dask.diagnostics import ProgressBar
 import shutil
+from pyproj import Transformer
 
 # Add the parent directory to the path to import plotting
 sys.path.append(
@@ -163,6 +164,39 @@ def main(ds_path,plots_path,save_stats_path):
     #with ProgressBar():
     #    sar_ds.load()
 
+
+    # timeseries plotting for debugging
+    trns = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
+    sample_point = [-113.848216, 35.145574]
+    sample_point_5070 = trns.transform(*sample_point)
+    sar_point = sar_ds.sel(x=sample_point_5070[0], y=sample_point_5070[1], method="nearest")
+    sar_vals = sar_point['vh_backscatter'].values
+    sar_dates = sar_point['time'].values
+    plotting.plot_timeseries(
+        sar_dates, sar_vals,
+        xlabel='Date', ylabel='Backscatter (dB)',
+        save_name=os.path.join(plots_path, 'sar_backscatter_timeseries_crazy_std.png'),
+        title=f'{sample_point[0]}_{sample_point[1]}',
+        time_bound=[pd.Timestamp('2018-03-01'), pd.Timestamp('2018-03-15')]
+    )
+    # timeseries plotting for debugging
+    trns = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
+    sample_point = [-118.976675, 37.715220]
+    sample_point_5070 = trns.transform(*sample_point)
+    sar_point = sar_ds.sel(x=sample_point_5070[0], y=sample_point_5070[1], method="nearest")
+    sar_vals = sar_point['vh_backscatter'].values
+    sar_dates = sar_point['time'].values
+    plotting.plot_timeseries(
+        sar_dates, sar_vals,
+        xlabel='Date', ylabel='Backscatter (dB)',
+        save_name=os.path.join(plots_path, 'sar_backscatter_timeseries_normal_std.png'),
+        title=f'{sample_point[0]}_{sample_point[1]}'
+    )
+
+
+
+    sys.exit()
+
     # get rid of the save stats path if it already exists so that we aren't double-writing
     if os.path.exists(save_stats_path):
         shutil.rmtree(save_stats_path)
@@ -177,15 +211,15 @@ def main(ds_path,plots_path,save_stats_path):
         #'num_obs_vv_minus_vh': sar_ds['vv_minus_vh'].count(dim='time'),
     })
     write_vars(num_obs, save_stats_path)
-    #plotting.plot_from_xarray(
-    #    load_type='ds',
-    #    type_obj=num_obs,
-    #    var='num_obs_vh',
-    #    proj_in='EPSG:5070',
-    #    proj_out='EPSG:5070',
-    #    fname=os.path.join(plots_path, 'num_obs_vh.png'),
-    #    cmap='YlOrBr'
-    #)
+    plotting.plot_from_xarray(
+        load_type='ds',
+        type_obj=num_obs,
+        var='num_obs_vh',
+        proj_in='EPSG:5070',
+        proj_out='EPSG:5070',
+        fname=os.path.join(plots_path, 'num_obs_vh.png'),
+        cmap='YlOrBr'
+    )
 
     # ---------------- mean ----------------
     print('computing means')

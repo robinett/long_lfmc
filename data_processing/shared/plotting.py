@@ -247,3 +247,20 @@ def plot_multiple_xarray_datasets(
     plt.savefig(savename,dpi=300,bbox_inches='tight')
     plt.close()
 
+def plot_timeseries(times,vals,xlabel,ylabel,save_name,title=None,time_bound=None):
+    # get rid of NaNs
+    times = times[~np.isnan(vals)]
+    vals = vals[~np.isnan(vals)]
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(times, vals, marker='o', linestyle='-')
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.xticks(rotation=45)
+
+    if time_bound:
+        plt.xlim(time_bound)
+    if title:
+        plt.title(title)
+    plt.savefig(save_name)
+    plt.close()
