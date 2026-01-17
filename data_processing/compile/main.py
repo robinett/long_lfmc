@@ -60,10 +60,10 @@ def main():
                 oak_dir,
                 'nlcd/nlcd_2003_2023.zarr'
             ),
-            'landcover_change':os.path.join(
-                oak_dir,
-                'nlcd/nlcd_land_cover_change_2016_2021.zarr'
-            ),
+            #'landcover_change':os.path.join(
+            #    oak_dir,
+            #    'nlcd/nlcd_land_cover_change_2016_2021.zarr'
+            #),
             #'krishna_stats':os.path.join(
             #    scratch_dir,
             #    'krishna/stats/krishna_lfmc_statistics.nc4'
@@ -178,9 +178,9 @@ def main():
             'nlcd_class':[
                 'nlcd'
             ],
-            'landcover_change':[
-                'land_cover_change_flag'
-            ],
+            #'landcover_change':[
+            #    'land_cover_change_flag'
+            #],
             #'krishna_stats':[
             #    'retrieved_lfmc_mean',
             #    'retrieved_lfmc_std',

@@ -673,12 +673,12 @@ def create_site_split(
     # split sources
     insitu = data_info[data_info['source_legible'] == 'nfmd']
     vv     = data_info[data_info['source_legible'] == 'vv']
-    vh     = data_info[data_info['source_legible'] == 'vh']
+    vh     = data_info[data_info['source_legible'] == 'vh_backscatter']
     # get the index and split by stratifier if provided
     if stratifier is not None:
         insitu_idx = data_info[data_info['source_legible'] == 'nfmd'].index
         vv_idx     = data_info[data_info['source_legible'] == 'vv'].index
-        vh_idx     = data_info[data_info['source_legible'] == 'vh'].index
+        vh_idx     = data_info[data_info['source_legible'] == 'vh_backscatter'].index
         insitu_strat = stratifier[insitu_idx]
         vv_strat     = stratifier[vv_idx]
         vh_strat     = stratifier[vh_idx]
@@ -1069,7 +1069,7 @@ def train_fold_k(
     # split out the validation data
     remaining_insitu_obs = remaining_info[remaining_info['source_legible'] == 'nfmd'].shape[0]
     remaining_vv_obs = remaining_info[remaining_info['source_legible'] == 'vv'].shape[0]
-    remaining_vh_obs = remaining_info[remaining_info['source_legible'] == 'vh'].shape[0]
+    remaining_vh_obs = remaining_info[remaining_info['source_legible'] == 'vh_backscatter'].shape[0]
     num_val_obs_insitu = remaining_insitu_obs * val_split
     num_val_obs_vv = remaining_vv_obs * val_split
     num_val_obs_vh = remaining_vh_obs * val_split
@@ -1097,17 +1097,17 @@ def train_fold_k(
     )
     # Sanity check
     total_test = test_info.shape[0]
-    insitu_test = test_info[test_info['source'] == 'nfmd'].shape[0]
-    vv_test = test_info[test_info['source'] == 'vv'].shape[0]
-    vh_test = test_info[test_info['source'] == 'vh'].shape[0]
+    insitu_test = test_info[test_info['source_legible'] == 'nfmd'].shape[0]
+    vv_test = test_info[test_info['source_legible'] == 'vv'].shape[0]
+    vh_test = test_info[test_info['source_legible'] == 'vh_backscatter'].shape[0]
     total_val = val_info.shape[0]
-    insitu_val = val_info[val_info['source'] == 'nfmd'].shape[0]
-    vv_val = val_info[val_info['source'] == 'vv'].shape[0]
-    vh_val = val_info[val_info['source'] == 'vh'].shape[0]
+    insitu_val = val_info[val_info['source_legible'] == 'nfmd'].shape[0]
+    vv_val = val_info[val_info['source_legible'] == 'vv'].shape[0]
+    vh_val = val_info[val_info['source_legible'] == 'vh_backscatter'].shape[0]
     total_train = train_info.shape[0]
-    insitu_train = train_info[train_info['source'] == 'nfmd'].shape[0]
-    vv_train = train_info[train_info['source'] == 'vv'].shape[0]
-    vh_train = train_info[train_info['source'] == 'vh'].shape[0]
+    insitu_train = train_info[train_info['source_legible'] == 'nfmd'].shape[0]
+    vv_train = train_info[train_info['source_legible'] == 'vv'].shape[0]
+    vh_train = train_info[train_info['source_legible'] == 'vh_backscatter'].shape[0]
     print(
         f"Test: {total_test} ({insitu_test} insitu, {vv_test} vv, {vh_test} vh) | "
         f"Val: {total_val} ({insitu_val} insitu, {vv_val} vv, {vh_val} vh) | "
@@ -1860,7 +1860,7 @@ def main():
     stratifier = datasets[6]
     num_insitu_obs = info[info['source_legible'] == 'nfmd'].shape[0]
     num_vv_obs = info[info['source_legible'] == 'vv'].shape[0]
-    num_vh_obs = info[info['source_legible'] == 'vh'].shape[0]
+    num_vh_obs = info[info['source_legible'] == 'vh_backscatter'].shape[0]
     # make warmup the first 3 epochs
     batches_per_epoch = (num_insitu_obs + num_vv_obs + num_vh_obs) / batch_size * 0.7
     warmup_steps = int(3 * batches_per_epoch)

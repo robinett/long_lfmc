@@ -177,7 +177,7 @@ def main(ds_path,plots_path,save_stats_path):
         xlabel='Date', ylabel='Backscatter (dB)',
         save_name=os.path.join(plots_path, 'sar_backscatter_timeseries_crazy_std.png'),
         title=f'{sample_point[0]}_{sample_point[1]}',
-        time_bound=[pd.Timestamp('2018-03-01'), pd.Timestamp('2018-03-15')]
+        #time_bound=[pd.Timestamp('2018-03-01'), pd.Timestamp('2018-03-15')]
     )
     # timeseries plotting for debugging
     trns = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
@@ -192,14 +192,18 @@ def main(ds_path,plots_path,save_stats_path):
         save_name=os.path.join(plots_path, 'sar_backscatter_timeseries_normal_std.png'),
         title=f'{sample_point[0]}_{sample_point[1]}'
     )
-
-
-
-    sys.exit()
-
     # get rid of the save stats path if it already exists so that we aren't double-writing
     if os.path.exists(save_stats_path):
-        shutil.rmtree(save_stats_path)
+        # make sure the user is okay getting rid of the old file
+        response = input(f"{save_stats_path} exists. Are you okay deleting it? (y/n) ")
+        if response.lower() == "n":
+            print("Exiting.")
+            sys.exit()
+        elif response.lower() == "y":
+            shutil.rmtree(save_stats_path)
+        else:
+            print('Unacceptable response. Exiting.')
+            sys.exit()
 
     print('computing statistics on dataset')
 
@@ -211,15 +215,15 @@ def main(ds_path,plots_path,save_stats_path):
         #'num_obs_vv_minus_vh': sar_ds['vv_minus_vh'].count(dim='time'),
     })
     write_vars(num_obs, save_stats_path)
-    plotting.plot_from_xarray(
-        load_type='ds',
-        type_obj=num_obs,
-        var='num_obs_vh',
-        proj_in='EPSG:5070',
-        proj_out='EPSG:5070',
-        fname=os.path.join(plots_path, 'num_obs_vh.png'),
-        cmap='YlOrBr'
-    )
+    #plotting.plot_from_xarray(
+    #    load_type='ds',
+    #    type_obj=num_obs,
+    #    var='num_obs_vh',
+    #    proj_in='EPSG:5070',
+    #    proj_out='EPSG:5070',
+    #    fname=os.path.join(plots_path, 'num_obs_vh.png'),
+    #    cmap='YlOrBr'
+    #)
 
     # ---------------- mean ----------------
     print('computing means')
@@ -238,15 +242,15 @@ def main(ds_path,plots_path,save_stats_path):
     #    fname=os.path.join(plots_path, 'sar_vv_mean.png'),
     #    cmap='YlOrBr'
     #)
-    plotting.plot_from_xarray(
-        load_type='ds',
-        type_obj=means,
-        var='sar_vh_mean',
-        proj_in='EPSG:5070',
-        proj_out='EPSG:5070',
-        fname=os.path.join(plots_path, 'sar_vh_mean.png'),
-        cmap='YlOrBr'
-    )
+    #plotting.plot_from_xarray(
+    #    load_type='ds',
+    #    type_obj=means,
+    #    var='sar_vh_mean',
+    #    proj_in='EPSG:5070',
+    #    proj_out='EPSG:5070',
+    #    fname=os.path.join(plots_path, 'sar_vh_mean.png'),
+    #    cmap='YlOrBr'
+    #)
     #plotting.plot_from_xarray(
     #    load_type='ds',
     #    type_obj=means,
@@ -265,15 +269,15 @@ def main(ds_path,plots_path,save_stats_path):
         #'sar_vv_minus_vh_std': sar_ds['vv_minus_vh'].std(dim='time', skipna=True),
     })
     write_vars(stds, save_stats_path)
-    plotting.plot_from_xarray(
-        load_type='ds',
-        type_obj=stds,
-        var='sar_vh_std',
-        proj_in='EPSG:5070',
-        proj_out='EPSG:5070',
-        fname=os.path.join(plots_path, 'sar_vh_std.png'),
-        cmap='YlOrBr'
-    )
+    #plotting.plot_from_xarray(
+    #    load_type='ds',
+    #    type_obj=stds,
+    #    var='sar_vh_std',
+    #    proj_in='EPSG:5070',
+    #    proj_out='EPSG:5070',
+    #    fname=os.path.join(plots_path, 'sar_vh_std.png'),
+    #    cmap='YlOrBr'
+    #)
 
     # ---------------- min ----------------
     print('computing min')
@@ -627,7 +631,7 @@ if __name__ == "__main__":
     # Define the path to the SAR files
     sar_files_path = (
         '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/'
-        'sar_500m.zarr'
+        'sar_500m_partial.zarr'
     )
     krishna_plots_path = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/sar/'
@@ -635,6 +639,6 @@ if __name__ == "__main__":
     )
     save_stats_path = (
         '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/'
-        'sar_stats.zarr'
+        'sar_stats_new.zarr'
     )
     main(sar_files_path, krishna_plots_path, save_stats_path)

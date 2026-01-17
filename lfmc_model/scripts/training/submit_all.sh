@@ -9,10 +9,10 @@ set -euo pipefail
 ########################
 
 input_data_dir="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/inputs/sarmultitask_vh"
+trent_datasets/lfmc_model/data/inputs/news1_base"
 
 save_root="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/outputs/sarmultitask_pixelsites"
+trent_datasets/lfmc_model/data/outputs/news1_base"
 
 ########################
 # Job throttling config
@@ -60,7 +60,9 @@ wait_for_slot() {
 ########################
 
 # things that we won't specify a grid search for
-num_tasks=2
+num_tasks=1
+weighting_type='manual'
+task_weights=(5.0 1.0)
 
 # Usually you'll keep most of these small/singleton
 batch_sizes=(128)
@@ -144,8 +146,8 @@ lnl${long_num_layers}"
                     "${long_dim_feedforward}" \
                   --long_out_dim "${long_out_dim}" \
                   --num_tasks "${num_tasks}" \
-                  --task_weight_type 'gradnorm' \
-                  --manual_task_weights 1.0 1.0
+                  --task_weight_type "${weighting_type}" \
+                  --manual_task_weights "${task_weights[@]}"
 
                 exp_idx=$((exp_idx + 1))
 

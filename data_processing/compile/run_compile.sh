@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH --job-name=compile  # Job name
-#SBATCH --output=./logs/slurm-%j.out       # Output log file (%j = job ID)
-#SBATCH --error=./logs/slurm-%j.err        # Error log file
+#SBATCH --output=./logs/compile_%j.out       # Output log file (%j = job ID)
+#SBATCH --error=./logs/compile_%j.err        # Error log file
 #SBATCH --time=06:00:00             # Wall time limit (hh:mm:ss)
 #SBATCH --partition=serc    # Partition name
 #SBATCH --nodes=1                   # Number of nodes

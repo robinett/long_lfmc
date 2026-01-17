@@ -577,6 +577,7 @@ def build_inputs(
         print(f'Processing CSV {c+1}/{len(csvs)}: {csv}')
         #df = pd.read_csv(csv, parse_dates=['date'])
         df = load_and_clean_csv(csv)
+        print(df.columns)
         # keep anything that we need for both long and short lag days
         combined_lag_days = list(set(short_lag_days).union(set(long_lag_days)))
         df = filter_lag_columns(
@@ -655,8 +656,8 @@ def build_inputs(
                 [source_labels, np.ones(len(vv_samples),dtype=int)]
             )
             [source_legible.append('vv') for i in range(len(vv_samples))]
-        if 'VH' in target_cols:
-            vh_df = df[df['VH'].notna()]
+        if 'vh_backscatter' in target_cols:
+            vh_df = df[df['vh_backscatter'].notna()]
             if num_rs_samples > len(vh_df):
                 print(
                     f"Warning: requested {num_rs_samples} samples from VH"
@@ -671,7 +672,7 @@ def build_inputs(
             source_labels = np.concatenate(
                 [source_labels, (np.ones(len(vh_samples),dtype=int) + 1)]
             )
-            [source_legible.append('vh') for i in range(len(vh_samples))]
+            [source_legible.append('vh_backscatter') for i in range(len(vh_samples))]
         df = adding_df
         df['source_legible'] = source_legible
         # separate out our different dataframes
@@ -930,16 +931,24 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     # fill in follwing necessary information for producing the correct dataset
-    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/sarmultitask_vh'
+    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/news1_base'
     os.makedirs(save_dir, exist_ok=True)
     csv_names = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/compiled/'
         'y_InsituVh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverfracLandcoverchange_Z_Nlcdclass_180d/'
         'compiled_data_*.csv'
     )
-    csv_names = sorted(glob.glob(csv_names))
-    first_label_date = datetime.date(2003, 1, 1)
-    last_label_date = datetime.date(2023, 12, 31)
+    csv_names_all = sorted(glob.glob(csv_names))
+    first_label_date = pd.to_datetime('2003-01-01')
+    last_label_date = pd.to_datetime('2023-12-31')
+    csv_names = []
+    for c,csv_n in enumerate(csv_names_all):
+        fname = csv_n.split('/')[-1]
+        fname = fname.split('.')[0]
+        start_date = pd.to_datetime(fname.split('_')[2])
+        end_date = pd.to_datetime(fname.split('_')[3])
+        if start_date.year >= first_label_date.year and end_date.year <= last_label_date.year:
+            csv_names.append(csv_n)
     static_features = [
         'slope',
         'elevation',
@@ -1023,11 +1032,12 @@ if __name__ == "__main__":
     ]
     stratifier = 'nlcd'
     include_lag = True
-    #target_cols = ['lfmc']
-    target_cols = ['lfmc','VH']
+    target_cols = ['lfmc']
+    #target_cols = ['lfmc','vh_backscatter']
     #target_cols = ['lfmc','VV','VH']
     #num_rs_samples = 0
-    num_rs_samples = 6500.0
+    # just keep all of them
+    num_rs_samples = 100_000
     info_features = [
         'date',
         'latitude',

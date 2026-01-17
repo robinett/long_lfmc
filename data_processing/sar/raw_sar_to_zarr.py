@@ -21,7 +21,7 @@ def add_time(ds, fp):
 
 def main():
     raw_dir = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily"
-    out_zarr = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_500m.zarr"
+    out_zarr = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_500m_full.zarr"
     consolidate_only = False
     if consolidate_only:
         zarr.convenience.consolidate_metadata(out_zarr)
@@ -40,7 +40,7 @@ def main():
             print('Unacceptable response. Exiting.')
             sys.exit()
     files = sorted(glob.glob(f"{raw_dir}/s1_*.nc"))
-    files = files[1400:1700] # while we are still finishing downloading all of our sar files
+    #files = files[1000:2000] # while we are still finishing downloading all of our sar files
     first = True
     for i, fp in enumerate(tqdm(files, desc="Adding SAR file to zarr")):
         #print(i, len(files), fp)
@@ -56,7 +56,7 @@ def main():
         # chunk the dataset
         ds = add_time(ds, fp)
         ds = ds.chunk(
-            {'x': 512, 'y': 512, 'time': 1}
+           {'x': 512, 'y': 512, 'time': 1}
         )
         # OPTIONAL: if lat/lon are identical every day, store once:
         if not first:
@@ -69,7 +69,7 @@ def main():
         ds.close()
         first = False
     # consolidate zarr
-    zarr.consolidate_metadata(out_zarr)
+    zarr.convenience.consolidate_metadata(out_zarr)
 
 if __name__ == "__main__":
     main()

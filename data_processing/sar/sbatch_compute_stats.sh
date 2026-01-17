@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH --job-name=sar_stats  # Job name
-#SBATCH --output=./logs/slurm-%j.out       # Output log file (%j = job ID)
-#SBATCH --error=./logs/slurm-%j.err        # Error log file
+#SBATCH --output=./logs/sar_stats_%j.out       # Output log file (%j = job ID)
+#SBATCH --error=./logs/sar_stats_%j.err        # Error log file
 #SBATCH --time=12:00:00             # Wall time limit (hh:mm:ss)
 #SBATCH --partition=serc    # Partition name
 #SBATCH --nodes=1                   # Number of nodes

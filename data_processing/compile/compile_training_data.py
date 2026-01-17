@@ -34,6 +34,8 @@ def compile_data(
     for l,label_name in enumerate(label_names):
         print('working on label source:', label_name)
         this_labs = pd.read_csv(label_info['dirs'][label_name])
+        this_labs = this_labs.loc[:, ~this_labs.columns.str.contains('^Unnamed')]
+        print(this_labs)
         #if label_name == 'nfmd':
         #    this_labs = this_labs.sample(n=200, random_state=42)  # shuffle
         # add a column that notes the source of the label
@@ -63,6 +65,10 @@ def compile_data(
             labels = pd.concat([labels, this_labs], ignore_index=True)
     print('labels:')
     print(labels)
+    #print(labels.columns)
+    #print(labels.loc[labels['lfmc'].notna(), 'lfmc'])
+    #print(labels.loc[labels['vh_backscatter'].notna(), 'vh_backscatter'])
+    #sys.exit()
     print('figuring out when we need to open files...')
     # get the range of dates we could possibly need to open files for
     first_date_possible = start_date - datetime.timedelta(
