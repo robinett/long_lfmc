@@ -195,7 +195,8 @@ def main(ds_path,plots_path,save_stats_path):
     # get rid of the save stats path if it already exists so that we aren't double-writing
     if os.path.exists(save_stats_path):
         # make sure the user is okay getting rid of the old file
-        response = input(f"{save_stats_path} exists. Are you okay deleting it? (y/n) ")
+        #response = input(f"{save_stats_path} exists. Are you okay deleting it? (y/n) ")
+        response = 'y'
         if response.lower() == "n":
             print("Exiting.")
             sys.exit()
@@ -631,7 +632,7 @@ if __name__ == "__main__":
     # Define the path to the SAR files
     sar_files_path = (
         '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/'
-        'sar_500m_partial.zarr'
+        'sar_500m_full.zarr'
     )
     krishna_plots_path = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/sar/'

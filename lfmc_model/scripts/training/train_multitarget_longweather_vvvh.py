@@ -297,7 +297,10 @@ class StratifiedBatchSampler(Sampler):
 
 def pick_sites_stratified(
     df: pd.DataFrame,
+    orig_df: pd.DataFrame,
     goal: int,
+    must_use_sites: list[tuple] = None,
+    not_allowed_sites: list[tuple] = None,
     strat_col: str = "stratifier",
     random_state: int = 42
 ):
@@ -312,6 +315,10 @@ def pick_sites_stratified(
     df : DataFrame
         Must have columns ['lat', 'lon', 'n', strat_col].
         Each row = one site.
+    orig_df : DataFrame
+        Original DataFrame (unfiltered) for getting the original
+        stratifier distribution. Can be same as df if no filtering
+        has been done.
     goal : int
         Desired total number of observations (sum of n).
     strat_col : str
@@ -326,23 +333,26 @@ def pick_sites_stratified(
         (You can also grab df.loc[selected_idx] if you
          want idx/stratifier/etc.)
     """
-    #print(df)
-    #print(goal)
     if df.empty or goal <= 0:
         return []
     if strat_col not in df.columns:
         raise ValueError(f"'{strat_col}' column not found in df.")
     rng = np.random.default_rng(random_state)
+    # get rid of sites we can't use if needed
+    if not_allowed_sites is not None:
+        df_clean = df[~df[['lat', 'lon']].apply(tuple, axis=1).isin(not_allowed_sites)]
+    else:
+        df_clean = df
     # --- 1. overall obs per stratum (by n) ----------------------
-    obs_per_stratum = df.groupby(strat_col)["n"].sum()
+    obs_per_stratum = df_clean.groupby(strat_col)["n"].sum()
     total_obs = int(obs_per_stratum.sum())
     # If you ask for more than available, cap at total.
-    if goal > total_obs:
-        goal = total_obs
+    #print(goal)
+    #if goal > total_obs:
+    #    goal = total_obs
     # --- 2. ideal quotas per stratum ----------------------------
     ideal = obs_per_stratum / total_obs * goal  # float
     quotas = np.floor(ideal).astype(int)
-    #print(quotas)
     # distribute leftover observations based on largest fractional part
     remainder = goal - int(quotas.sum())
     if remainder > 0:
@@ -351,12 +361,28 @@ def pick_sites_stratified(
         extra_order = frac.sort_values(ascending=False).index
         for s in extra_order[:remainder]:
             quotas[s] += 1
-    # --- 3. pick minimal sites per stratum to hit each quota ----
+    # use the sites that we are mandated to, if passed
     chosen_parts = []
+    if must_use_sites is not None:
+        must_use_df = df[
+            df[['lat', 'lon']].apply(tuple, axis=1).isin(must_use_sites)
+        ]
+        # and get rid from normal df because we will just add here
+        df_clean = df_clean[~df_clean[['lat', 'lon']].apply(tuple, axis=1).isin(must_use_sites)]
+        # update the quotas that we need to add based on what we now already have
+        for s, quota in quotas.items():
+            this_quota_data = must_use_df[must_use_df[strat_col] == s]
+            # continue if empty
+            if this_quota_data.empty:
+                continue
+            quotas[s] -= int(this_quota_data['n'].sum())
+            quotas[s] = max(0, quotas[s])  # Cap at 0
+            chosen_parts.append(this_quota_data)
+    # --- 3. pick minimal sites per stratum to hit each quota ----
     for s, quota in quotas.items():
         if quota <= 0:
             continue
-        group = df[df[strat_col] == s].copy()
+        group = df_clean[df_clean[strat_col] == s].copy()
         if group.empty:
             continue
         # shuffle sites in this stratum
@@ -367,7 +393,8 @@ def pick_sites_stratified(
         csum = group["n"].to_numpy().cumsum()
         k = np.searchsorted(csum, quota, side="left")
         k = min(k, len(group) - 1)
-        chosen_parts.append(group.iloc[:k+1])
+        this_chosen = group.iloc[:k+1]
+        chosen_parts.append(this_chosen)
     if not chosen_parts:
         return []
     chosen = pd.concat(chosen_parts, ignore_index=True)
@@ -428,7 +455,7 @@ def mask_location_data_fast(
     if len(info) == 0 or len(keep_locs) == 0:
         # nothing to keep or nothing to act on → everything is remaining
         empty = slice(0, 0)
-        return (short_data[empty], long_data[empty], static_data[empty], y[empty], source[empty], info.iloc[:0],
+        return (short_data[empty], long_data[empty], static_data[empty], y[empty], source[empty], info.iloc[:0], stratifier[empty],
                 short_data, long_data, static_data, y, source, info, stratifier)
 
     # Prepare coordinates
@@ -667,7 +694,7 @@ def create_site_split(
     desired_vh_sample_size: int,
     seed: int = 42,
     used_sites = None,
-    round_decimals: int = 6,
+    round_decimals: int = 10,
     stratifier = None
 ):
     # split sources
@@ -700,16 +727,6 @@ def create_site_split(
     insitu = insitu.reset_index(drop=True)
     vv     = vv.reset_index(drop=True)
     vh     = vh.reset_index(drop=True)
-    if insitu.empty and vv.empty and vh.empty:
-        return []
-    # group counts per site (lat, lon)
-    #insitu_counts = (insitu.groupby(['lat', 'lon'])
-    #                 .size().rename('n').reset_index())
-    #vv_counts = (vv.groupby(['lat', 'lon'])
-    #             .size().rename('n').reset_index())
-    #vh_counts = (vh.groupby(['lat', 'lon'])
-    #             .size().rename('n').reset_index())
-    # get the land cover type for each site if stratifier is provided
     insitu_counts = (
         insitu.groupby(["lat", "lon"])
               .agg(
@@ -757,23 +774,24 @@ def create_site_split(
         insitu_counts['stratifier'] = insitu_lcs
         vv_counts['stratifier'] = vv_lcs
         vh_counts['stratifier'] = vh_lcs
+    insitu_counts_orig = insitu_counts.copy()
+    vv_counts_orig = vv_counts.copy()
+    vh_counts_orig = vh_counts.copy()
     # fast exclude used_sites (as set of tuples)
     if used_sites:
         us = {(round(float(lat), round_decimals),
                round(float(lon), round_decimals))
               for (lat, lon) in used_sites}
-        if not insitu_counts.empty:
-            mi_i = pd.MultiIndex.from_frame(insitu_counts[['lat', 'lon']])
-            mask_i = ~mi_i.isin(us)
-            insitu_counts = insitu_counts.loc[mask_i]
-        if not vv_counts.empty:
-            mi_vv = pd.MultiIndex.from_frame(vv_counts[['lat', 'lon']])
-            mask_vv = ~mi_vv.isin(us)
-            vv_counts = vv_counts.loc[mask_vv]
-        if not vh_counts.empty:
-            mi_vh = pd.MultiIndex.from_frame(vh_counts[['lat', 'lon']])
-            mask_vh = ~mi_vh.isin(us)
-            vh_counts = vh_counts.loc[mask_vh]
+        for site in us:
+            insitu_counts = insitu_counts[
+                (insitu_counts['lat'] != site[0]) | (insitu_counts['lon'] != site[1])
+            ]
+            vv_counts = vv_counts[
+                (vv_counts['lat'] != site[0]) | (vv_counts['lon'] != site[1])
+            ]
+            vh_counts = vh_counts[
+                (vh_counts['lat'] != site[0]) | (vh_counts['lon'] != site[1])
+            ]
     # shuffle sites reproducibly
     rng = np.random.default_rng(seed)
     if not insitu_counts.empty:
@@ -789,9 +807,39 @@ def create_site_split(
             rng.permutation(len(vh_counts))
         ].reset_index(drop=True)
     # pick minimum number of sites needed to hit desired obs
-    val_i  = pick_sites_stratified(insitu_counts, desired_insitu_sample_size)
-    val_vv = pick_sites_stratified(vv_counts,     desired_vv_sample_size)
-    val_vh = pick_sites_stratified(vh_counts,     desired_vh_sample_size)
+    insitu_sites = insitu_counts[['lat', 'lon']].apply(tuple, axis=1)
+    val_i  = pick_sites_stratified(insitu_counts, insitu_counts_orig, desired_insitu_sample_size)
+    if len(insitu_sites) == len(val_i):
+        desired_vv_sample_size = 1_000_000
+        desired_vh_sample_size = 1_000_000
+    val_vv = pick_sites_stratified(vv_counts, vv_counts_orig, desired_vv_sample_size, must_use_sites=val_i, not_allowed_sites=insitu_sites)
+    val_vh = pick_sites_stratified(vh_counts, vh_counts_orig, desired_vh_sample_size, must_use_sites=val_i, not_allowed_sites=insitu_sites)
+    perc_i_sites = len(val_i) / len(insitu_counts_orig) * 100 if len(insitu_counts_orig) > 0 else 0
+    perc_vv_sites = len(val_vv) / len(vv_counts_orig) * 100 if len(vv_counts_orig) > 0 else 0
+    perc_vh_sites = len(val_vh) / len(vh_counts_orig) * 100 if len(vh_counts_orig) > 0 else 0
+    print(f'Selected {perc_i_sites:.2f}% of insitu sites, {perc_vv_sites:.2f}% of VV sites, {perc_vh_sites:.2f}% of VH sites')
+    num_sel_i = 0
+    for site in val_i:
+        this_data = insitu[
+            (insitu['lat'] == site[0]) & (insitu['lon'] == site[1])
+        ]
+        num_sel_i += this_data.shape[0]
+    perc_data_i = num_sel_i / len(insitu) * 100 if len(insitu) > 0 else 0
+    num_sel_vv = 0
+    for site in val_vv:
+        this_data = vv[
+            (vv['lat'] == site[0]) & (vv['lon'] == site[1])
+        ]
+        num_sel_vv += this_data.shape[0]
+    perc_data_vv = num_sel_vv / len(vv) * 100 if len(vv) > 0 else 0
+    num_sel_vh = 0
+    for site in val_vh:
+        this_data = vh[
+            (vh['lat'] == site[0]) & (vh['lon'] == site[1])
+        ]
+        num_sel_vh += this_data.shape[0]
+    perc_data_vh = num_sel_vh / len(vh) * 100 if len(vh) > 0 else 0
+    print(f'Selected {perc_data_i:.2f}% of insitu data, {perc_data_vv:.2f}% of VV data, {perc_data_vh:.2f}% of VH data')
     # combine (allow duplicates if the same site is selected for multiple sources)
     val_locs = val_i + val_vv + val_vh
     # If you want unique sites only:
@@ -1898,13 +1946,21 @@ def main():
         )
         used_sites.extend(this_locs)
         fold_locs[fold + 1] = this_locs
-    # if the last fold doesn't have enough locations (due to rounding), get rid of it
-    fold_keys = list(fold_locs.keys())
-    last_key = fold_keys[-1]
-    if len(fold_locs[last_key]) < 1:
-        print(f'Removing fold {last_key} due to insufficient locations')
-        fold_locs.pop(last_key)
-        n_folds -= 1
+    #for fold in fold_locs:
+    #    print(f'Fold {fold} has {len(fold_locs[fold])} locations')
+    #print(fold_locs)
+    # if there is any fold with zero locations, raise an error
+    # we are allowed to get rid of the last fold if it has no locations
+    remove_last = False
+    for fold in fold_locs:
+        if len(fold_locs[fold]) == 0 and fold != n_folds:
+            raise ValueError(f'Fold {fold} has no locations')
+        elif len(fold_locs[fold]) == 0 and fold == n_folds:
+            print(f'Fold {fold} has no locations, removing')
+            remove_last = True
+    if remove_last:    
+        del fold_locs[fold]
+    n_folds = len(fold_locs)
     print(f'Using {n_folds} folds for training')
     # save this fold info
     with open(os.path.join(full_save_dir, 'fold_info.json'), 'w') as f:

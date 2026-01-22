@@ -569,7 +569,7 @@ def build_inputs(
     num_rs_samples=0.0, # will include num_nfmd_samples * factor random samples from RS data
     include_lag=True,
     make_plots=False,
-    only_at_krishna_retrievals=False
+    vh_locations='all'
 ):
     totals = init_nan_totals()
     krishna_transforms = {}
@@ -577,7 +577,9 @@ def build_inputs(
         print(f'Processing CSV {c+1}/{len(csvs)}: {csv}')
         #df = pd.read_csv(csv, parse_dates=['date'])
         df = load_and_clean_csv(csv)
-        print(df.columns)
+        print(df)
+        #print(np.unique(df['source']))
+        #sys.exit()
         # keep anything that we need for both long and short lag days
         combined_lag_days = list(set(short_lag_days).union(set(long_lag_days)))
         df = filter_lag_columns(
@@ -658,6 +660,15 @@ def build_inputs(
             [source_legible.append('vv') for i in range(len(vv_samples))]
         if 'vh_backscatter' in target_cols:
             vh_df = df[df['vh_backscatter'].notna()]
+            # further sub-select based on vh_locations
+            if vh_locations == 'at_sites':
+                vh_df = vh_df[vh_df['source'] == 'vh_at_sites']
+            elif vh_locations == 'at_random':
+                vh_df = vh_df[vh_df['source'] == 'vh_at_random']
+            elif vh_locations == 'all':
+                pass
+            else:
+                raise ValueError(f"Unknown VH location: {vh_locations}")
             if num_rs_samples > len(vh_df):
                 print(
                     f"Warning: requested {num_rs_samples} samples from VH"
@@ -931,7 +942,7 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     # fill in follwing necessary information for producing the correct dataset
-    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/news1_base'
+    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/news1_stats_nomonths'
     os.makedirs(save_dir, exist_ok=True)
     csv_names = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/compiled/'
@@ -976,14 +987,14 @@ if __name__ == "__main__":
         'developed','evergreen_forest',
         'grass','mixed_forest','other',
         'shrub','water','wetlands',
-        #'sar_vh_mean',
-        #'sar_vh_std',
-        #'sar_vh_min',
-        #'sar_vh_max',
-        #'vh_skewness',
-        #'vh_kurtosis',
-        #'vh_autocorr1',
-        #'vh_autocorr2',
+        'sar_vh_mean',
+        'sar_vh_std',
+        'sar_vh_min',
+        'sar_vh_max',
+        'vh_skewness',
+        'vh_kurtosis',
+        'vh_autocorr1',
+        'vh_autocorr2',
         #'sar_vh_jan_mean',
         #'sar_vh_feb_mean',
         #'sar_vh_mar_mean',
@@ -1038,6 +1049,12 @@ if __name__ == "__main__":
     #num_rs_samples = 0
     # just keep all of them
     num_rs_samples = 100_000
+    # which vh samples to keep
+    # options are:
+    #   all: doesn't matter where from
+    #   at_sites: only at sites where we already have lfmc measurements
+    #   at_random: only at random loctions, not where we have lfmc measurements
+    vh_locations = 'all'
     info_features = [
         'date',
         'latitude',
@@ -1098,5 +1115,5 @@ if __name__ == "__main__":
         num_rs_samples=num_rs_samples,
         include_lag=include_lag,
         make_plots=False,
-        only_at_krishna_retrievals=False,
+        vh_locations=vh_locations
     )

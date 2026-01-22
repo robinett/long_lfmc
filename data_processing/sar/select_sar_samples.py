@@ -16,11 +16,10 @@ def date_from_path(p):
 def main():
     # which sampling should we do
     sample_at_sites = True
-    sample_at_random = False
-    
+    sample_at_random = True
     # glob pattern to pick up everything
     sar_ds = xr.open_zarr(
-        "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_500m_partial.zarr",
+        "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_500m_full.zarr",
         chunks="auto",
     )
     lfmc_df = pd.read_csv(

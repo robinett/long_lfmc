@@ -1,18 +1,18 @@
 #!/bin/bash
 
-#SBATCH --job-name=compile  # Job name
-#SBATCH --output=./logs/compile_%j.out       # Output log file (%j = job ID)
-#SBATCH --error=./logs/compile_%j.err        # Error log file
+#SBATCH --job-name=sar_stats  # Job name
+#SBATCH --output=./logs/sar_samples_%j.out       # Output log file (%j = job ID)
+#SBATCH --error=./logs/sar_samples_%j.err        # Error log file
 #SBATCH --time=12:00:00             # Wall time limit (hh:mm:ss)
 #SBATCH --partition=serc    # Partition name
 #SBATCH --nodes=1                   # Number of nodes
-#SBATCH --mem=128GB                  # Memory per node
+#SBATCH --mem=200GB                  # Memory per node
 #SBATCH --mail-type=BEGIN,END,FAIL  # email me
 #SBATCH --mail-user=trobinet@stanford.edu
 
 source ~/.bashrc
 source ~/uv_activations/activate_lfmc_process.sh
 
-python3 -u main.py --start_date $1 --end_date $2
+python3 -u select_sar_samples.py
 
 echo Processing Complete
