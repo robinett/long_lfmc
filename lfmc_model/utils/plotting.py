@@ -11,6 +11,7 @@ import cartopy.feature as cfeature
 import os
 from typing import Sequence, Optional
 import textwrap
+import pandas as pd
 
 def kde_plot(
     data, data_names, save_name, title=None,
@@ -1183,3 +1184,67 @@ def heatmap(
     fig.savefig(save_path, dpi=300)
     plt.close(fig)
 
+def plot_timeseries_by_site(
+    preds_df,
+    out_dir,
+    data_col_name,
+    y_label,
+    date_col="date",
+):
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ensure datetime (safe even if already datetime)
+    preds_df = preds_df.copy()
+    preds_df[date_col] = pd.to_datetime(preds_df[date_col])
+
+    unique_locs = preds_df[['lat', 'lon']].drop_duplicates()
+
+    for _, loc in unique_locs.iterrows():
+        lat = loc['lat']
+        lon = loc['lon']
+
+        site_data = (
+            preds_df[
+                (preds_df['lat'] == lat) &
+                (preds_df['lon'] == lon)
+            ]
+            .sort_values(date_col)
+        )
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+
+        ax.plot(
+            site_data["date"],
+            site_data[data_col_name],
+            linewidth=1.5
+        )
+
+        ax.set_title(f"Predictions for Site ({lat:.4f}, {lon:.4f})")
+        ax.set_xlabel("Date")
+        ax.set_ylabel(y_label)
+
+        # Force YYYY-MM ticks
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+
+        fig.autofmt_xdate(rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f"timeseries_{lat:.4f}_{lon:.4f}.png"), dpi=250)
+        plt.close(fig)
+
+#def plot_timeseries_by_site(preds_df, out_dir, data_col_name,y_label):
+#    # get the unique lat/lon combinations from our dataset
+#    unique_locs = preds_df[['lat', 'lon']].drop_duplicates()
+#    for _, loc in unique_locs.iterrows():
+#        lat = loc['lat']
+#        lon = loc['lon']
+#        site_data = preds_df[(preds_df['lat'] == lat) & (preds_df['lon'] == lon)]
+#        plt.figure()
+#        plt.plot(site_data['date'], site_data[data_col_name])
+#        plt.title(f"Predictions for Site ({lat}, {lon})")
+#        plt.xlabel("Date")
+#        plt.ylabel(y_label)
+#        plt.xticks(rotation=45)
+#        plt.tight_layout()
+#        plt.savefig(os.path.join(out_dir, f"timeseries_{lat}_{lon}.png"))
+#        plt.close()
