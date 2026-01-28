@@ -15,7 +15,7 @@ import pandas as pd
 
 def kde_plot(
     data, data_names, save_name, title=None,
-    xlabel=None, ylabel=None
+    xlabel=None, ylabel=None, ylimit=None
 ):
     """
     Create a Kernel Density Estimate (KDE) plot for a specified column in the data.
@@ -36,23 +36,60 @@ def kde_plot(
         plt.xlabel(xlabel)
     if ylabel:
         plt.ylabel(ylabel)
+    if ylimit:
+        plt.ylim(ylimit)
     plt.legend()
     plt.savefig(save_name, bbox_inches='tight')
     plt.close()
+
+
+def plot_multiple_timeseries(
+    dates,
+    vals,
+    labels,
+    linestyles,
+    markers,
+    save_path
+):
+    """
+    Plot multiple time series on a single axis and save to disk.
+    """
+    fig, ax = plt.subplots(figsize=(10, 4))
+    for d, v, lab, ls, mk in zip(
+        dates, vals, labels, linestyles, markers
+    ):
+        ax.plot(
+            d,
+            v,
+            label=lab,
+            linestyle=ls,
+            marker=mk
+        )
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Value")
+    ax.legend()
+    fig.autofmt_xdate()
+    plt.tight_layout()
+    # ensure output directory exists
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=300)
+    plt.close(fig)
+
 
 def plot_multiple_timeseries_from_df(
     df,
     date_col,
     x_label,
     y_label,
-    save_name
+    save_name,
+    col_markers=None
 ):
     # get the columns that are not date
     columns = df.columns[df.columns != date_col]
     dates = df[date_col].values
     fig,ax = plt.subplots(figsize=(10, 6))
     for c,col in enumerate(columns):
-        ax.plot(dates, df[col].values, label=col)
+        ax.plot(dates, df[col].values, label=col, marker=col_markers[c] if col_markers else None)
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax.legend()
     ax.set_xlabel(x_label)
@@ -806,6 +843,7 @@ def generic_scatter(
     s=20,
     cbar_range=None,
     fontsize=None,
+    line_to_plot=None
 ):
     # mask nans for x, y (and color_array if provided)
     mask = ~np.isnan(x) & ~np.isnan(y)
@@ -853,27 +891,41 @@ def generic_scatter(
         ax.set_ylim(ylim)
 
     # correlation region
-    if corrclip:
-        mask_corr = (
-            (x >= corrclip[0]) & (x <= corrclip[1]) &
-            (y >= corrclip[0]) & (y <= corrclip[1])
+    if line_to_plot == 'correlation':
+        if corrclip:
+            mask_corr = (
+                (x >= corrclip[0]) & (x <= corrclip[1]) &
+                (y >= corrclip[0]) & (y <= corrclip[1])
+            )
+            x_corr = x[mask_corr]
+            y_corr = y[mask_corr]
+        else:
+            x_corr = x
+            y_corr = y
+
+        corr_coef = np.corrcoef(x_corr, y_corr)[0, 1]
+        m, b = np.polyfit(x_corr, y_corr, 1)
+
+        ax.plot(
+            x_corr,
+            m * x_corr + b,
+            color="orange",
+            label=f"Best Fit Line (r={corr_coef:.2f})",
         )
-        x_corr = x[mask_corr]
-        y_corr = y[mask_corr]
-    else:
-        x_corr = x
-        y_corr = y
 
-    corr_coef = np.corrcoef(x_corr, y_corr)[0, 1]
-    m, b = np.polyfit(x_corr, y_corr, 1)
-
-    ax.plot(
-        x_corr,
-        m * x_corr + b,
-        color="orange",
-        label=f"Best Fit Line (r={corr_coef:.2f})",
-    )
-
+    elif line_to_plot == 'one_to_one':
+        x_min = min(x)
+        x_max = max(x)
+        y_min = min(y)
+        y_max = max(y)
+        min_min = min(x_min, y_min)
+        max_max = max(x_max, y_max)
+        ax.plot(
+            [min_min, max_max],
+            [min_min, max_max],
+            color="orange",
+            label="One-to-One Line",
+        )
     # legend fontsize
     #ax.legend(fontsize=fontsize)
 

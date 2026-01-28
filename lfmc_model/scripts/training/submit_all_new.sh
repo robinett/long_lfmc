@@ -12,7 +12,7 @@ input_data_dir="/scratch/users/trobinet/long_lfmc/\
 trent_datasets/lfmc_model/data/inputs/news1_stats_nomonths"
 
 save_root="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/outputs/news1_stats_nomonths"
+trent_datasets/lfmc_model/data/outputs/news1_stats_nomonths_nll"
 
 ########################
 # Job throttling via lock files

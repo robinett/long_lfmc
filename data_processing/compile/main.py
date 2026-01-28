@@ -49,8 +49,8 @@ def main():
                 'climate_zones/climate_zone_per_pixel_westUS.nc4'
             ),
             'sar_stats':os.path.join(
-                oak_dir,
-                'sar/sar_stats.zarr'
+                scratch_dir,
+                'sar/sar_stats_seasonal.zarr'
             ),
             'landcover_frac':os.path.join(
                 oak_dir,
@@ -101,17 +101,20 @@ def main():
             ],
             'climate_zone':['climate_zone'],
             'sar_stats':[
-                #'sar_vv_mean',
                 'sar_vh_mean',
+                'sar_vh_seasonal_amp',
+                'sar_vh_annual_fraction'
+                #'sar_vv_mean',
+                #'sar_vh_mean',
                 #'sar_vv_minus_vh_mean',
                 #'sar_vv_std',
-                'sar_vh_std',
+                #'sar_vh_std',
                 #'sar_vv_minus_vh_std',
                 #'sar_vv_min',
-                'sar_vh_min',
+                #'sar_vh_min',
                 #'sar_vv_minus_vh_min',
                 #'sar_vv_max',
-                'sar_vh_max',
+                #'sar_vh_max',
                 #'sar_vv_minus_vh_max',
                 #'sar_vv_jan_mean',
                 #'sar_vv_feb_mean',
@@ -125,18 +128,18 @@ def main():
                 #'sar_vv_oct_mean',
                 #'sar_vv_nov_mean',
                 #'sar_vv_dec_mean',
-                'sar_vh_jan_mean',
-                'sar_vh_feb_mean',
-                'sar_vh_mar_mean',
-                'sar_vh_apr_mean',
-                'sar_vh_may_mean',
-                'sar_vh_jun_mean',
-                'sar_vh_jul_mean',
-                'sar_vh_aug_mean',
-                'sar_vh_sep_mean',
-                'sar_vh_oct_mean',
-                'sar_vh_nov_mean',
-                'sar_vh_dec_mean',
+                #'sar_vh_jan_mean',
+                #'sar_vh_feb_mean',
+                #'sar_vh_mar_mean',
+                #'sar_vh_apr_mean',
+                #'sar_vh_may_mean',
+                #'sar_vh_jun_mean',
+                #'sar_vh_jul_mean',
+                #'sar_vh_aug_mean',
+                #'sar_vh_sep_mean',
+                #'sar_vh_oct_mean',
+                #'sar_vh_nov_mean',
+                #'sar_vh_dec_mean',
                 #'sar_vv_minus_vh_jan_mean',
                 #'sar_vv_minus_vh_feb_mean',
                 #'sar_vv_minus_vh_mar_mean',
@@ -150,16 +153,16 @@ def main():
                 #'sar_vv_minus_vh_nov_mean',
                 #'sar_vv_minus_vh_dec_mean',
                 #'vv_skewness',
-                'vh_skewness',
+                #'vh_skewness',
                 #'vv_minus_vh_skewness',
                 #'vv_kurtosis',
-                'vh_kurtosis',
+                #'vh_kurtosis',
                 #'vv_minus_vh_kurtosis',
                 #'vv_autocorr1',
-                'vh_autocorr1',
+                #'vh_autocorr1',
                 #'vv_minus_vh_autocorr1',
                 #'vv_autocorr2',
-                'vh_autocorr2',
+                #'vh_autocorr2',
                 #'vv_minus_vh_autocorr2'
             ],
             'landcover_frac':[
@@ -334,14 +337,14 @@ def main():
         171, 172, 173, 174, 175, 176, 177, 178, 179, 180
     ]
     inputs_outputs = (
-        'y_InsituVh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverfracLandcoverchange_Z_Nlcdclass_180d'
+        'y_InsituVh_X_ModisfilledDaymetStaticClimatezoneSarstatsseasonalLandcoverfracLandcoverchange_Z_Nlcdclass_180d'
     )
     out_dir = os.path.join(
         scratch_dir,
         'compiled',
         inputs_outputs
     )
-    os.makedirs(out_dir, exist_ok=True)
+    #os.makedirs(out_dir, exist_ok=True)
     out_fname = f'compiled_data_{start_date:%Y%m%d}_{end_date:%Y%m%d}.csv'
     out_fname = os.path.join(out_dir, out_fname)
     # compile the data

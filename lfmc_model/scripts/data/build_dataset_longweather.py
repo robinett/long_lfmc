@@ -942,11 +942,11 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     # fill in follwing necessary information for producing the correct dataset
-    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/news1_stats_nomonths'
+    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/news1_stats_seasonal'
     os.makedirs(save_dir, exist_ok=True)
     csv_names = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/compiled/'
-        'y_InsituVh_X_ModisfilledDaymetStaticClimatezoneSarstatsLandcoverfracLandcoverchange_Z_Nlcdclass_180d/'
+        'y_InsituVh_X_ModisfilledDaymetStaticClimatezoneSarstatsseasonalLandcoverfracLandcoverchange_Z_Nlcdclass_180d/'
         'compiled_data_*.csv'
     )
     csv_names_all = sorted(glob.glob(csv_names))
@@ -988,13 +988,16 @@ if __name__ == "__main__":
         'grass','mixed_forest','other',
         'shrub','water','wetlands',
         'sar_vh_mean',
-        'sar_vh_std',
-        'sar_vh_min',
-        'sar_vh_max',
-        'vh_skewness',
-        'vh_kurtosis',
-        'vh_autocorr1',
-        'vh_autocorr2',
+        'sar_vh_seasonal_amp',
+        'sar_vh_annual_fraction'
+        #'sar_vh_mean',
+        #'sar_vh_std',
+        #'sar_vh_min',
+        #'sar_vh_max',
+        #'vh_skewness',
+        #'vh_kurtosis',
+        #'vh_autocorr1',
+        #'vh_autocorr2',
         #'sar_vh_jan_mean',
         #'sar_vh_feb_mean',
         #'sar_vh_mar_mean',

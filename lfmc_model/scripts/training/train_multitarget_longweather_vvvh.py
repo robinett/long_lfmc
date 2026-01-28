@@ -939,12 +939,12 @@ def run_model(
         # task weights from gradnorm
         #task_weights = model.task_weights
         if loss_fn is not None:
-            #loss_i = loss_fn(mu_i_b, logv_i_b, Y_b, mask=m_i)
-            #loss_vv = loss_fn(mu_vv_b, logv_vv_b, Y_b, mask=m_vv)
-            #loss_vh = loss_fn(mu_vh_b, logv_vh_b, Y_b, mask=m_vh)
-            loss_i = loss_fn(mu_i_b,Y_b,mask=m_i)
-            loss_vv = loss_fn(mu_vv_b,Y_b,mask=m_vv)
-            loss_vh = loss_fn(mu_vh_b,Y_b,mask=m_vh)
+            loss_i = loss_fn(mu_i_b, logv_i_b, Y_b, mask=m_i)
+            loss_vv = loss_fn(mu_vv_b, logv_vv_b, Y_b, mask=m_vv)
+            loss_vh = loss_fn(mu_vh_b, logv_vh_b, Y_b, mask=m_vh)
+            #loss_i = loss_fn(mu_i_b,Y_b,mask=m_i)
+            #loss_vv = loss_fn(mu_vv_b,Y_b,mask=m_vv)
+            #loss_vh = loss_fn(mu_vh_b,Y_b,mask=m_vh)
             n_i = int(m_i.sum().item())
             n_vv = int(m_vv.sum().item())
             n_vh = int(m_vh.sum().item())
@@ -1363,8 +1363,8 @@ def train_fold_k(
     )
     # set up the loss functions
     #criterion = nn.MSELoss(reduction="mean")
-    #criterion = GaussianNLLLoss(reduction="mean")
-    criterion = MaskedMSELoss(reduction="mean")
+    criterion = GaussianNLLLoss(reduction="mean")
+    #criterion = MaskedMSELoss(reduction="mean")
     # make sure that we have the warmup end lr
     warmup_end_lr = optimizer.param_groups[0]['lr']
     # set up the things that we need to track
@@ -1473,6 +1473,8 @@ def train_fold_k(
         val_r2 = r2_score(lfmc_val_true, lfmc_val_only)
         val_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_val_only) + ((lfmc_val_true - lfmc_val_only) ** 2) / (lfmc_std_val_only ** 2)))
         val_rmse = np.sqrt(np.mean((lfmc_val_only - lfmc_val_true) ** 2))
+        val_avg_lfmc = np.mean(lfmc_val_only)
+        val_avg_std = np.mean(lfmc_std_val_only)
         ## and for the mixed data
         #lfmc_mix_val = mu_mix_val[val_source.numpy() == 1 ] * y_std + y_mean
         #lfmc_std_mix_val = np.sqrt(np.exp(logv_mix_val[val_source.numpy() == 1])) * y_std
@@ -1489,6 +1491,8 @@ def train_fold_k(
             val_r2_vv = r2_score(vv_val_true, vv_val_only)
             val_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vv_std_val_only) + ((vv_val_true - vv_val_only) ** 2) / (vv_std_val_only ** 2)))
             val_rmse_vv = np.sqrt(np.mean((vv_val_only - vv_val_true) ** 2))
+            val_avg_vv = np.mean(vv_val_only)
+            val_avg_std_vv = np.mean(vv_std_val_only)
             ## also calculate the mixtures
             #lfmc_rs_mix_val = mu_mix_val[val_source.numpy() == 0] * y_std + y_mean
             #lfmc_std_rs_mix_val = np.sqrt(np.exp(logv_mix_val[val_source.numpy() == 0])) * y_std
@@ -1504,27 +1508,29 @@ def train_fold_k(
             val_r2_vh = r2_score(vh_val_true, vh_val_only)
             val_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vh_std_val_only) + ((vh_val_true - vh_val_only) ** 2) / (vh_std_val_only ** 2)))
             val_rmse_vh = np.sqrt(np.mean((vh_val_only - vh_val_true) ** 2))
+            val_avg_vh = np.mean(vh_val_only)
+            val_avg_std_vh = np.mean(vh_std_val_only)
         # average values for sanity check
         #avg_val_pred = np.mean(lfmc_i_val)
         #avg_val_true = np.mean(lfmc_i_val_true)
         #avg_val_std = np.mean(lfmc_std_i_val)
         print(f'task weights: {model.task_weights}')
         print(
-            f'Validation MAE: {val_mae:.4f}, RMSE: {val_rmse:.4f}, R2: {val_r2:.4f}, NLL: {val_nll:.4f}'
+            f'Validation MAE: {val_mae:.4f}, RMSE: {val_rmse:.4f}, R2: {val_r2:.4f}, NLL: {val_nll:.4f}, avg: {val_avg_lfmc:.4f}, avg_std: {val_avg_std:.4f}'
         )
         #print(
         #    f'Validation Mixture MAE: {val_mae_mix:.4f}, RMSE: {val_rmse_mix:.4f}, R2: {val_r2_mix:.4f}, NLL: {val_nll_mix:.4f}'
         #)
         if len(true_vv) > 0:
             print(
-                f'Validation VV MAE: {val_mae_vv:.4f}, RMSE: {val_rmse_vv:.4f}, R2: {val_r2_vv:.4f}, NLL: {val_nll_vv:.4f}'
+                f'Validation VV MAE: {val_mae_vv:.4f}, RMSE: {val_rmse_vv:.4f}, R2: {val_r2_vv:.4f}, NLL: {val_nll_vv:.4f}, avg: {val_avg_vv:.4f}, avg_std: {val_avg_std_vv:.4f}'
             )
             #print(
             #    f'Validation VV Mixture MAE: {val_mae_vv_mix:.4f}, RMSE: {val_rmse_vv_mix:.4f}, R2: {val_r2_vv_mix:.4f}, NLL: {val_nll_vv_mix:.4f}'
             #)
         if len(true_vh) > 0:
             print(
-                f'Validation VH MAE: {val_mae_vh:.4f}, RMSE: {val_rmse_vh:.4f}, R2: {val_r2_vh:.4f}, NLL: {val_nll_vh:.4f}'
+                f'Validation VH MAE: {val_mae_vh:.4f}, RMSE: {val_rmse_vh:.4f}, R2: {val_r2_vh:.4f}, NLL: {val_nll_vh:.4f}, avg: {val_avg_vh:.4f}, avg_std: {val_avg_std_vh:.4f}'
             )
             #print(
             #    f'Validation VH Mixture MAE: {val_mae_vh_mix:.4f}, RMSE: {val_rmse_vh_mix:.4f}, R2: {val_r2_vh_mix:.4f}, NLL: {val_nll_vh_mix:.4f}'
@@ -1554,7 +1560,6 @@ def train_fold_k(
         ),
         weights_only=False,
         map_location=device
-        
     )
     model.load_state_dict(state)
     model = model.to(device)

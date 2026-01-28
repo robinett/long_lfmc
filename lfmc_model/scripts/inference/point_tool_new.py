@@ -18,6 +18,7 @@ sys.path.append(os.path.join(project_root,'lfmc_model','models','transformer'))
 sys.path.append(os.path.join(project_root,'lfmc_model','utils'))
 
 from transformer_multitask_longclimate import LFMCTransformer
+from transformer_multitask_longclimate_uncertainty import LFMCTransformer as LFMCTransformerUncertainty
 from plotting import plot_timeseries_by_site
 
 def parse_model_path(model_path: str) -> dict:
@@ -126,18 +127,24 @@ def build_tensors(
         )
         daymet_data = (
             daymet_data
-            .sel(time=slice(this_start - pd.Timedelta(days=long_lag_needed), this_end+pd.Timedelta(days=1)))
+            .sel(time=slice(this_start - pd.Timedelta(days=long_lag_needed), this_end + pd.Timedelta(days=1)))
             .compute()
         )
+        # set daymet to midnight
+        #daymet_data = daymet_data.resample(time='1D').mean()
+        daymet_data['time'] = daymet_data['time'].dt.floor('D')
         # for daymet we need to copy Dec 30 to be Dec 31 on leap years because they
         # refuse to give us leap years 
         ds = daymet_data
         years = np.unique(ds.time.dt.year.values)
         new_slices = []
         for y in years:
-            if pd.Timestamp(f"{y}-01-01").is_leap_year:
-                dec30 = pd.Timestamp(f"{y}-12-30 12:00:00")
-                dec31 = pd.Timestamp(f"{y}-12-31 12:00:00")
+            if (
+                (pd.Timestamp(f"{y}-01-01").is_leap_year) and
+                this_end >= pd.Timestamp(f"{y}-12-31")
+            ):
+                dec30 = pd.Timestamp(f"{y}-12-30")
+                dec31 = pd.Timestamp(f"{y}-12-31")
                 if dec31 not in ds.time.values:
                     s31 = ds.sel(time=dec30).copy(deep=True)
                     s31 = s31.assign_coords(time=dec31)
@@ -151,6 +158,8 @@ def build_tensors(
             if s_var == 'lfrac':
                 this_vals = np.arange(short_lag_needed+1)
                 this_vals = this_vals / short_lag_needed
+                #this_vals = this_vals[::-1]
+                this_vals = (this_vals - this_norm_mean) / this_norm_std
                 for d,date in enumerate(date_range):
                     short_input[starting_B + d, :, s] = this_vals
                 continue
@@ -165,6 +174,8 @@ def build_tensors(
                     # reverse vals to add
                     vals_to_add = vals_to_add[::-1]
                     vals_to_add_norm = (vals_to_add - this_norm_mean) / this_norm_std
+                    #print(np.where(vals_to_add_norm.isnull()))
+                    #sys.exit()
                     # normalize
                     short_input[starting_B + d, :, s] = vals_to_add_norm
             else:
@@ -178,6 +189,8 @@ def build_tensors(
             if l_var == 'lfrac':
                 this_vals = np.arange(long_lag_needed+1)
                 this_vals = this_vals / long_lag_needed
+                #this_vals = this_vals[::-1]
+                this_vals = (this_vals - this_norm_mean) / this_norm_std
                 for d,date in enumerate(date_range):
                     long_input[starting_B + d, :, l] = this_vals
                 continue
@@ -189,7 +202,7 @@ def build_tensors(
                     # because daymet is super annoying, if it is the 31st of a leap year,
                     # we need to pretend that the day is yesterday
                     this_date_start = date - pd.Timedelta(days=(len(long_lag_days)-1))
-                    this_date_end = date + pd.Timedelta(days=1)
+                    this_date_end = date
                     vals_to_add = this_vals.sel(
                         time=slice(this_date_start, this_date_end)
                     )
@@ -203,6 +216,7 @@ def build_tensors(
                     f'Dataset {this_ds_name} not implemented'
                 )
         for st,st_var in enumerate(static_vars_needed):
+            #print(st_var)
             this_norm_mean = norm_params['train_static_mean'][st]
             this_norm_std = norm_params['train_static_std'][st]
             if st_var == 'latitude':
@@ -265,8 +279,8 @@ def build_tensors(
                     'wetlands' in st_var
                 ):
                     vals_to_add = this_vals.sel(
-                        year=date,
-                        method='nearest'
+                        year=pd.Timestamp(date.year, 1, 1),
+                        #method='nearest'
                     ).values
                 static_input[starting_B + d, :, st] = vals_to_add
     # convert to tensors and make dataloaders
@@ -282,7 +296,10 @@ def run_model_forward(
     info_df,
     model_path,
     norm_params,
-    batch_size=512
+    batch_size=512,
+    model_num_queries=2,
+    model_task_weights=2,
+    model_type = 'standard'
 ):
     dataset = TensorDataset(
         short_tensor,
@@ -299,26 +316,55 @@ def run_model_forward(
     long_input_dim = long_tensor.shape[-1]
     static_input_dim = static_tensor.shape[-1]
     model_params = parse_model_path(model_path)
-    model = LFMCTransformer(
-        short_input_dim = short_input_dim,
-        long_input_dim = long_input_dim,
-        static_input_dim = static_input_dim,
-        d_model = model_params['d_model'],
-        nhead = model_params['nhead'],
-        num_layers = model_params['num_layers'],
-        dim_feedforward = model_params['dim_feedforward'],
-        dropout = model_params['dropout'],
-        num_queries = 2,
-        long_d_model = model_params['long_d_model'],
-        long_nhead = model_params['long_nhead'],
-        long_num_layers = model_params['long_num_layers'],
-        long_dim_feedforward = model_params['long_dim_feedforward'],
-        long_out_dim = model_params['long_out_dim'],
-        num_task_weights = 1
-    )
+    if model_type == 'standard':
+        model = LFMCTransformer(
+            short_input_dim = short_input_dim,
+            long_input_dim = long_input_dim,
+            static_input_dim = static_input_dim,
+            d_model = model_params['d_model'],
+            nhead = model_params['nhead'],
+            num_layers = model_params['num_layers'],
+            dim_feedforward = model_params['dim_feedforward'],
+            dropout = model_params['dropout'],
+            num_queries = model_num_queries,
+            long_d_model = model_params['long_d_model'],
+            long_nhead = model_params['long_nhead'],
+            long_num_layers = model_params['long_num_layers'],
+            long_dim_feedforward = model_params['long_dim_feedforward'],
+            long_out_dim = model_params['long_out_dim'],
+            num_task_weights = model_task_weights
+        )
+    elif model_type == 'uncertainty':
+        model = LFMCTransformerUncertainty(
+            short_input_dim = short_input_dim,
+            long_input_dim = long_input_dim,
+            static_input_dim = static_input_dim,
+            d_model = model_params['d_model'],
+            nhead = model_params['nhead'],
+            num_layers = model_params['num_layers'],
+            dim_feedforward = model_params['dim_feedforward'],
+            dropout = model_params['dropout'],
+            num_queries = model_num_queries,
+            long_d_model = model_params['long_d_model'],
+            long_nhead = model_params['long_nhead'],
+            long_num_layers = model_params['long_num_layers'],
+            long_dim_feedforward = model_params['long_dim_feedforward'],
+            long_out_dim = model_params['long_out_dim'],
+            num_task_weights = model_task_weights
+        )
+    else:
+        raise notImplementedError(
+            f"Model choice '{model_choice}' is not implemented"
+        )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    #model.load_state_dict(torch.load(model_path, map_location=device))
+    ckpt = torch.load(model_path, map_location=device)
+    missing, unexpected = model.load_state_dict(
+        ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt,
+        strict=False
+    )
+    #sys.exit()
     model.eval()
     # run the model
     pbar = tqdm(
@@ -341,7 +387,7 @@ def run_model_forward(
     # renormalize
     preds_i = preds_i * norm_params['lfmc_std'] + norm_params['lfmc_mean']
     info_df['lfmc_pred'] = preds_i
-    print(info_df)
+    #print(info_df)
     return info_df
 
 
@@ -350,7 +396,7 @@ def main():
     scratch_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/'
     oak_dir = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/'
     # where to save the outputs of the model
-    out_dir = os.path.join(oak_dir,'lfmc_model','data','infer','for_mitch_20260123')
+    out_dir = os.path.join(oak_dir,'lfmc_model','data','infer','for_mitch_20260124')
     plots_dir = os.path.join(scratch_dir,'inference','plots')
     os.makedirs(out_dir, exist_ok=True)
     # information about the sites to run
@@ -369,21 +415,24 @@ def main():
     start_dates = pd.to_datetime(site_info['start_date'])
     end_dates = pd.to_datetime(site_info['end_date'])
     # information that we load from the model
+    model_name = 'news1_multitask_5_1'
     var_names_path = os.path.join(
-        scratch_dir,'inputs','news1_base','var_names.json'
+        scratch_dir,'inputs','news1_multitask','var_names.json'
     )
     with open(var_names_path) as f:
         var_names = json.load(f)
     model_dir = os.path.join(
         scratch_dir,
-        'outputs/news1_base/transformer_dm64_nh2_nl3_df128_do0.15_bs128_lr0.0005_warmup502_wd0.0001_iobs30638_vvobs0_vhobs0_dmlong256_nhlong8_nllong5_dflong512_outlong64_basic/fold_9998'
+        'outputs', model_name,
+        'transformer_dm32_nh1_nl2_df64_do0.15_bs128_lr0.0005_warmup2458_wd0.0001_iobs30638_vvobs0_vhobs119237_dmlong64_nhlong2_nllong3_dflong128_outlong32_basic',
+        'fold_9998'
     )
     norm_params = os.path.join(
         model_dir,'norm_params.json'
     )
     model_path = os.path.join(
         model_dir,
-        'model_epoch16.pt'
+        'model_epoch4.pt'
     )
     with open(norm_params) as f:
         norm_params = json.load(f)

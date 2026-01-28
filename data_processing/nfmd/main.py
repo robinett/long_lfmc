@@ -29,7 +29,7 @@ def main():
     end = datetime.datetime(2023, 12, 31)
     nfmd_process_fname = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/nfmd/'
-        'nfmd_processed.csv'
+        'nfmd_processed_landcovermatches.csv'
     )
     # in the future we need to update this but quick and dirty for now.
     bound_box = [

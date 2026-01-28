@@ -125,7 +125,8 @@ def analyze_landcover_of_sites(
         os.path.join(
             '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
             f'max_satellite_land_cover_fraction_{location_group_name}.png'
-        )
+        ),
+        ylimit=[0,4.0],
     )
     # representativeness of sampled land cover at these sites
     # kde of measured landcover fraction at these sites
@@ -135,7 +136,8 @@ def analyze_landcover_of_sites(
         os.path.join(
             '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
             f'measured_land_cover_fraction_{location_group_name}.png'
-        )
+        ),
+        ylimit=[0,3.0],
     )
 
 def get_landcover_df(
@@ -639,6 +641,7 @@ def get_site_error(
                 (test_info_insitu['longitude']==lon)
             )
             site_indices = test_info_insitu[site_mask].index.values
+            site_dates = test_info_insitu.loc[site_indices, 'date'].values
             site_true = test_true_insitu[site_indices]
             site_preds = test_preds_insitu[site_indices]
             site_num_measurements = len(site_true)
@@ -649,18 +652,23 @@ def get_site_error(
             )
             if site_num_measurements < 2:
                 site_r2 = float('nan')
+                site_var = float('nan')
             else:
                 site_r2 = r2_score(
                     site_true,
                     site_preds
                 )
+                site_var = np.var(site_true)
             site_key = f'{lat}_{lon}'
             site_errors[site_key] = {
                 'num_measurements': site_num_measurements,
                 'true_values': site_true.tolist(),
                 'predictions': site_preds.tolist(),
+                'dates': site_dates.tolist(),
                 'rmse': site_rmse,
-                'r2': site_r2
+                'r2': site_r2,
+                'var': site_var,
+                'fold': fold
             }
     return site_errors
 
@@ -688,8 +696,15 @@ def site_analysis(
         )
         model_1_rmse = model_1_site_error[site_key]['rmse']
         model_1_r2 = model_1_site_error[site_key]['r2']
-        model_2_rmse = model_2_site_error[site_key]['rmse']
-        model_2_r2 = model_2_site_error[site_key]['r2']
+        model_1_fold = model_1_site_error[site_key]['fold']
+        try:
+            model_2_rmse = model_2_site_error[site_key]['rmse']
+            model_2_r2 = model_2_site_error[site_key]['r2']
+            model_2_fold = model_2_site_error[site_key]['fold']
+        except KeyError:
+            model_2_rmse = float('nan')
+            model_2_r2 = float('nan')
+            model_2_fold = float('nan')
         comparison_dict[site_key] = {
             'latitude': site_lat,
             'longitude': site_lon,
@@ -699,7 +714,10 @@ def site_analysis(
             'model_2_r2': model_2_r2,
             'rmse_diff': model_2_rmse - model_1_rmse,
             'r2_diff': model_2_r2 - model_1_r2,
-            'num_measurements': model_1_site_error[site_key]['num_measurements']
+            'num_measurements': model_1_site_error[site_key]['num_measurements'],
+            'var': model_1_site_error[site_key]['var'],
+            'model_1_fold': model_1_fold,
+            'model_2_fold': model_2_fold
         }
     # turn into DataFrame for easier analysis
     comparison_df = pd.DataFrame.from_dict(comparison_dict, orient='index')
@@ -714,7 +732,8 @@ def site_analysis(
             f'rmse_{model_2_gen_name}_vs_{model_1_gen_name}.png'
         ),
         xlabel=f'Model 1 ({model_1_gen_name}) RMSE',
-        ylabel=f'Model 2 ({model_2_gen_name}) RMSE'
+        ylabel=f'Model 2 ({model_2_gen_name}) RMSE',
+        line_to_plot='one_to_one'
     )
     plotting.generic_scatter(
         comparison_df.model_1_r2.values,
@@ -725,8 +744,9 @@ def site_analysis(
         ),
         xlabel=f'Model 1 ({model_1_gen_name}) R2',
         ylabel=f'Model 2 ({model_2_gen_name}) R2',
-        xlim=(-0.1, 1.1),
-        ylim=(-0.1, 1.1)
+        line_to_plot='one_to_one',
+        xlim=(-1.1, 1.1),
+        ylim=(-1.1, 1.1)
     )
     
     # test correlation between num measurements and performance
@@ -738,7 +758,8 @@ def site_analysis(
             f'num_measurements_vs_rmse_{model_1_gen_name}.png'
         ),
         xlabel='Number of Measurements',
-        ylabel='RMSE'
+        ylabel='RMSE',
+        line_to_plot='one_to_one'
     )
     # test correlation between rmse/r2 and differences in model performance
     plotting.generic_scatter(
@@ -867,31 +888,59 @@ def main():
     analyze_by_landcover = True
     # model settings
     model_gen_dirs = [
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/base_pixelsites',
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarstats_pixelsites',
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/sarmultitask_pixelsites',
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_base',
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_stats_nomonths',
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_multitask_5_1',
     ]
-    model_1_gen_name = 'base_pixelsites'
-    model_2_gen_name = 'sarstats_pixelsites'
-    model_3_gen_name = 'sarmultitask_pixelsites'
+    model_1_gen_name = 'base'
+    model_2_gen_name = 'sarstats_nomonths'
+    model_3_gen_name = 'multitask_5_1'
     # settings for the best sarstats model
-    dms = [64,64,64]
-    nh = [2,2,2]
-    nl = [3,3,3]
-    df = [128,128,128]
+    dms = [32,64,32]
+    nh = [1,2,1]
+    nl = [2,3,2]
+    df = [64,128,64]
     do = [0.15,0.15,0.15]
     bs = [128,128,128]
     lr = [5e-4,5e-4,5e-4]
-    warmup = [502,502,1175]
+    warmup = [502,501,2458]
     wd = [1e-4,1e-4,1e-4]
-    iobs = [30638,30638,30638]
+    iobs = [30638,30565,30638]
     vvobs = [0,0,0]
-    vhobs = [0,0,41024]
-    dmlong = [128,256,32]
-    nhlong = [4,8,1]
-    nllong = [4,5,2]
-    dflong = [256,512,64]
-    outlong = [64,64,32]
+    vhobs = [0,0,119237]
+    dmlong = [32,128,64]
+    nhlong = [1,4,2]
+    nllong = [2,4,3]
+    dflong = [64,256,128]
+    outlong = [32,64,32]
+    
+    
+    #model_gen_dirs = [
+    #    '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_base_nll',
+    #    '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_stats_nomonths_nll',
+    #    '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_multitask_5_1_nll',
+    #]
+    #model_1_gen_name = 'base_nll'
+    #model_2_gen_name = 'sarstats_nomonths_nll'
+    #model_3_gen_name = 'multitask_5_1_nll'
+    ## settings for the best sarstats model
+    #dms = [32,32,32]
+    #nh = [1,1,1]
+    #nl = [2,2,2]
+    #df = [64,64,64]
+    #do = [0.15,0.15,0.15]
+    #bs = [128,128,128]
+    #lr = [5e-4,5e-4,5e-4]
+    #warmup = [502,501,2458]
+    #wd = [1e-4,1e-4,1e-4]
+    #iobs = [30638,30565,30638]
+    #vvobs = [0,0,0]
+    #vhobs = [0,0,119237]
+    #dmlong = [64,128,32]
+    #nhlong = [2,4,1]
+    #nllong = [3,4,2]
+    #dflong = [128,256,64]
+    #outlong = [32,64,32]
     model_1_name = (
         f'transformer_dm{dms[0]}_nh{nh[0]}_nl{nl[0]}_df{df[0]}_do{do[0]}'
         f'_bs{bs[0]}_lr{lr[0]}_warmup{warmup[0]}_wd{wd[0]}'
@@ -962,13 +1011,13 @@ def main():
     if analyze_by_landcover:
         # load up the land cover dataset so that we can get land cover at site
         land_cover_single_ds = xr.open_zarr(
-            '/scratch/users/trobinet/long_lfmc/trent_datasets/nlcd/nlcd_2003_2023.zarr'
+            '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/nlcd/nlcd_2003_2023.zarr'
         )
         land_cover_breakdown_ds = xr.open_zarr(
-            '/scratch/users/trobinet/long_lfmc/trent_datasets/nlcd/nlcd_target_grid_2003_2023.zarr'
+            '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/nlcd/nlcd_target_grid_2003_2023.zarr'
         )
         nfmd_df = pd.read_csv(
-            '/scratch/users/trobinet/long_lfmc/trent_datasets/nfmd/nfmd_processed.csv'
+            '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/nfmd/nfmd_processed.csv'
         )
         site_lc_df_path_model_1 = os.path.join(
             '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
@@ -1055,18 +1104,20 @@ def main():
             ]
         )
         sarmultitask_hurt_sites = sarmultitask_hurt_df[['latitude','longitude']].drop_duplicates().reset_index(drop=True)
-        microwaves_help_sites = pd.merge(
-            sarstats_help_sites,
-            sarmultitask_help_sites,
-            on=['latitude','longitude'],
-            how='inner'
-        )
-        microwaves_hurt_sites = pd.merge(
-            sarstats_hurt_sites,
-            sarmultitask_hurt_sites,
-            on=['latitude','longitude'],
-            how='inner'
-        )
+        #microwaves_help_sites = pd.merge(
+        #    sarstats_help_sites,
+        #    sarmultitask_help_sites,
+        #    on=['latitude','longitude'],
+        #    how='inner'
+        #)
+        #microwaves_hurt_sites = pd.merge(
+        #    sarstats_hurt_sites,
+        #    sarmultitask_hurt_sites,
+        #    on=['latitude','longitude'],
+        #    how='inner'
+        #)
+        microwaves_help_sites = sarmultitask_help_sites
+        microwaves_hurt_sites = sarmultitask_hurt_sites
         help_vs_hurt = pd.concat(
             [microwaves_help_sites, microwaves_hurt_sites],
             axis=0
@@ -1128,7 +1179,8 @@ def main():
             ylabel=f'{model_3_gen_name} RMSE Difference from Base Model',
             alpha=0.8,
             s=4,
-            color_array=np.array([0.2]*len(model_1_2_comparison_df))
+            color_array=np.array([0.2]*len(model_1_2_comparison_df)),
+            line_to_plot='one_to_one'
         )
         site_r2s = []
         for site_key in model_1_2_comparison_df.index:
@@ -1146,11 +1198,12 @@ def main():
             color_array=model_1_site_r2_array,
             alpha=0.8,
             s=4,
-            xlim=(-1.1,1.1),
-            ylim=(-1.1,1.1),
-            corrclip=[-1.1,1.1],
+            #xlim=(-1.1,1.1),
+            #ylim=(-1.1,1.1),
+            #corrclip=[-1.1,1.1],
             cbar_range=[0,1],
-            cbar_label=f'{model_1_gen_name} R²'
+            cbar_label=f'{model_1_gen_name} R²',
+            line_to_plot='one_to_one'
         )
 
 

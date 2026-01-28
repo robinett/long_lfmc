@@ -20,6 +20,6 @@ python3 -u train_multitarget_longweather_vvvh.py \
     --long_num_layers 3 \
     --long_dim_feedforward 512 \
     --long_out_dim 32 \
-    --num_tasks 1 \
+    --num_tasks 2 \
     --task_weight_type 'manual' \
     --manual_task_weights 5.0 1.0

@@ -11,8 +11,8 @@
 #SBATCH --mail-user=trobinet@stanford.edu
 
 source ~/.bashrc
-source ~/uv_activations/activate_lfmc_process.sh
+source ~/uv_activations/activate_lfmc_model.sh
 
-python3 -u compute_sar_stats.py
+python3 -u compute_sar_stats_new.py
 
 echo Processing Complete
