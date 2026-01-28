@@ -43,7 +43,8 @@ def process(
     start,
     end,
     bound_box,
-    out_fname
+    out_fname,
+    filter_mismatch_landcover=False
 ):
     orig = pd.read_csv(orig_fname,dtype={6:str})
     # let's rename some columns here to make life easier
@@ -282,6 +283,19 @@ def process(
                 site_data = site_data[site_data['date'].dt.year != year]
                 samples_after = site_data.shape[0]
                 total_samples_removed += (samples_before - samples_after)
+            # additionally, filter samples that don't match overall landcover at that pixel if we ask
+            if filter_mismatch_landcover:
+                lc_vals = np.array([
+                    nlcd_year[var].values.item()
+                    for var in classes
+                ])
+                dom_idx = lc_vals.argmax()
+                dom_lc = classes[dom_idx]
+                mask = ~(
+                    (site_data['date'].dt.year == year) &
+                    (site_data['landcover'] != dom_lc)
+                )
+                site_data = site_data[mask]
         # make sure that we haven't gotten rid of all the data
         if site_data.shape[0] == 0:
             print('No data left after land cover check')
