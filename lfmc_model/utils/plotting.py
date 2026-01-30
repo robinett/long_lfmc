@@ -823,6 +823,87 @@ def map_points(
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
+def generic_hexbin(
+    x,
+    y,
+    plot_path,
+    gridsize=100,
+    xlabel=None,
+    ylabel=None,
+    xlim=None,
+    ylim=None,
+    cmap="viridis",
+    cbar_label="Counts",
+    cbarlim=None,
+    fontsize=None,
+    line_to_plot=None,
+    corrclip=[-np.inf, np.inf]
+):
+    plt.figure(figsize=(6, 6))
+    if cbarlim:
+        vmin = cbarlim[0]
+        vmax = cbarlim[1]
+    else:
+        vmin = None
+        vmax = None
+    hb = plt.hexbin(
+        x,
+        y,
+        gridsize=gridsize,
+        cmap=cmap,
+        mincnt=1,
+        #bins='log',
+        vmin=vmin,
+        vmax=vmax
+    )
+    plt.colorbar(hb, label=cbar_label)
+    plt.xlabel(xlabel if xlabel else "X", fontsize=fontsize)
+    plt.ylabel(ylabel if ylabel else "Y", fontsize=fontsize)
+
+    if fontsize is not None:
+        plt.tick_params(axis='both', labelsize=fontsize)
+
+    if xlim:
+        plt.xlim(xlim)
+    if ylim:
+        plt.ylim(ylim)
+
+    if line_to_plot == 'correlation':
+
+        mask_corr = (
+            (x >= corrclip[0]) & (x <= corrclip[1]) &
+            (y >= corrclip[0]) & (y <= corrclip[1])
+        )
+        x_corr = x[mask_corr]
+        y_corr = y[mask_corr]
+        corr_coef = np.corrcoef(x_corr, y_corr)[0, 1]
+        m, b = np.polyfit(x_corr, y_corr, 1)
+
+        plt.plot(
+            x_corr,
+            m * x_corr + b,
+            color="orange",
+            label=f"Best Fit Line (r={corr_coef:.2f})",
+        )
+        plt.legend()
+
+    if line_to_plot == 'one_to_one':
+        x_min = min(x)
+        x_max = max(x)
+        y_min = min(y)
+        y_max = max(y)
+        min_min = min(x_min, y_min)
+        max_max = max(x_max, y_max)
+        plt.plot(
+            [min_min, max_max],
+            [min_min, max_max],
+            color="orange",
+            label="One-to-One Line",
+        )
+
+    plt.savefig(plot_path, bbox_inches="tight", dpi=300)
+    plt.close()
+
 def generic_scatter(
     x,
     y,
@@ -912,6 +993,7 @@ def generic_scatter(
             color="orange",
             label=f"Best Fit Line (r={corr_coef:.2f})",
         )
+        ax.legend()
 
     elif line_to_plot == 'one_to_one':
         x_min = min(x)

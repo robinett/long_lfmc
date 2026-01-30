@@ -283,7 +283,7 @@ def main():
         'dirs':{
             'nfmd':os.path.join(
                 oak_dir,
-                'nfmd/nfmd_processed.csv'
+                'nfmd/nfmd_processed_landcovermatches.csv'
             ),
             #'vv':os.path.join(
             #    scratch_dir,
@@ -291,11 +291,11 @@ def main():
             #),
             'vh_at_sites':os.path.join(
                 oak_dir,
-                'sar/sampled/vh_backscatter_samples_at_sites.csv'
+                'sar/sampled/vh_backscatter_samples_at_sites_matching.csv'
             ),
             'vh_at_random':os.path.join(
                 oak_dir,
-                'sar/sampled/vh_backscatter_samples_random.csv'
+                'sar/sampled/vh_backscatter_samples_random_matching.csv'
             )
             #'vv_minus_vh':os.path.join(
             #    scratch_dir,
@@ -337,14 +337,14 @@ def main():
         171, 172, 173, 174, 175, 176, 177, 178, 179, 180
     ]
     inputs_outputs = (
-        'y_InsituVh_X_ModisfilledDaymetStaticClimatezoneSarstatsseasonalLandcoverfracLandcoverchange_Z_Nlcdclass_180d'
+        'y_InsitucleanedVh_X_ModisfilledDaymetStaticClimatezoneSarstatsseasonalLandcoverfracLandcoverchange_Z_Nlcdclass_180d'
     )
     out_dir = os.path.join(
         scratch_dir,
         'compiled',
         inputs_outputs
     )
-    #os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(out_dir, exist_ok=True)
     out_fname = f'compiled_data_{start_date:%Y%m%d}_{end_date:%Y%m%d}.csv'
     out_fname = os.path.join(out_dir, out_fname)
     # compile the data

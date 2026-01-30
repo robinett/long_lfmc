@@ -942,11 +942,11 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     # fill in follwing necessary information for producing the correct dataset
-    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/news1_stats_seasonal'
+    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/news1_multitask_cleaned'
     os.makedirs(save_dir, exist_ok=True)
     csv_names = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/compiled/'
-        'y_InsituVh_X_ModisfilledDaymetStaticClimatezoneSarstatsseasonalLandcoverfracLandcoverchange_Z_Nlcdclass_180d/'
+        'y_InsitucleanedVh_X_ModisfilledDaymetStaticClimatezoneSarstatsseasonalLandcoverfracLandcoverchange_Z_Nlcdclass_180d/'
         'compiled_data_*.csv'
     )
     csv_names_all = sorted(glob.glob(csv_names))
@@ -987,9 +987,9 @@ if __name__ == "__main__":
         'developed','evergreen_forest',
         'grass','mixed_forest','other',
         'shrub','water','wetlands',
-        'sar_vh_mean',
-        'sar_vh_seasonal_amp',
-        'sar_vh_annual_fraction'
+        #'sar_vh_mean',
+        #'sar_vh_seasonal_amp',
+        #'sar_vh_annual_fraction'
         #'sar_vh_mean',
         #'sar_vh_std',
         #'sar_vh_min',
@@ -1046,12 +1046,12 @@ if __name__ == "__main__":
     ]
     stratifier = 'nlcd'
     include_lag = True
-    target_cols = ['lfmc']
-    #target_cols = ['lfmc','vh_backscatter']
+    #target_cols = ['lfmc']
+    target_cols = ['lfmc','vh_backscatter']
     #target_cols = ['lfmc','VV','VH']
     #num_rs_samples = 0
     # just keep all of them
-    num_rs_samples = 100_000
+    num_rs_samples = 100_000_000
     # which vh samples to keep
     # options are:
     #   all: doesn't matter where from

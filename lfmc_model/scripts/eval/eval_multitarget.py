@@ -12,7 +12,7 @@ import warnings
 proj_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
 sys.path.append(os.path.join(proj_root, 'lfmc_model','utils'))
 
-from plotting import pred_obs_scatter,map_points
+from plotting import pred_obs_scatter,map_points,generic_scatter,generic_hexbin
 
 warnings.filterwarnings(
     "ignore",
@@ -25,10 +25,13 @@ warnings.filterwarnings(
     category=RuntimeWarning
 )
 
+def gaussian_nll(preds,targets,var):
+    return 0.5 * (((preds - targets) ** 2) / var + np.log(var) + np.log(2.0 * np.pi))
+
 def main():
     # perform analysis across all models in a dir, since these are now batched out
     base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_multitask_5_1_nll'
-    load_only = True
+    load_only = False
     model_dirs = [
         os.path.join(base_dir, d)
         for d in os.listdir(base_dir)
@@ -39,8 +42,13 @@ def main():
         'learning_rate',
         'long_d_model', #'long_nhead', 'long_num_layers', 'long_dim_feedforward', 
         'long_out',
-        'test_insitu_r2', 'test_insitu_rmse', 'test_vv_r2', 'test_vh_r2'
+        'test_insitu_r2', 'test_insitu_rmse', 
+        'test_insitu_nll',
+        #'test_vv_r2', 'test_vh_r2',
+        #'test_insitu_rmse_mean','test_insitu_rmse_anom',
+        #'test_insitu_r2_mean','test_insitu_r2_anom'
     ]
+    sort_col = 'test_insitu_rmse'
     if load_only:
         csv = pd.read_csv(
             os.path.join(
@@ -48,7 +56,7 @@ def main():
             )
         )
         csv_sub = csv[relevant_cols]
-        csv_sub = csv_sub.sort_values(by='test_insitu_rmse', ascending=True)
+        csv_sub = csv_sub.sort_values(by=sort_col, ascending=True)
         console = Console()
         console.print(csv_sub)
         sys.exit()
@@ -72,6 +80,7 @@ def main():
     long_outs = []
     model_r2s = []
     model_rmses = []
+    model_nlls = []
     model_r2s_anom = []
     model_rmses_anom = []
     model_r2s_mean = []
@@ -109,6 +118,7 @@ def main():
         all_val_true_vh = np.array([])
         all_test_preds_insitu = np.array([])
         all_test_true_insitu = np.array([])
+        all_test_preds_insitu_std = np.array([])
         all_test_preds_vv = np.array([])
         all_test_true_vv = np.array([])
         all_test_preds_vh = np.array([])
@@ -169,6 +179,10 @@ def main():
                 val_vh_n = len(val_true_vh)
             test_insitu_mae = np.mean(np.abs(test_preds_insitu - test_true_insitu))
             test_insitu_rmse = np.sqrt(np.mean((test_preds_insitu - test_true_insitu)**2))
+            if (test_preds_insitu_std != 0).all():
+                test_insitu_nll = gaussian_nll(test_preds_insitu, test_true_insitu, np.exp(test_preds_insitu_std))
+            else:
+                test_insitu_nll = np.nan
             if np.isnan(test_preds_insitu).all() or np.isnan(test_true_insitu).all():
                 test_insitu_r2 = np.nan
             else:
@@ -247,6 +261,7 @@ def main():
             if test_insitu_n > 0:
                 all_test_preds_insitu = np.concatenate((all_test_preds_insitu, test_preds_insitu))
                 all_test_true_insitu = np.concatenate((all_test_true_insitu, test_true_insitu))
+                all_test_preds_insitu_std = np.concatenate((all_test_preds_insitu_std, test_preds_insitu_std))
             if test_vv_n > 0:
                 all_test_preds_vv = np.concatenate((all_test_preds_vv, test_preds_vv))
                 all_test_true_vv = np.concatenate((all_test_true_vv, test_true_vv))
@@ -266,8 +281,10 @@ def main():
         overall_val_insitu_n = len(all_val_true_insitu)
         overall_test_insitu_mae = np.mean(np.abs(all_test_preds_insitu - all_test_true_insitu))
         overall_test_insitu_rmse = np.sqrt(np.mean((all_test_preds_insitu - all_test_true_insitu)**2))
+        individual_test_insitu_err = np.abs(all_test_preds_insitu - all_test_true_insitu)
         overall_test_insitu_r2 = r2_score(all_test_true_insitu, all_test_preds_insitu)
         overall_test_insitu_n = len(all_test_true_insitu)
+        overall_test_insitu_nll = np.mean(gaussian_nll(all_test_preds_insitu, all_test_true_insitu, np.exp(all_test_preds_insitu_std)))
         overall_val_vv_mae = np.mean(np.abs(all_val_preds_vv - all_val_true_vv))
         overall_val_vv_rmse = np.sqrt(np.mean((all_val_preds_vv - all_val_true_vv)**2))
         overall_val_vh_mae = np.mean(np.abs(all_val_preds_vh - all_val_true_vh))
@@ -309,7 +326,7 @@ def main():
         #print('Overall Validation Metrics - VH:')
         #print(f'MAE: {overall_val_vh_mae:.3f}, RMSE: {overall_val_vh_rmse:.3f}, R2: {overall_val_vh_r2:.3f}')
         print('Overall Test Metrics - In Situ:')
-        print(f'MAE: {overall_test_insitu_mae:.3f}, RMSE: {overall_test_insitu_rmse:.3f}, R2: {overall_test_insitu_r2:.3f}')
+        print(f'MAE: {overall_test_insitu_mae:.3f}, RMSE: {overall_test_insitu_rmse:.3f}, R2: {overall_test_insitu_r2:.3f}, NLL: {overall_test_insitu_nll:.3f}')
         #print('Overall Test Metrics - VV:')
         #print(f'MAE: {overall_test_vv_mae:.3f}, RMSE: {overall_test_vv_rmse:.3f}, R2: {overall_test_vv_r2:.3f}')
         #print('Overall Test Metrics - VH:')
@@ -317,6 +334,7 @@ def main():
         # keep track of these across models
         model_r2s.append(overall_test_insitu_r2)
         model_rmses.append(overall_test_insitu_rmse)
+        model_nlls.append(overall_test_insitu_nll)
         model_r2s_vv.append(overall_test_vv_r2)
         model_r2s_vh.append(overall_test_vh_r2)
         # make overall plots
@@ -340,6 +358,24 @@ def main():
             r2=overall_test_insitu_r2,
             n=overall_test_insitu_n
         )
+        overall_test_insitu_std_plot_path = os.path.join(model_dir, 'overall_test_insitu_pred_obs_std_scatter.png')
+        generic_hexbin(
+            individual_test_insitu_err,
+            all_test_preds_insitu_std,
+            overall_test_insitu_std_plot_path,
+            xlabel='Error (LFMC %)',
+            ylabel='Standard Deviation (LFMC %)',
+            line_to_plot='one_to_one',
+            xlim=[0,75],
+            ylim=[0,55],
+            #cbarlim=[0,450]
+        )
+        #generic_scatter(
+        #    individual_test_insitu_err,
+        #    all_test_preds_insitu_std,
+        #    overall_test_insitu_std_plot_path,
+        #    line_to_plot='correlation'
+        #)
         #if overall_val_rs_n > 0:
         #    overall_val_rs_plot_path = os.path.join(model_dir, 'overall_val_rs_pred_obs_scatter.png')
         #    pred_obs_scatter(
@@ -556,6 +592,7 @@ def main():
         'long_out': long_outs,
         'test_insitu_r2': model_r2s,
         'test_insitu_rmse': model_rmses,
+        'test_insitu_nll': model_nlls,
         'test_insitu_r2_anom': model_r2s_anom,
         'test_insitu_rmse_anom': model_rmses_anom,
         'test_insitu_r2_mean': model_r2s_mean,
@@ -569,7 +606,7 @@ def main():
     # print this as a nice table
     # sort by lowest rmse (lowest @ top)
     summary_df = summary_df[relevant_cols]
-    summary_df = summary_df.sort_values(by='test_insitu_rmse', ascending=True)
+    summary_df = summary_df.sort_values(by=sort_col, ascending=True)
     print('Model Summary Results:')
     console = Console()
     console.print(summary_df)

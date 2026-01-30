@@ -23,7 +23,7 @@ def main():
         chunks="auto",
     )
     lfmc_df = pd.read_csv(
-        "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/nfmd/nfmd_processed.csv"
+        "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/nfmd/nfmd_processed_landcovermatches.csv"
     )
     #vars_to_sample = ['VV', 'VH', 'vv_minus_vh']
     vars_to_sample = ['vh_backscatter']
@@ -85,7 +85,7 @@ def main():
         print(sampled_sar_at_sites)
         var_fmt = var.lower()
         sampled_sar_at_sites.to_csv(
-            f"/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sampled/{var_fmt}_samples_at_sites.csv"
+            f"/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sampled/{var_fmt}_samples_at_sites_matching.csv"
         )
     for var in vars_to_sample:
         created_df = False
@@ -200,7 +200,7 @@ def main():
         unique_lat_lon_combos = list(set(lat_lon_combos))
         print(f"Sampled {len(out_df)} points from {len(unique_lat_lon_combos)} unique locations")
         out_df.to_csv(
-            f"/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sampled/{var_fmt}_samples_random.csv",
+            f"/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sampled/{var_fmt}_samples_random_matching.csv",
             index=False
         )
 

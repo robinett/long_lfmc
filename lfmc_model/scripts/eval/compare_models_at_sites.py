@@ -886,48 +886,20 @@ def main():
     # analysis settings
     analyze_at_sites = True
     analyze_by_landcover = True
-    # model settings
-    model_gen_dirs = [
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_base',
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_stats_nomonths',
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_multitask_5_1',
-    ]
-    model_1_gen_name = 'base'
-    model_2_gen_name = 'sarstats_nomonths'
-    model_3_gen_name = 'multitask_5_1'
-    # settings for the best sarstats model
-    dms = [32,64,32]
-    nh = [1,2,1]
-    nl = [2,3,2]
-    df = [64,128,64]
-    do = [0.15,0.15,0.15]
-    bs = [128,128,128]
-    lr = [5e-4,5e-4,5e-4]
-    warmup = [502,501,2458]
-    wd = [1e-4,1e-4,1e-4]
-    iobs = [30638,30565,30638]
-    vvobs = [0,0,0]
-    vhobs = [0,0,119237]
-    dmlong = [32,128,64]
-    nhlong = [1,4,2]
-    nllong = [2,4,3]
-    dflong = [64,256,128]
-    outlong = [32,64,32]
-    
-    
+    ## model settings
     #model_gen_dirs = [
-    #    '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_base_nll',
-    #    '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_stats_nomonths_nll',
-    #    '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_multitask_5_1_nll',
+    #    '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_base',
+    #    '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_stats_nomonths',
+    #    '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_multitask_5_1',
     #]
-    #model_1_gen_name = 'base_nll'
-    #model_2_gen_name = 'sarstats_nomonths_nll'
-    #model_3_gen_name = 'multitask_5_1_nll'
+    #model_1_gen_name = 'base'
+    #model_2_gen_name = 'sarstats_nomonths'
+    #model_3_gen_name = 'multitask_5_1'
     ## settings for the best sarstats model
-    #dms = [32,32,32]
-    #nh = [1,1,1]
-    #nl = [2,2,2]
-    #df = [64,64,64]
+    #dms = [32,64,32]
+    #nh = [1,2,1]
+    #nl = [2,3,2]
+    #df = [64,128,64]
     #do = [0.15,0.15,0.15]
     #bs = [128,128,128]
     #lr = [5e-4,5e-4,5e-4]
@@ -936,11 +908,39 @@ def main():
     #iobs = [30638,30565,30638]
     #vvobs = [0,0,0]
     #vhobs = [0,0,119237]
-    #dmlong = [64,128,32]
-    #nhlong = [2,4,1]
-    #nllong = [3,4,2]
-    #dflong = [128,256,64]
+    #dmlong = [32,128,64]
+    #nhlong = [1,4,2]
+    #nllong = [2,4,3]
+    #dflong = [64,256,128]
     #outlong = [32,64,32]
+    
+    
+    model_gen_dirs = [
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_base_nll',
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_stats_nomonths_nll',
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_multitask_5_1_nll',
+    ]
+    model_1_gen_name = 'base_nll'
+    model_2_gen_name = 'sarstats_nomonths_nll'
+    model_3_gen_name = 'multitask_5_1_nll'
+    # settings for the best sarstats model
+    dms = [64,32,128]
+    nh = [2,1,4]
+    nl = [3,2,4]
+    df = [128,64,256]
+    do = [0.15,0.15,0.15]
+    bs = [128,128,128]
+    lr = [5e-4,5e-4,1e-4]
+    warmup = [502,501,2458]
+    wd = [1e-4,1e-4,1e-4]
+    iobs = [30638,30565,30638]
+    vvobs = [0,0,0]
+    vhobs = [0,0,119237]
+    dmlong = [256,128,32]
+    nhlong = [8,4,1]
+    nllong = [5,4,2]
+    dflong = [512,256,64]
+    outlong = [64,64,32]
     model_1_name = (
         f'transformer_dm{dms[0]}_nh{nh[0]}_nl{nl[0]}_df{df[0]}_do{do[0]}'
         f'_bs{bs[0]}_lr{lr[0]}_warmup{warmup[0]}_wd{wd[0]}'
@@ -970,6 +970,32 @@ def main():
         model_1_site_error = get_site_error(model_1_dir)
         model_2_site_error = get_site_error(model_2_dir)
         model_3_site_error = get_site_error(model_3_dir)
+        all_1s_true = []
+        all_1s_pred = []
+        all_3s_true = []
+        all_3s_pred = []
+        for site in model_1_site_error.keys():
+            all_1s_true.extend(model_1_site_error[site]['true_values'])
+            all_1s_pred.extend(model_1_site_error[site]['predictions'])
+        for site in model_3_site_error.keys():
+            all_3s_true.extend(model_3_site_error[site]['true_values'])
+            all_3s_pred.extend(model_3_site_error[site]['predictions'])
+        all_1s_abserrs = np.abs(np.array(all_1s_true) - np.array(all_1s_pred))
+        all_3s_abserrs = np.abs(np.array(all_3s_true) - np.array(all_3s_pred))
+        ## filter anything larger than 100
+        #all_1s_abserrs = all_1s_abserrs[all_1s_abserrs < 100]
+        #all_3s_abserrs = all_3s_abserrs[all_3s_abserrs < 100]
+        plotting.kde_plot(
+            [all_1s_abserrs, all_3s_abserrs],
+            [f'{model_1_gen_name} Absolute Errors', f'{model_3_gen_name} Absolute Errors'],
+            os.path.join(
+                '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/model_comparisons/',
+                f'rmse_distribution_{model_1_gen_name}_vs_{model_3_gen_name}.png'
+            ),
+            xlabel='RMSE',
+            ylabel='Density',
+        )
+        sys.exit()
         model_1_2_comparison_df = site_analysis(
             model_1_site_error,
             model_2_site_error,

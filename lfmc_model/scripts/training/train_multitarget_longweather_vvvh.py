@@ -24,7 +24,8 @@ sys.path.append(os.path.join(project_root,'lfmc_model','utils'))
 
 from transformer_model import LFMCTransformer
 from transformer_model_multitask import LFMCTransformer as LFMCTransformerMultiTask
-from transformer_multitask_longclimate import LFMCTransformer as LFMCTransformerMultiTaskLongClimate
+#from transformer_multitask_longclimate import LFMCTransformer as LFMCTransformerMultiTaskLongClimate
+from transformer_multitask_longclimate_uncertainty import LFMCTransformer as LFMCTransformerMultiTaskLongClimate
 import plotting
 
 import warnings

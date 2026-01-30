@@ -9,10 +9,10 @@ trap 'echo "Caught Ctrl-C, exiting..."; exit 130' INT
 ########################
 
 input_data_dir="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/inputs/news1_stats_nomonths"
+trent_datasets/lfmc_model/data/inputs/news1_multitask_cleaned"
 
 save_root="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/outputs/news1_stats_nomonths_nll"
+trent_datasets/lfmc_model/data/outputs/news1_multitask_5_1_nll_cleaned"
 
 ########################
 # Job throttling via lock files
@@ -26,9 +26,9 @@ mkdir -p "${lock_dir}"
 # Hyperparameter grids
 ########################
 
-num_tasks=1
+num_tasks=2
 weighting_type='manual'
-task_weights=(1.0 1.0)
+task_weights=(5.0 1.0)
 
 batch_sizes=(128)
 lrs=(5e-4 1e-4)
