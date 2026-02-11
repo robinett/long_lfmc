@@ -20,8 +20,10 @@ def add_time(ds, fp):
     return ds
 
 def main():
-    raw_dir = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily"
-    out_zarr = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_500m_full.zarr"
+    raw_dir = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily_vv"
+    out_zarr = "/scratch/users/trobinet/long_lfmc/trent_datasets/sar/sar_500m_full_vv.zarr"
+    var_name = 'vv_backscatter'
+    var_range = [-30.0,5.0]
     consolidate_only = False
     if consolidate_only:
         zarr.convenience.consolidate_metadata(out_zarr)
@@ -49,9 +51,8 @@ def main():
             cache=False,
         )
         # apply our range filtering to be reasonable
-        vh_range = [-35.0, 0.0]
         ds = ds.where(
-            (ds["vh_backscatter"] >= vh_range[0]) & (ds["vh_backscatter"] <= vh_range[1])
+            (ds[var_name] >= var_range[0]) & (ds[var_name] <= var_range[1])
         )
         # chunk the dataset
         ds = add_time(ds, fp)

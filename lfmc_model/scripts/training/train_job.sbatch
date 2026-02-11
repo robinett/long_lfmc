@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --partition=serc
-#SBATCH --time=06:00:00
+#SBATCH --time=10:00:00
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
 #SBATCH --output=logs/lfmc_%j.out
@@ -20,4 +20,4 @@ if [[ -n "$lock_file" ]]; then
 fi
 
 # Forward *all* args to the Python script
-python3 -u train_multitarget_longweather_vvvh.py "$@"
+python3 -u train_multitarget_vh.py "$@"

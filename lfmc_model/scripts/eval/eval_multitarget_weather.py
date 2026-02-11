@@ -30,8 +30,8 @@ def gaussian_nll(preds,targets,var):
 
 def main():
     # perform analysis across all models in a dir, since these are now batched out
-    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/vvvhratioinp_20172023_full'
-    load_only = True
+    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_base_nll_cleaned_noweather'
+    load_only = False
     model_dirs = [
         os.path.join(base_dir, d)
         for d in os.listdir(base_dir)
@@ -40,12 +40,13 @@ def main():
     relevant_cols = [
         'd_model', #'nhead', 'num_layers', 'dim_feedforward', 'dropout', 
         'learning_rate',
+        'long_d_model', #'long_nhead', 'long_num_layers', 'long_dim_feedforward', 
+        'long_out',
         'test_insitu_r2', 'test_insitu_rmse', 
         'test_insitu_nll',
-        'test_vh_r2',
         #'test_vv_r2', 'test_vh_r2',
         #'test_insitu_rmse_mean','test_insitu_rmse_anom',
-        'test_insitu_r2_mean','test_insitu_r2_anom'
+        #'test_insitu_r2_mean','test_insitu_r2_anom'
     ]
     sort_col = 'test_insitu_rmse'
     if load_only:
@@ -58,7 +59,6 @@ def main():
         csv_sub = csv_sub.sort_values(by=sort_col, ascending=True)
         console = Console()
         console.print(csv_sub)
-        #print(csv_sub)
         sys.exit()
     # get the model information for each dir
     d_models = []
@@ -73,6 +73,11 @@ def main():
     iobs = []
     vvobs = []
     vhobs = []
+    long_d_models = []
+    long_nheads = []
+    long_n_layers = []
+    long_dim_ffs = []
+    long_outs = []
     model_r2s = []
     model_rmses = []
     model_nlls = []
@@ -82,9 +87,6 @@ def main():
     model_rmses_mean = []
     model_r2s_vv = []
     model_r2s_vh = []
-    model_train_losses = []
-    model_val_losses = []
-    model_test_losses = []
     for m,model_dir in enumerate(model_dirs):
         model_name = model_dir.split('/')[-1]
         d_models.append(int(model_name.split('transformer_dm')[1].split('_')[0]))
@@ -99,6 +101,11 @@ def main():
         iobs.append(int(model_name.split('iobs')[1].split('_')[0]))
         vvobs.append(int(model_name.split('vvobs')[1].split('_')[0]))
         vhobs.append(int(model_name.split('vhobs')[1].split('_')[0]))
+        long_d_models.append(int(model_name.split('dmlong')[1].split('_')[0]))
+        long_nheads.append(int(model_name.split('nhlong')[1].split('_')[0]))
+        long_n_layers.append(int(model_name.split('nllong')[1].split('_')[0]))
+        long_dim_ffs.append(int(model_name.split('dflong')[1].split('_')[0]))
+        long_outs.append(int(model_name.split('outlong')[1].split('_')[0]))
         # get the folds
         with open(os.path.join(model_dir,'fold_info.json'), 'r') as f:
             fold_info = json.load(f)
@@ -118,10 +125,6 @@ def main():
         all_test_true_vh = np.array([])
         for f,fold in enumerate(folds):
             print(f'Evaluating fold {f+1}/{len(folds)} for model {m+1}/{len(model_dirs)}')
-            train_info_path = os.path.join(model_dir,f'fold_{fold}', 'train_info.csv')
-            train_info = pd.read_csv(train_info_path)
-            train_data_path = os.path.join(model_dir, f'fold_{fold}', 'train_outputs.pth')
-            train_data = torch.load(train_data_path, weights_only=False)
             val_info_path = os.path.join(model_dir, f'fold_{fold}', 'val_info.csv')
             val_info = pd.read_csv(val_info_path)
             val_data_path = os.path.join(model_dir, f'fold_{fold}', 'val_outputs.pth')
@@ -336,40 +339,24 @@ def main():
         model_r2s_vh.append(overall_test_vh_r2)
         # make overall plots
         overall_val_insitu_plot_path = os.path.join(model_dir, 'overall_val_insitu_pred_obs_scatter.png')
-        #pred_obs_scatter(
-        #    all_val_preds_insitu,
-        #    all_val_true_insitu,
-        #    overall_val_insitu_plot_path,
-        #    mae=overall_val_insitu_mae,
-        #    rmse=overall_val_insitu_rmse,
-        #    r2=overall_val_insitu_r2,
-        #    n=overall_val_insitu_n
-        #)
-        generic_hexbin(
-            all_val_true_insitu,
+        pred_obs_scatter(
             all_val_preds_insitu,
+            all_val_true_insitu,
             overall_val_insitu_plot_path,
-            xlabel='True Values',
-            ylabel='Predicted Values',
-            line_to_plot='one_to_one',
+            mae=overall_val_insitu_mae,
+            rmse=overall_val_insitu_rmse,
+            r2=overall_val_insitu_r2,
+            n=overall_val_insitu_n
         )
         overall_test_insitu_plot_path = os.path.join(model_dir, 'overall_test_insitu_pred_obs_scatter.png')
-        #pred_obs_scatter(
-        #    all_test_preds_insitu,
-        #    all_test_true_insitu,
-        #    overall_test_insitu_plot_path,
-        #    mae=overall_test_insitu_mae,
-        #    rmse=overall_test_insitu_rmse,
-        #    r2=overall_test_insitu_r2,
-        #    n=overall_test_insitu_n
-        #)
-        generic_hexbin(
-            all_test_true_insitu,
+        pred_obs_scatter(
             all_test_preds_insitu,
+            all_test_true_insitu,
             overall_test_insitu_plot_path,
-            xlabel='True Values',
-            ylabel='Predicted Values',
-            line_to_plot='one_to_one',
+            mae=overall_test_insitu_mae,
+            rmse=overall_test_insitu_rmse,
+            r2=overall_test_insitu_r2,
+            n=overall_test_insitu_n
         )
         overall_test_insitu_std_plot_path = os.path.join(model_dir, 'overall_test_insitu_pred_obs_std_scatter.png')
         generic_hexbin(
@@ -489,23 +476,14 @@ def main():
         model_rmses_anom.append(overall_test_insitu_anom_rmse)
         # make overall plots for anomalies
         overall_test_insitu_anom_plot_path = os.path.join(model_dir, 'overall_test_insitu_anom_pred_obs_scatter.png')
-        #pred_obs_scatter(
-        #    all_test_preds_insitu_anom,
-        #    all_test_true_insitu_anom,
-        #    overall_test_insitu_anom_plot_path,
-        #    mae=overall_test_insitu_anom_mae,
-        #    rmse=overall_test_insitu_anom_rmse,
-        #    r2=overall_test_insitu_anom_r2,
-        #    n=overall_test_insitu_anom_n
-        #)
-        generic_hexbin(
+        pred_obs_scatter(
             all_test_preds_insitu_anom,
             all_test_true_insitu_anom,
             overall_test_insitu_anom_plot_path,
-            line_to_plot='one_to_one',
-            #xlim=[0,1],
-            #ylim=[0,1],
-            #cbarlim=[0,350]
+            mae=overall_test_insitu_anom_mae,
+            rmse=overall_test_insitu_anom_rmse,
+            r2=overall_test_insitu_anom_r2,
+            n=overall_test_insitu_anom_n
         )
         #if np.isnan(test_rs_r2):
         #    overall_test_rs_anom_mae = np.nan
@@ -549,14 +527,6 @@ def main():
             r2=overall_test_insitu_mean_r2,
             n=overall_test_insitu_mean_n
         )
-        #generic_hexbin(
-        #    all_test_true_insitu_means,
-        #    all_test_preds_insitu_means,
-        #    overall_test_insitu_mean_plot_path,
-        #    xlabel='True Values',
-        #    ylabel='Predicted Values',
-        #    line_to_plot='one_to_one',
-        #)
         #if np.isnan(test_rs_r2):
         #    overall_test_rs_mean_mae = np.nan
         #    overall_test_rs_mean_rmse = np.nan
@@ -615,6 +585,11 @@ def main():
         'insitu_obs': iobs,
         'vv_obs': vvobs,
         'vh_obs': vhobs,
+        'long_d_model': long_d_models,
+        'long_nhead': long_nheads,
+        'long_num_layers': long_n_layers,
+        'long_dim_feedforward': long_dim_ffs,
+        'long_out': long_outs,
         'test_insitu_r2': model_r2s,
         'test_insitu_rmse': model_rmses,
         'test_insitu_nll': model_nlls,

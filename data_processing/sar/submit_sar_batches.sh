@@ -10,8 +10,8 @@ set -euo pipefail
 
 PY_SCRIPT="${1:?Pass the path to the python script as arg 1}"
 
-START="2021-01-01"
-END="2021-08-31"
+START="2015-01-01"
+END="2023-12-31"
 #END="$(date +%F)"   # "present" = today in local cluster time
 CHUNK_SIZE=1 # how to chunk up the date range (in months)
 

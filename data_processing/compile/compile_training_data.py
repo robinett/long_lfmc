@@ -65,6 +65,7 @@ def compile_data(
             labels = pd.concat([labels, this_labs], ignore_index=True)
     print('labels:')
     print(labels)
+    labels = labels.reset_index(drop=True)
     #print(labels.columns)
     #print(labels.loc[labels['lfmc'].notna(), 'lfmc'])
     #print(labels.loc[labels['vh_backscatter'].notna(), 'vh_backscatter'])
@@ -399,27 +400,43 @@ def compile_data(
             xs, ys = transformer.transform(lons, lats)
             # extract for this date/vars/xs/ys
             this_vars = feature_info['vars'][d_source]
-            try:
-                sub = this_ds.sel(
-                    time=np.datetime64(date),
-                    variable=this_vars,
-                )
-            except KeyError:
-                time_to_try = date - pd.Timedelta(days=1)
-                sub = this_ds.sel(
-                    time=np.datetime64(time_to_try),
-                    variable=this_vars,
-                )
             x_idx = nearest_indices_unsorted(this_ds['x'].values, xs)
             y_idx = nearest_indices_unsorted(this_ds['y'].values, ys)
-            all_data = sub['data'].isel(
-                y=('points', y_idx), x=('points', x_idx)
-            ).values
+            if 'sar' in d_source:
+                print(this_ds)
+                sub = this_ds.sel(
+                    time=np.datetime64(date),
+                    method='nearest'
+                )
+                all_data = sub[this_vars].isel(
+                    y=('points', y_idx), x=('points', x_idx)
+                )
+                #all_data = all_data['vh_backscatter']
+            else:
+                try:
+                    sub = this_ds.sel(
+                        time=np.datetime64(date),
+                        variable=this_vars,
+                    )
+                except KeyError:
+                    time_to_try = date - pd.Timedelta(days=1)
+                    sub = this_ds.sel(
+                        time=np.datetime64(time_to_try),
+                        variable=this_vars,
+                    )
+                all_data = sub['data'].isel(
+                    y=('points', y_idx), x=('points', x_idx)
+                )
+            all_data = all_data.compute()
+            print(all_data)
             for i,idx in enumerate(date_to_needed[date]['indices']):
                 lag = lags[i]
                 for v,var in enumerate(this_vars):
                     var_lag_name = f"{var}_lag_{int(lag)}d"
-                    data_to_add = all_data[v][i]
+                    try:
+                        data_to_add = all_data[v][i]
+                    except KeyError:
+                        data_to_add = all_data[var][i]
                     to_labels[var_lag_name][idx] = data_to_add
     # add all of the dynamic variables to the labels dataframe
     labels = pd.concat([labels, pd.DataFrame(to_labels, index=labels.index)], axis=1)

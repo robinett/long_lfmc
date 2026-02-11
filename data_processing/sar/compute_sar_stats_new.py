@@ -26,33 +26,35 @@ def write_vars(ds_piece: xr.Dataset, zpath: str):
 
 def main(ds_path,plots_path,save_stats_path):
     sar_ds = xr.open_zarr(ds_path, chunks='auto')
-    ## timeseries plotting for debugging
-    #trns = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
-    #sample_point = [-113.848216, 35.145574]
-    #sample_point_5070 = trns.transform(*sample_point)
-    #sar_point = sar_ds.sel(x=sample_point_5070[0], y=sample_point_5070[1], method="nearest")
-    #sar_vals = sar_point['vh_backscatter'].values
-    #sar_dates = sar_point['time'].values
-    #plotting.plot_timeseries(
-    #    sar_dates, sar_vals,
-    #    xlabel='Date', ylabel='Backscatter (dB)',
-    #    save_name=os.path.join(plots_path, 'sar_backscatter_timeseries_crazy_std.png'),
-    #    title=f'{sample_point[0]}_{sample_point[1]}',
-    #    #time_bound=[pd.Timestamp('2018-03-01'), pd.Timestamp('2018-03-15')]
-    #)
-    ## timeseries plotting for debugging
-    #trns = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
-    #sample_point = [-118.976675, 37.715220]
-    #sample_point_5070 = trns.transform(*sample_point)
-    #sar_point = sar_ds.sel(x=sample_point_5070[0], y=sample_point_5070[1], method="nearest")
-    #sar_vals = sar_point['vh_backscatter'].values
-    #sar_dates = sar_point['time'].values
-    #plotting.plot_timeseries(
-    #    sar_dates, sar_vals,
-    #    xlabel='Date', ylabel='Backscatter (dB)',
-    #    save_name=os.path.join(plots_path, 'sar_backscatter_timeseries_normal_std.png'),
-    #    title=f'{sample_point[0]}_{sample_point[1]}'
-    #)
+    # timeseries plotting for debugging
+    trns = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
+    sample_point = [-113.848216, 35.145574]
+    sample_point_5070 = trns.transform(*sample_point)
+    sar_point = sar_ds.sel(x=sample_point_5070[0], y=sample_point_5070[1], method="nearest")
+    sar_vals = sar_point['vh_backscatter'].values
+    sar_dates = sar_point['time'].values
+    plotting.plot_timeseries(
+        sar_dates, sar_vals,
+        xlabel='Date', ylabel='Backscatter (dB)',
+        save_name=os.path.join(plots_path, 'sar_backscatter_timeseries_crazy_std.png'),
+        title=f'{sample_point[0]}_{sample_point[1]}',
+        time_bound=[pd.Timestamp('2020-03-01'), pd.Timestamp('2021-12-31')]
+    )
+    # timeseries plotting for debugging
+    trns = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
+    sample_point = [-118.976675, 37.715220]
+    sample_point_5070 = trns.transform(*sample_point)
+    sar_point = sar_ds.sel(x=sample_point_5070[0], y=sample_point_5070[1], method="nearest")
+    sar_vals = sar_point['vh_backscatter'].values
+    sar_dates = sar_point['time'].values
+    plotting.plot_timeseries(
+        sar_dates, sar_vals,
+        xlabel='Date', ylabel='Backscatter (dB)',
+        save_name=os.path.join(plots_path, 'sar_backscatter_timeseries_normal_std.png'),
+        title=f'{sample_point[0]}_{sample_point[1]}',
+        time_bound=[pd.Timestamp('2020-03-01'), pd.Timestamp('2021-12-31')]
+    )
+    sys.exit()
     # get rid of the save stats path if it already exists so that we aren't double-writing
     if os.path.exists(save_stats_path):
         # make sure the user is okay getting rid of the old file
@@ -233,9 +235,13 @@ def main(ds_path,plots_path,save_stats_path):
 
 if __name__ == "__main__":
     # Define the path to the SAR files
+    #sar_files_path = (
+    #    '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/'
+    #    'sar_500m_full.zarr'
+    #)
     sar_files_path = (
-        '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/'
-        'sar_500m_full.zarr'
+        '/scratch/users/trobinet/long_lfmc/trent_datasets/sar/'
+        'sar_500m_filled.zarr'
     )
     krishna_plots_path = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/sar/'

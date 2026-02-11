@@ -62,10 +62,10 @@ def process_range(
     tgt_grid = xr.open_dataset(target_grid_path)
     for d,date_utc in enumerate(days_utc):
         print(f'Processing {date_utc.strftime("%Y-%m-%d")}...')
-        out_ds = tgt_grid.rename({'random_vals':'vh_backscatter'})
+        out_ds = tgt_grid.rename({'random_vals':'vv_backscatter'})
         #out_ds = out_ds.expand_dims(time=days_utc)
-        out_ds['vh_backscatter'] = xr.full_like(
-            out_ds['vh_backscatter'],
+        out_ds['vv_backscatter'] = xr.full_like(
+            out_ds['vv_backscatter'],
             fill_value=np.nan
         )
         # Implement the processing logic for each date here
@@ -85,7 +85,8 @@ def process_range(
                     dataset="OPERA-S1",
                     processingLevel="RTC",
                     #beamMode="IW",
-                    polarization="VH",
+                    #polarization="VH",
+                    polarization="VV",
                     flightDirection="DESCENDING",
                     start=date_utc_iso,
                     end=date_utc_iso_end,
@@ -103,8 +104,12 @@ def process_range(
         skipped = []
         for r, res in enumerate(results):
             this_urls = res.properties.get("additionalUrls", []) or []
+            #this_vh_tif = next(
+            #    (u for u in this_urls if u.endswith("_VH.tif")),
+            #    None,
+            #)
             this_vh_tif = next(
-                (u for u in this_urls if u.endswith("_VH.tif")),
+                (u for u in this_urls if u.endswith("_VV.tif")),
                 None,
             )
             this_mask_tif = next(
@@ -161,8 +166,11 @@ def process_range(
         # open these tifs as a single dataset
         # we just do chunk_size files at a time to keep things reasonable
         chunk_cap = 15
+        #vh_files = sorted(
+        #    glob.glob(os.path.join(scratch_dir, "*_VH.tif"))
+        #)
         vh_files = sorted(
-            glob.glob(os.path.join(scratch_dir, "*_VH.tif"))
+            glob.glob(os.path.join(scratch_dir, "*_VV.tif"))
         )
         # group by track
         by_track = defaultdict(list)
@@ -190,7 +198,8 @@ def process_range(
                 continue
             this_mask_files = []
             for f in this_vh_files:
-                mask_file = f.replace('_VH.tif', '_mask.tif')
+                #mask_file = f.replace('_VH.tif', '_mask.tif')
+                mask_file = f.replace('_VV.tif', '_mask.tif')
                 if not os.path.exists(mask_file):
                     raise FileNotFoundError(f'Mask file not found: {mask_file}')
                 this_mask_files.append(mask_file)
@@ -295,10 +304,10 @@ def process_range(
             # add to out_ds only where valid
             # Boolean mask of valid data
             valid = (np.isfinite(vh_mean_db))
-            out_ds['vh_backscatter'] = xr.where(
+            out_ds['vv_backscatter'] = xr.where(
                 valid,
                 vh_mean_db,
-                out_ds['vh_backscatter']
+                out_ds['vv_backscatter']
             )
             #plotting.plot_from_xarray(
             #    'ds',
@@ -311,7 +320,7 @@ def process_range(
             #)
         # save the daily .nc
         # but only save if not all empty
-        valid = out_ds['vh_backscatter'].notnull().any()
+        valid = out_ds['vv_backscatter'].notnull().any()
         if valid:
             comp = dict(zlib=True, complevel=4)
             encoding = {
@@ -356,7 +365,7 @@ def main():
     target_grid_path = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/grid/epsg5070_500m_westUS_grid.nc4'
     start_date = pd.Timestamp(args.start_date)
     end_date = pd.Timestamp(args.end_date)
-    out_dir = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily/'
+    out_dir = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily_vv/'
     scratch_dir = f'/scratch/users/trobinet/long_lfmc/trent_datasets/sar/temp/{args.job_num}/'
     # remove the temp dir if it exists
     shutil.rmtree(scratch_dir, ignore_errors=True)

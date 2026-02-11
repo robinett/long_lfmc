@@ -3,7 +3,7 @@
 #SBATCH --job-name=sar_to_zarr  # Job name
 #SBATCH --output=./logs/sar_to_zarr_%j.out       # Output log file (%j = job ID)
 #SBATCH --error=./logs/sar_to_zarr_%j.err        # Error log file
-#SBATCH --time=12:00:00             # Wall time limit (hh:mm:ss)
+#SBATCH --time=18:00:00             # Wall time limit (hh:mm:ss)
 #SBATCH --partition=serc    # Partition name
 #SBATCH --nodes=1                   # Number of nodes
 #SBATCH --mem=128GB                  # Memory per node

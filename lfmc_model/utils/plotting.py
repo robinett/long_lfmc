@@ -827,7 +827,7 @@ def generic_hexbin(
     x,
     y,
     plot_path,
-    gridsize=100,
+    gridsize=50,
     xlabel=None,
     ylabel=None,
     xlim=None,
@@ -1382,3 +1382,29 @@ def plot_timeseries_by_site(
 #        plt.tight_layout()
 #        plt.savefig(os.path.join(out_dir, f"timeseries_{lat}_{lon}.png"))
 #        plt.close()
+
+def plot_training_progression(
+    train_losses,
+    val_losses,
+    test_losses,
+    best_epoch,
+    var_name,
+    out_dir
+):
+    plt.figure()
+    epochs = np.arange(len(train_losses)) + 1
+    plt.plot(epochs, train_losses, label="Train Loss")
+    plt.plot(epochs, val_losses, label="Validation Loss")
+    plt.axvline(best_epoch, color="green", linestyle="--", label="Best Epoch")
+    # if test_losses is a single value, plot vert line, otherwise plot normal line
+    if len(test_losses) == 1:
+        plt.axhline(test_losses[0], color="red", linestyle="--", label="Test Loss")
+    else:
+        plt.plot(epochs, test_losses, label="Test Loss")
+    plt.title("Training Progression")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"training_progression_{var_name}.png"))
+    plt.close()

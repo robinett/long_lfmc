@@ -48,10 +48,10 @@ def main():
                 oak_dir,
                 'climate_zones/climate_zone_per_pixel_westUS.nc4'
             ),
-            'sar_stats':os.path.join(
-                scratch_dir,
-                'sar/sar_stats_seasonal.zarr'
-            ),
+            #'sar_stats':os.path.join(
+            #    scratch_dir,
+            #    'sar/sar_stats_seasonal.zarr'
+            #),
             'landcover_frac':os.path.join(
                 oak_dir,
                 'nlcd/nlcd_target_grid_2003_2023.zarr'
@@ -60,6 +60,18 @@ def main():
                 oak_dir,
                 'nlcd/nlcd_2003_2023.zarr'
             ),
+            'sar_vh':os.path.join(
+                scratch_dir,
+                'sar/sar_500m_filled.zarr'
+            ),
+            'sar_vv':os.path.join(
+                scratch_dir,
+                'sar/sar_500m_filled_vv.zarr'
+            ),
+            'sar_ratios':os.path.join(
+                scratch_dir,
+                'sar/sar_500m_filled_ratios.zarr'
+            )
             #'landcover_change':os.path.join(
             #    oak_dir,
             #    'nlcd/nlcd_land_cover_change_2016_2021.zarr'
@@ -100,71 +112,71 @@ def main():
                 'sand'
             ],
             'climate_zone':['climate_zone'],
-            'sar_stats':[
-                'sar_vh_mean',
-                'sar_vh_seasonal_amp',
-                'sar_vh_annual_fraction'
-                #'sar_vv_mean',
-                #'sar_vh_mean',
-                #'sar_vv_minus_vh_mean',
-                #'sar_vv_std',
-                #'sar_vh_std',
-                #'sar_vv_minus_vh_std',
-                #'sar_vv_min',
-                #'sar_vh_min',
-                #'sar_vv_minus_vh_min',
-                #'sar_vv_max',
-                #'sar_vh_max',
-                #'sar_vv_minus_vh_max',
-                #'sar_vv_jan_mean',
-                #'sar_vv_feb_mean',
-                #'sar_vv_mar_mean',
-                #'sar_vv_apr_mean',
-                #'sar_vv_may_mean',
-                #'sar_vv_jun_mean',
-                #'sar_vv_jul_mean',
-                #'sar_vv_aug_mean',
-                #'sar_vv_sep_mean',
-                #'sar_vv_oct_mean',
-                #'sar_vv_nov_mean',
-                #'sar_vv_dec_mean',
-                #'sar_vh_jan_mean',
-                #'sar_vh_feb_mean',
-                #'sar_vh_mar_mean',
-                #'sar_vh_apr_mean',
-                #'sar_vh_may_mean',
-                #'sar_vh_jun_mean',
-                #'sar_vh_jul_mean',
-                #'sar_vh_aug_mean',
-                #'sar_vh_sep_mean',
-                #'sar_vh_oct_mean',
-                #'sar_vh_nov_mean',
-                #'sar_vh_dec_mean',
-                #'sar_vv_minus_vh_jan_mean',
-                #'sar_vv_minus_vh_feb_mean',
-                #'sar_vv_minus_vh_mar_mean',
-                #'sar_vv_minus_vh_apr_mean',
-                #'sar_vv_minus_vh_may_mean',
-                #'sar_vv_minus_vh_jun_mean',
-                #'sar_vv_minus_vh_jul_mean',
-                #'sar_vv_minus_vh_aug_mean',
-                #'sar_vv_minus_vh_sep_mean',
-                #'sar_vv_minus_vh_oct_mean',
-                #'sar_vv_minus_vh_nov_mean',
-                #'sar_vv_minus_vh_dec_mean',
-                #'vv_skewness',
-                #'vh_skewness',
-                #'vv_minus_vh_skewness',
-                #'vv_kurtosis',
-                #'vh_kurtosis',
-                #'vv_minus_vh_kurtosis',
-                #'vv_autocorr1',
-                #'vh_autocorr1',
-                #'vv_minus_vh_autocorr1',
-                #'vv_autocorr2',
-                #'vh_autocorr2',
-                #'vv_minus_vh_autocorr2'
-            ],
+            #'sar_stats':[
+            #    'sar_vh_mean',
+            #    'sar_vh_seasonal_amp',
+            #    'sar_vh_annual_fraction'
+            #    #'sar_vv_mean',
+            #    #'sar_vh_mean',
+            #    #'sar_vv_minus_vh_mean',
+            #    #'sar_vv_std',
+            #    #'sar_vh_std',
+            #    #'sar_vv_minus_vh_std',
+            #    #'sar_vv_min',
+            #    #'sar_vh_min',
+            #    #'sar_vv_minus_vh_min',
+            #    #'sar_vv_max',
+            #    #'sar_vh_max',
+            #    #'sar_vv_minus_vh_max',
+            #    #'sar_vv_jan_mean',
+            #    #'sar_vv_feb_mean',
+            #    #'sar_vv_mar_mean',
+            #    #'sar_vv_apr_mean',
+            #    #'sar_vv_may_mean',
+            #    #'sar_vv_jun_mean',
+            #    #'sar_vv_jul_mean',
+            #    #'sar_vv_aug_mean',
+            #    #'sar_vv_sep_mean',
+            #    #'sar_vv_oct_mean',
+            #    #'sar_vv_nov_mean',
+            #    #'sar_vv_dec_mean',
+            #    #'sar_vh_jan_mean',
+            #    #'sar_vh_feb_mean',
+            #    #'sar_vh_mar_mean',
+            #    #'sar_vh_apr_mean',
+            #    #'sar_vh_may_mean',
+            #    #'sar_vh_jun_mean',
+            #    #'sar_vh_jul_mean',
+            #    #'sar_vh_aug_mean',
+            #    #'sar_vh_sep_mean',
+            #    #'sar_vh_oct_mean',
+            #    #'sar_vh_nov_mean',
+            #    #'sar_vh_dec_mean',
+            #    #'sar_vv_minus_vh_jan_mean',
+            #    #'sar_vv_minus_vh_feb_mean',
+            #    #'sar_vv_minus_vh_mar_mean',
+            #    #'sar_vv_minus_vh_apr_mean',
+            #    #'sar_vv_minus_vh_may_mean',
+            #    #'sar_vv_minus_vh_jun_mean',
+            #    #'sar_vv_minus_vh_jul_mean',
+            #    #'sar_vv_minus_vh_aug_mean',
+            #    #'sar_vv_minus_vh_sep_mean',
+            #    #'sar_vv_minus_vh_oct_mean',
+            #    #'sar_vv_minus_vh_nov_mean',
+            #    #'sar_vv_minus_vh_dec_mean',
+            #    #'vv_skewness',
+            #    #'vh_skewness',
+            #    #'vv_minus_vh_skewness',
+            #    #'vv_kurtosis',
+            #    #'vh_kurtosis',
+            #    #'vv_minus_vh_kurtosis',
+            #    #'vv_autocorr1',
+            #    #'vh_autocorr1',
+            #    #'vv_minus_vh_autocorr1',
+            #    #'vv_autocorr2',
+            #    #'vh_autocorr2',
+            #    #'vv_minus_vh_autocorr2'
+            #],
             'landcover_frac':[
                 'barren',
                 'crops',
@@ -181,6 +193,29 @@ def main():
             'nlcd_class':[
                 'nlcd'
             ],
+            'sar_vh':[
+                'vh_backscatter'
+            ],
+            'sar_vv':[
+                'vv_backscatter'
+            ],
+            'sar_ratios':[
+                'vv_minus_vh',
+                'vv_over_1',
+                'vh_over_1',
+                'vv_over_2',
+                'vh_over_2',
+                'vv_over_3',
+                'vh_over_3',
+                #'vv_over_4',
+                #'vh_over_4',
+                #'vv_over_5',
+                #'vh_over_5',
+                #'vv_over_6',
+                #'vh_over_6',
+                #'vv_over_7',
+                #'vh_over_7'
+            ]
             #'landcover_change':[
             #    'land_cover_change_flag'
             #],
@@ -269,10 +304,13 @@ def main():
             'modis':'spatial_temporal',
             'static':'spatial_static',
             'climate_zone':'spatial_static_onehot',
-            'sar_stats':'spatial_static',
+            #'sar_stats':'spatial_static',
             'landcover_frac':'spatial_yearly',
             'nlcd_class':'nlcd',
             'landcover_change':'spatial_static',
+            'sar_vh':'spatial_temporal',
+            'sar_vv':'spatial_temporal',
+            'sar_ratios':'spatial_temporal'
             #'krishna_stats':'spatial_static',
             #'weather_stats':'spatial_nolag'
         }
@@ -289,14 +327,14 @@ def main():
             #    scratch_dir,
             #    'sar/sampled/vv_samples.csv'
             #),
-            'vh_at_sites':os.path.join(
-                oak_dir,
-                'sar/sampled/vh_backscatter_samples_at_sites_matching.csv'
-            ),
-            'vh_at_random':os.path.join(
-                oak_dir,
-                'sar/sampled/vh_backscatter_samples_random_matching.csv'
-            )
+            #'vh_at_sites':os.path.join(
+            #    oak_dir,
+            #    'sar/sampled/vh_backscatter_samples_at_sites_matching.csv'
+            #),
+            #'vh_at_random':os.path.join(
+            #    oak_dir,
+            #    'sar/sampled/vh_backscatter_samples_random_matching.csv'
+            #)
             #'vv_minus_vh':os.path.join(
             #    scratch_dir,
             #    'sar/sampled/vv_minus_vh_samples.csv'
@@ -305,8 +343,8 @@ def main():
         'vars':{
             'nfmd':['lfmc'],
             #'vv':['VV'],
-            'vh_at_sites':['vh_backscatter'],
-            'vh_at_random':['vh_backscatter'],
+            #'vh_at_sites':['vh_backscatter'],
+            #'vh_at_random':['vh_backscatter'],
             #'vv_minus_vh':['vv_minus_vh']
         }
     }
@@ -327,17 +365,17 @@ def main():
         71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
         81, 82, 83, 84, 85, 86, 87, 88, 89, 90,
         91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
-        101, 102, 103, 104, 105, 106, 107, 108, 109, 110,
-        111, 112, 113, 114, 115, 116, 117, 118, 119, 120,
-        121, 122, 123, 124, 125, 126, 127, 128, 129, 130,
-        131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
-        141, 142, 143, 144, 145, 146, 147, 148, 149, 150,
-        151, 152, 153, 154, 155, 156, 157, 158, 159, 160,
-        161, 162, 163, 164, 165, 166, 167, 168, 169, 170,
-        171, 172, 173, 174, 175, 176, 177, 178, 179, 180
+    #    101, 102, 103, 104, 105, 106, 107, 108, 109, 110,
+    #    111, 112, 113, 114, 115, 116, 117, 118, 119, 120,
+    #    121, 122, 123, 124, 125, 126, 127, 128, 129, 130,
+    #    131, 132, 133, 134, 135, 136, 137, 138, 139, 140,
+    #    141, 142, 143, 144, 145, 146, 147, 148, 149, 150,
+    #    151, 152, 153, 154, 155, 156, 157, 158, 159, 160,
+    #    161, 162, 163, 164, 165, 166, 167, 168, 169, 170,
+    #    171, 172, 173, 174, 175, 176, 177, 178, 179, 180
     ]
     inputs_outputs = (
-        'y_InsitucleanedVh_X_ModisfilledDaymetStaticClimatezoneSarstatsseasonalLandcoverfracLandcoverchange_Z_Nlcdclass_180d'
+        'y_Insitucleaned_X_ModisfilledDaymetStaticClimatezoneSarstatsseasonalLandcoverfracLandcoverchangeSartimeseriesSarratios_Z_Nlcdclass_100d'
     )
     out_dir = os.path.join(
         scratch_dir,
