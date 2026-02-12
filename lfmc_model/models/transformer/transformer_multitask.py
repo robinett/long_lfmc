@@ -43,7 +43,6 @@ class LongEncoder(nn.Module):
                  dim_feedforward: int = 128,
                  dropout: float = 0.1,
                  pool: str = "multihead",   # or "linear"
-                 num_queries: int = 2,
                  out_dim: int = None):
         super().__init__()
         self.cls_long = nn.Parameter(
@@ -100,7 +99,6 @@ class LFMCTransformer(nn.Module):
                  num_layers: int = 3,
                  dim_feedforward: int = 128,
                  dropout: float = 0.1,
-                 num_queries: int = 2,
                  #pool_long: str = "multihead",
                  #long_num_layers: int = 2,
                  #long_d_model: int = None,

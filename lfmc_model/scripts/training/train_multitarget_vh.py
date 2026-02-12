@@ -38,6 +38,15 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
+def my_r2_score(y_true, y_pred):
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+
+    return 1.0 - ss_res / ss_tot
+
 def check_tensor(name, x):
     print(
         name,
@@ -1475,6 +1484,7 @@ def train_fold_k(
         # calculate metrics of interet
         val_mae = np.mean(np.abs(lfmc_val_only - lfmc_val_true))
         val_r2 = r2_score(lfmc_val_true, lfmc_val_only)
+        my_val_r2 = my_r2_score(lfmc_val_true, lfmc_val_only)
         val_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_val_only) + ((lfmc_val_true - lfmc_val_only) ** 2) / (lfmc_std_val_only ** 2)))
         val_rmse = np.sqrt(np.mean((lfmc_val_only - lfmc_val_true) ** 2))
         val_avg_lfmc = np.mean(lfmc_val_only)
@@ -2007,7 +2017,6 @@ def main():
             num_layers=num_layers,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
-            num_queries=2,
             num_task_weights=num_tasks
         ).to(device)
         #model = LFMCRnn(
@@ -2088,7 +2097,6 @@ def main():
         num_layers=num_layers,
         dim_feedforward=dim_feedforward,
         dropout=dropout,
-        num_queries=2,
         num_task_weights=num_tasks
     ).to(device)
     #model = LFMCRnn(

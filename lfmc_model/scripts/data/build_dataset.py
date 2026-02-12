@@ -900,7 +900,7 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     np.random.seed(SEED)
     # fill in follwing necessary information for producing the correct dataset
-    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/vvvhratioinp_20172023_full'
+    save_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/nomodis'
     os.makedirs(save_dir, exist_ok=True)
     csv_names = (
         '/scratch/users/trobinet/long_lfmc/trent_datasets/compiled/'
@@ -991,13 +991,13 @@ if __name__ == "__main__":
         #'land_cover_change_flag'
     ]
     short_features = [
-        'Nadir_Reflectance_Band1_filled',
-        'Nadir_Reflectance_Band2_filled',
-        'Nadir_Reflectance_Band3_filled',
-        'Nadir_Reflectance_Band4_filled',
-        'Nadir_Reflectance_Band5_filled',
-        'Nadir_Reflectance_Band6_filled',
-        'Nadir_Reflectance_Band7_filled',
+        #'Nadir_Reflectance_Band1_filled',
+        #'Nadir_Reflectance_Band2_filled',
+        #'Nadir_Reflectance_Band3_filled',
+        #'Nadir_Reflectance_Band4_filled',
+        #'Nadir_Reflectance_Band5_filled',
+        #'Nadir_Reflectance_Band6_filled',
+        #'Nadir_Reflectance_Band7_filled',
         'vh_backscatter',
         'vv_backscatter',
         'vv_minus_vh',

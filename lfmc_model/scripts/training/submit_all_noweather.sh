@@ -9,10 +9,10 @@ trap 'echo "Caught Ctrl-C, exiting..."; exit 130' INT
 ########################
 
 input_data_dir="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/inputs/vvvhratioinp_20172023_full"
+trent_datasets/lfmc_model/data/inputs/nomodis"
 
 save_root="/scratch/users/trobinet/long_lfmc/\
-trent_datasets/lfmc_model/data/outputs/vvvhratioinp_20172023_full"
+trent_datasets/lfmc_model/data/outputs/nomodis"
 
 ########################
 # Job throttling via lock files

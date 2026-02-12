@@ -30,8 +30,8 @@ def gaussian_nll(preds,targets,var):
 
 def main():
     # perform analysis across all models in a dir, since these are now batched out
-    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/vvvhratioinp_20172023_full'
-    load_only = True
+    base_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/nomodis'
+    load_only = False
     model_dirs = [
         os.path.join(base_dir, d)
         for d in os.listdir(base_dir)
