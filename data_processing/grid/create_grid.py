@@ -66,10 +66,44 @@ def create_grid(
         lon=(("y", "x"), lon),
         lat=(("y", "x"), lat)
     )
+    ## load the shapefile that we will use to block out non-conus pixels
+    #print('masking non-conus pixels')
+    #conus_boundary = gpd.read_file(conus_shp_fname)
+    #conus_boundary = conus_boundary.to_crs("EPSG:5070")
     # load the shapefile that we will use to block out non-conus pixels
     print('masking non-conus pixels')
     conus_boundary = gpd.read_file(conus_shp_fname)
     conus_boundary = conus_boundary.to_crs("EPSG:5070")
+    keep_states = [
+        "WA", "OR", "CA", "ID", "NV", "UT", "AZ",
+        "MT", "WY", "CO", "NM", "TX",
+    ]
+    # Prefer STUSPS if available (Census state layer has it)
+    if "STUSPS" in conus_boundary.columns:
+        conus_boundary = conus_boundary[
+            conus_boundary["STUSPS"].isin(keep_states)
+        ]
+    else:
+        # fallback to NAME if needed
+        name_map = {
+            "WA": "Washington",
+            "OR": "Oregon",
+            "CA": "California",
+            "ID": "Idaho",
+            "NV": "Nevada",
+            "UT": "Utah",
+            "AZ": "Arizona",
+            "MT": "Montana",
+            "WY": "Wyoming",
+            "CO": "Colorado",
+            "NM": "New Mexico",
+            "TX": "Texas",
+        }
+        conus_boundary = conus_boundary[
+            conus_boundary["NAME"].isin([name_map[s] for s in keep_states])
+        ]
+    # dissolve into one geometry (so sjoin is fast/simple)
+    conus_boundary = conus_boundary.dissolve()
     # Create a 2D grid of centers
     flat_coords = points(xv.ravel(), yv.ravel())
     # Mask grid based on U.S. boundary (convert grid to GeoDataFrame)

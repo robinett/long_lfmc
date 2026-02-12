@@ -8,18 +8,14 @@ import plotting
 def main():
     base_dir = '/home/users/trobinet/long_lfmc/data_processing/grid'
     scratch_dir = '/scratch/users/trobinet/long_lfmc/final_lfmc/grid'
-
     # Define the bounding box via points for the extent in each direction
     x_west = [-124.826015, 40.430961]   # westernmost point of CONUS
     x_east = [-93.508292,  29.764377]   # easternmost point of TX (near Sabine Pass)
     y_south = [-97.396381, 25.837163]   # southernmost point of TX (near Brownsville)
     y_north = [-123.369077, 49.199870]  # northern border across WA/MT
-
     my_proj = "EPSG:5070"
     bounding_points = [x_west, y_south, x_east, y_north]
-
     res = 500
-
     # where is the conus shapefile?
     conus_shp_fname = os.path.join(
         scratch_dir,
@@ -57,9 +53,10 @@ def main():
     print('plotting grid')
     plotting.plot_from_xarray(
         'ds',grid,'random_vals',
-        'albers','albers',
+        'EPSG:5070','EPSG:5070',
         os.path.join(
             scratch_dir,
+            'plots',
             'grid_w_random_values.png'
         )
     )

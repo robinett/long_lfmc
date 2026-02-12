@@ -47,7 +47,7 @@ def get_proj(proj):
     except KeyError:
         raise KeyError(
             f"Projection {proj} not found in proj_dict. "
-            "Available projections are {proj_dict.keys()}"
+            f"Available projections are {proj_dict.keys()}"
         )
     return coded_proj
 
@@ -130,7 +130,7 @@ def plot_from_xarray(
 
     # if not extent given, use western US
     if extent is None:
-        west_us = [-126, -99, 20, 55]
+        west_us = [-120, -93, 23, 52]
         ax.set_extent(west_us, crs=get_proj('EPSG:4326'))
     else:
         ax.set_extent(extent, crs=coded_in)
