@@ -3,8 +3,8 @@
 #SBATCH --job-name=modis_download  # Job name
 #SBATCH --output=./logs/slurm-%j.out       # Output log file (%j = job ID)
 #SBATCH --error=./logs/slurm-%j.err        # Error log file
-#SBATCH --time=03:00:00             # Wall time limit (hh:mm:ss)
-#SBATCH --partition=serc,konings    # Partition name
+#SBATCH --time=06:00:00             # Wall time limit (hh:mm:ss)
+#SBATCH --partition=serc    # Partition name
 #SBATCH --nodes=1                   # Number of nodes
 #SBATCH --mem=50GB                  # Memory per node
 #SBATCH --mail-type=BEGIN,END,FAIL  # email me

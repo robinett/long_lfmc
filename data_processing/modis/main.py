@@ -87,7 +87,7 @@ def main():
     # finally, how many raw files should there be per day? If this many files
     # do not exist for that day, we will throw an error because this means that
     # we are missing data that would be needed to create the relevant daily netcdf
-    tiles_per_day = 11
+    tiles_per_day = 17
     # let's get all the raw modis files and sort them by date
     #modis_files_2003 = sorted(
     #    glob.glob(

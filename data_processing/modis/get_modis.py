@@ -1,6 +1,9 @@
 import earthaccess
 import sys
 import argparse
+import xarray as xr
+import os
+import pandas as pd
 
 def main():
     # pass the start and end dates in from the submitting script
@@ -19,6 +22,8 @@ def main():
     )
     start_date = parser.parse_args().start_date
     end_date = parser.parse_args().end_date
+    start_date_pd = pd.to_datetime(start_date)
+    end_date_pd = pd.to_datetime(end_date)
     print('start date:', start_date)
     print('end date:', end_date)
     # do we need to login?
@@ -47,19 +52,44 @@ def main():
         print("End Date:",collection["umm"]["TemporalExtent"]["RangeDateTime"]["EndingDateTime"])
     # download the data
     print('searching for data')
-    bounding_box = (-124.73,25.85,-93.51,49.00)
+    #bounding_box = (-124.73,25.85,-93.51,49.00)
+    grid = xr.open_dataset(
+        '/scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4'
+    )
+    min_lat = grid['lat'].min().values - 0.5
+    max_lat = grid['lat'].max().values + 0.5
+    min_lon = grid['lon'].min().values - 0.5
+    max_lon = grid['lon'].max().values + 0.5
+    bounding_box = (min_lon, min_lat, max_lon, max_lat)
+    print('bounding box:', bounding_box)
+    # get the lat/lon bounds of this
     #start_date = '2003-01-01'
     #end_date = '2003-12-31'
+    out_dir = os.path.join(
+        '/scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_earthaccess',
+        start_date_pd.strftime("%Y")
+    )
+    # create directory if it doesn't exist
+    os.makedirs(out_dir, exist_ok=True)
     results = earthaccess.search_data(
         short_name='MCD43A4',
         version='061',
         temporal=(start_date,end_date),
         bounding_box=bounding_box
     )
-    print('found {} data results'.format(len(results)))
+    links = []
+    for r in results:
+        this_urls = r.data_links()
+        # keep only the .hdf
+        this_urls = [url for url in this_urls if url.endswith('.hdf')]
+        links.extend(this_urls)
+    if not links:
+        print('no data found')
+        sys.exit()
+    print('found {} data results'.format(len(links)))
     files = earthaccess.download(
-        results,
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/modis/modis_earthaccess'
+        links,
+        out_dir
     )
     results_quality = earthaccess.search_data(
         short_name='MCD43A2',
@@ -67,10 +97,16 @@ def main():
         temporal=(start_date,end_date),
         bounding_box=bounding_box
     )
-    print('found {} quality results'.format(len(results_quality)))
+    links_quality = []
+    for r in results_quality:
+        this_urls = r.data_links()
+        # keep only the .hdf
+        this_urls = [url for url in this_urls if url.endswith('.hdf')]
+        links_quality.extend(this_urls)
+    print('found {} quality results'.format(len(links_quality)))
     files = earthaccess.download(
-        results_quality,
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/modis/modis_earthaccess'
+        links_quality,
+        out_dir
     )
 
 if __name__ == "__main__":

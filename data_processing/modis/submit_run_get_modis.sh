@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # for all the files taht we want to download
-start_date="2003-01-01"
-end_date="2023-12-31" # inclusive
+start_date="2000-01-01"
+end_date="2025-12-31" # inclusive
 # delta between each request submitted
 day_delta=0
 month_delta=0
