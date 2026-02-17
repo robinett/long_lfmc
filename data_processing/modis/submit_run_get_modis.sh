@@ -6,7 +6,7 @@ end_date="2025-12-31" # inclusive
 # delta between each request submitted
 day_delta=0
 month_delta=0
-year_delta=1
+year_delta=30
 #initialize the current date
 current_date=$(date -I -d "$start_date")
 final_date=$(date -I -d "$end_date")
