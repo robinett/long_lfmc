@@ -13,6 +13,6 @@
 source ~/.bashrc
 source ~/uv_activations/activate_lfmc_process_py312.sh
 
-python3 -u get_modis.py --start_date $1 --end_date $2
+python3 -u get_daymet.py --start_date $1 --end_date $2
 
 echo Downloads Complete

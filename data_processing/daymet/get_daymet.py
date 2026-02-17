@@ -67,28 +67,29 @@ def main():
     # get the lat/lon bounds of this
     #start_date = '2003-01-01'
     #end_date = '2003-12-31'
-    out_dir = os.path.join(
-        '/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_earthaccess',
-        start_date_pd.strftime("%Y")
-    )
-    # create directory if it doesn't exist
-    os.makedirs(out_dir, exist_ok=True)
     #results = earthaccess.search_data(
     #    short_name='Daymet_Daily_V4R1_2129',
     #    #temporal=(start_date,end_date),
     #    #bounding_box=bounding_box
     #)
     result_template = 'https://data.ornldaac.earthdata.nasa.gov/protected/daymet/Daymet_Daily_V4R1/data/daymet_v4_daily_na_{var}_{year}.nc'
-    links = []
     for d,date in enumerate(date_range):
+        print(f'Downloading data for year {date.strftime("%Y")}')
+        links = []
         for var in daymet_vars:
             links.append(result_template.format(var=var, year=date.strftime('%Y')))
-    files = earthaccess.download(
-        links,
-        out_dir,
-        threads=4,
-        show_progress=True
-    )
+        out_dir = os.path.join(
+            '/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_earthaccess',
+            start_date_pd.strftime("%Y")
+        )
+        # create directory if it doesn't exist
+        os.makedirs(out_dir, exist_ok=True)
+        files = earthaccess.download(
+            links,
+            out_dir,
+            threads=8,
+            show_progress=True
+        )
 
 if __name__ == "__main__":
     main()

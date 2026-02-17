@@ -26,7 +26,7 @@ def main():
     end_date_pd = pd.to_datetime(end_date)
     print('start date:', start_date)
     print('end date:', end_date)
-    date_range = pd.date_range(start=start_date_pd, end=end_date_pd, freq='Y')
+    date_range = pd.date_range(start=start_date_pd, end=end_date_pd, freq='ME')
     # do we need to login?
     login = True
     if login:
@@ -72,8 +72,11 @@ def main():
             '/scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_earthaccess',
             date.strftime("%Y")
         )
-        this_start = pd.to_datetime(f'{date.strftime("%Y")}-01-01')
-        this_end = pd.to_datetime(f'{date.strftime("%Y")}-12-31')
+        this_start = pd.to_datetime(f'{date.year}-01-01')
+        this_end = date
+        print(
+            f'Downloading MODIS data from {this_start} to {this_end}'
+        )
         this_year_days = pd.date_range(start=this_start, end=this_end, freq='D')
         tiles_v = [4,4,4,4,5,5,5,5,6,6]
         tiles_h = [8,9,10,11,7,8,9,10,8,9]
@@ -103,11 +106,12 @@ def main():
                             break
                 if not found:
                     print(f"Warning: No data link found for {this_date_strf} {this_tile_strf}")
-        if len(data_links) != num_desired_links:
-            print(f"Issue:: {len(data_links)} of {num_desired_links} desired data links found.")
-            sys.exit()
-        else:
-            print(f'Found {len(data_links)} data links, as desired.')
+        #if len(data_links) != num_desired_links:
+        #    print(f"Issue:: {len(data_links)} of {num_desired_links} desired data links found.")
+        #    sys.exit()
+        #else:
+        #    print(f'Found {len(data_links)} data links, as desired.')
+        print(f'Found {len(data_links)} data links, out of {num_desired_links} desired.')
         # now for quality results
         results_quality = earthaccess.search_data(
             short_name='MCD43A2',
@@ -132,20 +136,26 @@ def main():
                             break
                 if not found:
                     print(f"Warning: No data link found for {this_date_strf} {this_tile_strf}")
-        if len(quality_links) != num_desired_links:
-            print(f"Issue:: {len(quality_links)} of {num_desired_links} desired quality links found.")
-            sys.exit()
-        else:
-            print(f'Found {len(quality_links)} quality links, as desired.')
+        #if len(quality_links) != num_desired_links:
+        #    print(f"Issue:: {len(quality_links)} of {num_desired_links} desired quality links found.")
+        #    sys.exit()
+        #else:
+        #    print(f'Found {len(quality_links)} quality links, as desired.')
+        print(f'Found {len(quality_links)} quality links, out of {num_desired_links} desired.')
+        if len(data_links) == 0 or len(quality_links) == 0:
+            print('No files to download, skipping download step.')
+            continue
         files_data = earthaccess.download(
             data_links,
             out_dir,
-            threads=16,
+            threads=8,
+            show_progress=True
         )
         files_quality = earthaccess.download(
-            links_quality,
+            quality_links,
             out_dir,
-            threads=16
+            threads=8,
+            show_progress=True
         )
 
 if __name__ == "__main__":
