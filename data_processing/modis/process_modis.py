@@ -186,10 +186,18 @@ def regrid_to_daily_ncs(
                 )
             )
         )
+        if len(today_files) == 0:
+            print('Warning: No files found for {}'.format(
+                current_date.strftime('%Y-%m-%d')
+            ))
+            print('Skipping date')
+            current_date = current_date + datetime.timedelta(days=1)
+            continue
         # check if we have the right number of files
         if len(today_files) != tiles_per_day:
-            raise ValueError(
-                'Number of files for {} is {}. We expect {}.'.format(
+            #raise ValueError(
+            print(
+                'Warning: Number of files for {} is {}. We expect {}.'.format(
                     current_date.strftime('%Y-%m-%d'),
                     len(today_files),
                     tiles_per_day
@@ -414,8 +422,7 @@ def regrid_to_daily_ncs(
                 '+proj=sinu +R=6371007.181 +lon_0=0 +x_0=0 +y_0=0 +units=m +no_defs',
                 '+proj=sinu +R=6371007.181 +lon_0=0 +x_0=0 +y_0=0 +units=m +no_defs',
                 os.path.join(
-                    '/scratch/users/trobinet/long_lfmc/trent_datasets/modis',
-                    'modis_plots',
+                    '/scratch/users/trobinet/long_lfmc/final_lfmc/modis/plots',
                     'combined_dataset_{}_{}.png'.format(
                         data_layers[0],
                         current_date.strftime('%Y%m%d')

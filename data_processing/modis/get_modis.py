@@ -72,7 +72,7 @@ def main():
             '/scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_earthaccess',
             date.strftime("%Y")
         )
-        this_start = pd.to_datetime(f'{date.year}-01-01')
+        this_start = pd.to_datetime(f'{date.year}-{date.month}-01')
         this_end = date
         print(
             f'Downloading MODIS data from {this_start} to {this_end}'
@@ -135,7 +135,7 @@ def main():
                         if found:
                             break
                 if not found:
-                    print(f"Warning: No data link found for {this_date_strf} {this_tile_strf}")
+                    print(f"Warning: No quality link found for {this_date_strf} {this_tile_strf}")
         #if len(quality_links) != num_desired_links:
         #    print(f"Issue:: {len(quality_links)} of {num_desired_links} desired quality links found.")
         #    sys.exit()

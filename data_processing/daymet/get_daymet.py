@@ -80,7 +80,7 @@ def main():
             links.append(result_template.format(var=var, year=date.strftime('%Y')))
         out_dir = os.path.join(
             '/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_earthaccess',
-            start_date_pd.strftime("%Y")
+            date.strftime("%Y")
         )
         # create directory if it doesn't exist
         os.makedirs(out_dir, exist_ok=True)

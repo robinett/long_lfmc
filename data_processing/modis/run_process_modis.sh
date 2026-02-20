@@ -3,7 +3,7 @@
 #SBATCH --job-name=process_modis  # Job name
 #SBATCH --output=./logs/slurm-%j.out       # Output log file (%j = job ID)
 #SBATCH --error=./logs/slurm-%j.err        # Error log file
-#SBATCH --time=02:00:00             # Wall time limit (hh:mm:ss)
+#SBATCH --time=24:00:00             # Wall time limit (hh:mm:ss)
 #SBATCH --partition=serc,konings    # Partition name
 #SBATCH --nodes=1                   # Number of nodes
 #SBATCH --mem=100GB                  # Memory per node
@@ -11,7 +11,7 @@
 #SBATCH --mail-user=trobinet@stanford.edu
 
 source ~/.bashrc
-source ~/poetry_activations/activate_long_lfmc_process_env.sh
+source ~/uv_activations/activate_lfmc_process_py312.sh
 
 python3 -u main.py --start_date $1 --end_date $2 --out_dir $3 --quality_flag $4
 

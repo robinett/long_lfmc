@@ -24,11 +24,15 @@ def get_proj(proj):
     """
     # we need to define the daymet lambers projection with a custom proj string
     lambers_proj_str = (
-        "+proj=lcc +lat_1=25 + lat_2=60 +lat_0=42.5 +lon_0=-100 "
-        "+x_0=0 + y_0=0 +datum=WGS84 +units=km +no_defs"
+        "+proj=lcc +lat_1=25 +lat_2=60 +lat_0=42.5 +lon_0=-100 "
+        "+x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
     )
-    lambers_proj_crs = CRS.from_proj4(lambers_proj_str)
-    larbers_proj_cartopy = ccrs.Projection(lambers_proj_crs)
+    # Use a concrete cartopy projection to ensure x_limits/y_limits exist
+    larbers_proj_cartopy = ccrs.LambertConformal(
+        central_longitude=-100,
+        central_latitude=42.5,
+        standard_parallels=(25, 60),
+    )
     proj_dict = {
         'EPSG:5070':ccrs.AlbersEqualArea(
             central_longitude=-96,
@@ -40,7 +44,7 @@ def get_proj(proj):
         ),
         'EPSG:4326':ccrs.PlateCarree(),
         '+proj=sinu +R=6371007.181 +lon_0=0 +x_0=0 +y_0=0 +units=m +no_defs':ccrs.Sinusoidal.MODIS,
-        '+proj=lcc +lat_1=25 +lat_2=60 +lat_0=42.5 +lon_0=-100 +x_0=0 +y_0=0 +datum=WGS84 +units=km +no_defs':larbers_proj_cartopy,
+        '+proj=lcc +lat_1=25 +lat_2=60 +lat_0=42.5 +lon_0=-100 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs':larbers_proj_cartopy,
     }
     try:
         coded_proj = proj_dict[proj]
@@ -74,6 +78,7 @@ def plot_from_xarray(
         ds = type_obj.to_dataset(name=var)
     else:
         raise ValueError("load_type must be 'fname' or 'ds'.")
+
 
     if var not in ds:
         raise KeyError(f"'{var}' not in dataset.")
@@ -134,8 +139,6 @@ def plot_from_xarray(
         ax.set_extent(west_us, crs=get_proj('EPSG:4326'))
     else:
         ax.set_extent(extent, crs=coded_in)
-
-
 
     # --- plot as image (2D -> cmap ok) ---
     im = da.plot.imshow(

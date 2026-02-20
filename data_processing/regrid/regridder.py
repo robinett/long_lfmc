@@ -82,6 +82,10 @@ def reproject_and_regrid_whole_directory(
         this_src_ds = xr.open_dataset(
             this_src_file_path
         )
+        drop_if_present = ["time_bnds", "yearday"]
+        this_src_ds = this_src_ds.drop_vars(
+            [v for v in drop_if_present if v in this_src_ds.data_vars]
+        )
         #print(np.unique(this_src_ds['band_data'].values))
         #print(np.where(np.isnan(this_src_ds['band_data'].values)))
         #continue
@@ -206,6 +210,7 @@ def reproject_and_regrid_single_file(
         # get the corresponding, padded chunk of the source grid
         # we want this chunk to extend at least 10 pixels beyond the
         # boundary of the target chunk in each direction.
+        print('getting chunk')
         this_padded_src_chunk = get_padded_chunk(
             this_target_chunk,
             this_src_ds,
@@ -214,7 +219,7 @@ def reproject_and_regrid_single_file(
         if plot_tests:
             # fill all nans for this plot to show the full extent
             print('plotting datasets on top of each other')
-            this_padded_src_chunk_plot = this_padded_src_chunk.fillna(0)
+            this_padded_src_chunk_plot = this_padded_src_chunk.fillna(0.0).isel(time=0)
             # get the first var that isn't excluded
             exclude_when_plotting = [
                 'x',
@@ -241,7 +246,7 @@ def reproject_and_regrid_single_file(
                 ],
                 target_crs,
                 (
-                    '/scratch/users/trobinet/long_lfmc/trent_datasets/' +
+                    '/scratch/users/trobinet/long_lfmc/final_lfmc/' +
                     'regridding/plots/target_chunk_and_src_chunk_w_buffer_{}.png'.format(
                         target_dir_last_ext
                     )
@@ -250,9 +255,10 @@ def reproject_and_regrid_single_file(
                 [0.5,0.5]
             )
         # match the target grid
+        print('reprojecting')
         this_padded_src_chunk_reproj = this_padded_src_chunk.rio.reproject_match(
             this_target_chunk,
-            resampling=Resampling.average
+            resampling=Resampling.nearest
         )
         if plot_tests:
             print('plotting the regridded chunk')
@@ -263,30 +269,30 @@ def reproject_and_regrid_single_file(
                 target_crs,
                 target_crs,
                 (
-                    '/scratch/users/trobinet/long_lfmc/trent_datasets/' +
+                    '/scratch/users/trobinet/long_lfmc/final_lfmc/' +
                     'regridding/plots/target_chunk_{}.png'.format(
                         target_dir_last_ext
                     )
                 )
             )
-            plot.plot_from_xarray(
-                'ds',
-                this_padded_src_chunk,
-                src_var,
-                src_crs,
-                target_crs,
-                (
-                    '/scratch/users/trobinet/long_lfmc/trent_datasets/' +
-                    'regridding/plots/this_padded_src_chunk_{}.png'.format(
-                        target_dir_last_ext
-                    )
-                )
-            )
+            #plot.plot_from_xarray(
+            #    'ds',
+            #    this_padded_src_chunk,
+            #    src_var,
+            #    src_crs,
+            #    target_crs,
+            #    (
+            #        '/scratch/users/trobinet/long_lfmc/final_lfmc/' +
+            #        'regridding/plots/this_padded_src_chunk_{}.png'.format(
+            #            target_dir_last_ext
+            #        )
+            #    )
+            #)
             plot.plot_from_xarray(
                 'ds',
                 this_padded_src_chunk_reproj,
                 src_var,
-                src_crs,
+                target_crs,
                 target_crs,
                 (
                     '/scratch/users/trobinet/long_lfmc/trent_datasets/' +
@@ -296,6 +302,9 @@ def reproject_and_regrid_single_file(
                 )
             )
         # add to this_regridded_ds
+        print('combining')
+        print(this_regridded_ds)
+        print(this_padded_src_chunk_reproj)
         this_regridded_ds = this_regridded_ds.combine_first(
             this_padded_src_chunk_reproj
         )

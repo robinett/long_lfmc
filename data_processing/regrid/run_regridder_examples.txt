@@ -1,17 +1,17 @@
 # just an example of how to call main.py
 
 # example for all modis data.
-python3 main.py --target_grid /scratch/users/trobinet/long_lfmc/trent_datasets/grid/epsg5070_500m_westUS_grid.nc4 --src_dir /scratch/users/trobinet/long_lfmc/trent_datasets/modis/modis_processed_daily_w_quality/quality_3 --target_dir /scratch/users/trobinet/long_lfmc/trent_datasets/modis/modis_regridded/quality_3 --src_crs "+proj=sinu +R=6371007.181 +lon_0=0 +x_0=0 +y_0=0 +units=m +no_defs" --target_crs EPSG:5070 --chunk_buffer 100
+python3 main.py --target_grid /scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4 --src_dir /scratch/users/trobinet/long_lfmc/trent_datasets/modis/modis_processed_daily_w_quality/quality_3 --target_dir /scratch/users/trobinet/long_lfmc/trent_datasets/modis/modis_regridded/quality_3 --src_crs "+proj=sinu +R=6371007.181 +lon_0=0 +x_0=0 +y_0=0 +units=m +no_defs" --target_crs EPSG:5070 --chunk_buffer 100
 time per file: approx. 1m
 
 # example for the daymet data
-python3 main.py --target_grid /scratch/users/trobinet/long_lfmc/trent_datasets/grid/epsg5070_500m_westUS_grid.nc4 --src_dir /scratch/users/trobinet/long_lfmc/trent_datasets/daymet/daymet_download/prcp --target_dir /scratch/users/trobinet/long_lfmc/trent_datasets/daymet/daymet_regrid/prcp --src_crs "+proj=lcc +lat_1=25 +lat_2=60 +lat_0=42.5 +lon_0=-100 +x_0=0 +y_0=0 +datum=WGS84 +units=km +no_defs" --target_crs EPSG:5070
+python3 main.py --target_grid /scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4 --src_dir /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_earthaccess --target_dir /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_regrid/ --src_crs "+proj=lcc +lat_1=25 +lat_2=60 +lat_0=42.5 +lon_0=-100 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs" --target_crs EPSG:5070
 Time per file: approx. 7s
 
 # example for krishna's data
-python3 main.py --target_grid /scratch/users/trobinet/long_lfmc/trent_datasets/grid/epsg5070_500m_westUS_grid.nc4 --src_dir /scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_raw_from_gee_api --target_dir /scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_regrid --src_crs EPSG:4326 --target_crs EPSG:5070 --fill_value -9999 --chunk_buffer 750
+python3 main.py --target_grid /scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4 --src_dir /scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_raw_from_gee_api --target_dir /scratch/users/trobinet/long_lfmc/trent_datasets/krishna/krishna_regrid --src_crs EPSG:4326 --target_crs EPSG:5070 --fill_value -9999 --chunk_buffer 750
 time per file: approx. 10s
 
 # example for sar
-python3 main.py --target_grid /scratch/users/trobinet/long_lfmc/trent_datasets/grid/epsg5070_500m_westUS_grid.nc4 --src_dir /scratch/users/trobinet/long_lfmc/trent_datasets/sar/raw --target_dir /scratch/users/trobinet/long_lfmc/trent_datasets/sar/regrid --src_crs EPSG:4326 --target_crs EPSG:5070 --chunk_buffer 750
+python3 main.py --target_grid /scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4 --src_dir /scratch/users/trobinet/long_lfmc/trent_datasets/sar/raw --target_dir /scratch/users/trobinet/long_lfmc/trent_datasets/sar/regrid --src_crs EPSG:4326 --target_crs EPSG:5070 --chunk_buffer 750
 

@@ -11,6 +11,7 @@ import torch
 import re
 from pathlib import Path
 from torch.utils.data import DataLoader, TensorDataset
+from dask.cache import Cache
 
 here = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.join(here, '..', '..','..')
@@ -20,6 +21,9 @@ sys.path.append(os.path.join(project_root,'lfmc_model','utils'))
 from transformer_multitask_longclimate import LFMCTransformer
 from transformer_multitask_longclimate_uncertainty import LFMCTransformer as LFMCTransformerUncertainty
 from plotting import plot_timeseries_by_site
+
+cache = Cache(64e9)
+cache.register()
 
 def parse_model_path(model_path: str) -> dict:
     name = Path(model_path).parts[-3]  # transformer_..._basic
@@ -53,6 +57,7 @@ def build_tensors(
     short_lag_days,
     long_lag_days,
     norm_params,
+    all_nearby=False
 ):
     # long input array: shape [B, Ts, Din_long]
     # short input array: shape [B, Ts, Din_short]

@@ -3,14 +3,15 @@
 # parallelized in time
 
 # for all the files that we want to download
-start_date="2022-10-01"
-end_date="2022-10-31" # inclusive
-quality_flag="3"
-out_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/modis/modis_processed_daily_w_quality/quality_${quality_flag}"
+start_date="2000-01-01"
+end_date="2025-12-31" # inclusive
+quality_flag="1"
+out_dir="/scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_combined"
+#out_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/modis/modis_processed_daily_w_quality/quality_${quality_flag}"
 # delta between each request submitted
 day_delta=0
-month_delta=1
-year_delta=0
+month_delta=0
+year_delta=1
 #initialize the current date
 current_date=$(date -I -d "$start_date")
 final_date=$(date -I -d "$end_date")
