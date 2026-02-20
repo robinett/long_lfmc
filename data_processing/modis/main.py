@@ -124,7 +124,8 @@ def main():
     #process_end_date = datetime.datetime(2005, 1, 31)
     metadata = p_modis.get_metadata(
         modis_raw_dir,
-        process_start_date
+        process_start_date,
+        process_end_date
     )
     p_modis.regrid_to_daily_ncs(
         modis_raw_dir,

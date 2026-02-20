@@ -33,7 +33,8 @@ def explore_single_file(fname):
 
 def get_metadata(
     modis_raw_dir,
-    start_date
+    start_date,
+    end_date
 ):
     '''
     Function for creating daily netcdf files from modis hdf files
@@ -55,7 +56,7 @@ def get_metadata(
     )
     first_day_files = [
         f for f in modis_files
-        if f.split('.')[1] == 'A' + start_date.strftime('%Y%j')
+        if f.split('.')[1] == 'A' + end_date.strftime('%Y%j')
     ]
     # get the iv and ih tiles from these files
     ivs = np.zeros(0)
@@ -76,7 +77,7 @@ def get_metadata(
     for h,htile in enumerate(ihs):
         vtile = ivs[h]
         # get the file for the first day corresponding to this tile
-        this_date_section = 'A' + start_date.strftime('%Y%j')
+        this_date_section = 'A' + end_date.strftime('%Y%j')
         this_tile_section = 'h' + f"{int(htile):02}" + 'v' + f"{int(vtile):02}"
         tile_fname = [
             f for f in first_day_files
@@ -173,6 +174,7 @@ def regrid_to_daily_ncs(
     num_layers = len(data_layers)
     # our data has a scale factor. Make sure to include that here
     modis_scale_factor = 0.0001
+    created_plot = False
     while current_date <= end_date:
         # files only for today
         today_files = sorted(
@@ -221,7 +223,13 @@ def regrid_to_daily_ncs(
         print('extracting data')
         for f,file in enumerate(today_files):
             #print('processing file {}'.format(file.split('/')[-1]))
-            this_sd = SD(file, SDC.READ)
+            # if file is correupted or something and we can't read, just skip
+            try:
+                this_sd = SD(file, SDC.READ)
+            except Exception as e:
+                print('Error reading {}: {}'.format(file, e))
+                print('Continuing')
+                continue
             # get the modis-formatted date and tile number from this file
             modis_date = file.split('/')[-1].split('.')[1]
             tile_number = file.split('/')[-1].split('.')[2]
@@ -412,7 +420,7 @@ def regrid_to_daily_ncs(
                         "y": y_coords
                     }
                 ] = data.copy()
-        if current_date == start_date:
+        if not created_plot:
             print('example of combined dataset:')
             print(combined_ds)
             plot.plot_from_xarray(
@@ -429,6 +437,7 @@ def regrid_to_daily_ncs(
                     )
                 )
             )
+            created_plot = True
         # save the dataset to a netcdf file
         this_fname = 'modis_reflectance_{}.nc4'.format(
             current_date.strftime('%Y%m%d')
