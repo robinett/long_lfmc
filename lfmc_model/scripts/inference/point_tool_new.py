@@ -47,6 +47,44 @@ def parse_model_path(model_path: str) -> dict:
             params[key] = float(val) if "." in val else int(val)
     return params
 
+def _nearest_index(coords, val):
+    coords = np.asarray(coords)
+    if coords.ndim != 1:
+        raise ValueError("Expected 1D coordinate array")
+    if coords.size == 0:
+        raise ValueError("Empty coordinate array")
+    if coords.size == 1:
+        return 0
+    if coords[0] <= coords[-1]:
+        idx = int(np.searchsorted(coords, val))
+        if idx <= 0:
+            return 0
+        if idx >= coords.size:
+            return coords.size - 1
+        left = coords[idx - 1]
+        right = coords[idx]
+        return idx - 1 if abs(val - left) <= abs(right - val) else idx
+    coords_rev = coords[::-1]
+    idx_rev = int(np.searchsorted(coords_rev, val))
+    if idx_rev <= 0:
+        return coords.size - 1
+    if idx_rev >= coords_rev.size:
+        return 0
+    left = coords_rev[idx_rev - 1]
+    right = coords_rev[idx_rev]
+    nearest_rev = idx_rev - 1 if abs(val - left) <= abs(right - val) else idx_rev
+    return coords.size - 1 - nearest_rev
+
+def _get_chunk_size(ds, dim, fallback=64):
+    if hasattr(ds, "chunksizes") and ds.chunksizes and dim in ds.chunksizes:
+        return int(ds.chunksizes[dim][0])
+    if hasattr(ds, "chunks") and ds.chunks:
+        dim_to_axis = {d: i for i, d in enumerate(ds.dims)}
+        if dim in dim_to_axis:
+            axis = dim_to_axis[dim]
+            return int(ds.chunks[axis][0])
+    return int(fallback)
+
 def build_tensors(
     locs,
     start_dates,
@@ -88,6 +126,70 @@ def build_tensors(
     long_lag_needed = long_lag_days[-1]
     max_lag_needed = max(short_lag_needed, long_lag_needed)
     trns = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
+    loc_xys = [trns.transform(loc[0], loc[1]) for loc in locs]
+    preloaded_chunks = {}
+    loc_chunk_keys = None
+    preloaded_static = None
+    preloaded_climate_zone = None
+    if all_nearby:
+        preloaded_static = dss['static'].load()
+        preloaded_climate_zone = dss['climate_zone'].load()
+        modis_ds = dss['modis']
+        modis_x = modis_ds['x'].values
+        modis_y = modis_ds['y'].values
+        modis_data = modis_ds['data']
+        x_chunk = _get_chunk_size(modis_data, 'x', fallback=64)
+        y_chunk = _get_chunk_size(modis_data, 'y', fallback=64)
+        chunk_groups = {}
+        loc_chunk_keys = []
+        for i, (this_x, this_y) in enumerate(loc_xys):
+            x_idx = _nearest_index(modis_x, this_x)
+            y_idx = _nearest_index(modis_y, this_y)
+            chunk_key = (x_idx // x_chunk, y_idx // y_chunk)
+            loc_chunk_keys.append(chunk_key)
+            if chunk_key not in chunk_groups:
+                chunk_groups[chunk_key] = []
+            chunk_groups[chunk_key].append(i)
+        for chunk_key, loc_idxs in tqdm(
+            chunk_groups.items(),
+            total=len(chunk_groups),
+            desc="Preloading nearby chunks",
+        ):
+            x0 = chunk_key[0] * x_chunk
+            x1 = min((chunk_key[0] + 1) * x_chunk, modis_x.size)
+            y0 = chunk_key[1] * y_chunk
+            y1 = min((chunk_key[1] + 1) * y_chunk, modis_y.size)
+            chunk_start = min(start_dates[i] for i in loc_idxs)
+            chunk_end = max(end_dates[i] for i in loc_idxs)
+            preloaded_chunks[chunk_key] = {
+                'modis': (
+                    dss['modis']
+                    .isel(x=slice(x0, x1), y=slice(y0, y1))
+                    .sel(
+                        time=slice(
+                            chunk_start - pd.Timedelta(days=short_lag_needed),
+                            chunk_end
+                        )
+                    )
+                    .compute()
+                ),
+                'daymet': (
+                    dss['daymet']
+                    .isel(x=slice(x0, x1), y=slice(y0, y1))
+                    .sel(
+                        time=slice(
+                            chunk_start - pd.Timedelta(days=long_lag_needed),
+                            chunk_end + pd.Timedelta(days=1)
+                        )
+                    )
+                    .compute()
+                ),
+                'landcover_frac': (
+                    dss['landcover_frac']
+                    .isel(x=slice(x0, x1), y=slice(y0, y1))
+                    .load()
+                ),
+            }
     starting_B = 0
     #for l,loc in enumerate(locs):
     for l, loc in tqdm(
@@ -95,7 +197,7 @@ def build_tensors(
         total=len(locs),
         desc="Creating tensor for each location"
     ):
-        this_x, this_y = trns.transform(loc[0],loc[1])
+        this_x, this_y = loc_xys[l]
         this_start = start_dates[l]
         this_end = end_dates[l]
         date_range = pd.date_range(this_start, this_end)
@@ -117,24 +219,37 @@ def build_tensors(
             })])
         if l > 0:
             starting_B += (end_dates[l-1] - start_dates[l-1]).days + 1
-        modis_data = dss['modis'].sel(
-            x=this_x,
-            y=this_y,
-            method='nearest'
-        )
-        modis_data = modis_data.sel(
-            time=slice(this_start - pd.Timedelta(days=short_lag_needed), this_end),
-        ).compute()
-        daymet_data = dss['daymet'].sel(
-            x=this_x,
-            y=this_y,
-            method='nearest'
-        )
-        daymet_data = (
-            daymet_data
-            .sel(time=slice(this_start - pd.Timedelta(days=long_lag_needed), this_end + pd.Timedelta(days=1)))
-            .compute()
-        )
+        if all_nearby and loc_chunk_keys is not None:
+            chunk_ds = preloaded_chunks[loc_chunk_keys[l]]
+            modis_data = chunk_ds['modis'].sel(
+                x=this_x,
+                y=this_y,
+                method='nearest'
+            )
+            daymet_data = chunk_ds['daymet'].sel(
+                x=this_x,
+                y=this_y,
+                method='nearest'
+            )
+        else:
+            modis_data = dss['modis'].sel(
+                x=this_x,
+                y=this_y,
+                method='nearest'
+            )
+            modis_data = modis_data.sel(
+                time=slice(this_start - pd.Timedelta(days=short_lag_needed), this_end),
+            ).compute()
+            daymet_data = dss['daymet'].sel(
+                x=this_x,
+                y=this_y,
+                method='nearest'
+            )
+            daymet_data = (
+                daymet_data
+                .sel(time=slice(this_start - pd.Timedelta(days=long_lag_needed), this_end + pd.Timedelta(days=1)))
+                .compute()
+            )
         # set daymet to midnight
         #daymet_data = daymet_data.resample(time='1D').mean()
         daymet_data['time'] = daymet_data['time'].dt.floor('D')
@@ -231,7 +346,10 @@ def build_tensors(
                 this_vals = loc[0] # longitude
                 vals_to_add = (this_vals - this_norm_mean) / this_norm_std
             elif 'climate_zone' in st_var:
-                this_ds = dss['climate_zone']
+                if all_nearby and loc_chunk_keys is not None:
+                    this_ds = preloaded_climate_zone
+                else:
+                    this_ds = dss['climate_zone']
                 this_vals = this_ds['climate_zone'].sel(
                     x=this_x,
                     y=this_y,
@@ -256,15 +374,23 @@ def build_tensors(
                 'water' in st_var or
                 'wetlands' in st_var
             ):
-                this_ds = dss['landcover_frac']
+                if all_nearby and loc_chunk_keys is not None:
+                    this_ds = preloaded_chunks[loc_chunk_keys[l]]['landcover_frac']
+                else:
+                    this_ds = dss['landcover_frac']
                 this_vals = this_ds[st_var].sel(
                     x=this_x,
                     y=this_y,
                     method='nearest'
-                ).compute()
+                )
+                if not (all_nearby and loc_chunk_keys is not None):
+                    this_vals = this_vals.compute()
             else:
                 this_ds_name = var_to_ds[st_var]
-                this_ds = dss[this_ds_name]
+                if all_nearby and loc_chunk_keys is not None and this_ds_name == 'static':
+                    this_ds = preloaded_static
+                else:
+                    this_ds = dss[this_ds_name]
                 this_vals = this_ds[st_var].sel(
                     x=this_x,
                     y=this_y,

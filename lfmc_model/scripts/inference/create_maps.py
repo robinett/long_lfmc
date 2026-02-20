@@ -208,6 +208,7 @@ def main():
             short_lag_days,
             long_lag_days,
             norm_params,
+            all_nearby=True,
         )
         preds_df = run_model_forward(
             short_tensor,
