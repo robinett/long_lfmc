@@ -3,11 +3,88 @@ from rasterio.enums import Resampling
 import os
 import sys
 import datetime
+import re
 import numpy as np
 from pyproj import Transformer
 
 sys.path.append('/home/users/trobinet/long_lfmc/data_processing/shared')
 import plotting as plot
+
+
+def format_time_value_as_yyyymmdd(time_value):
+    """
+    Convert an xarray time value (numpy datetime64 or cftime-like object) to
+    YYYYMMDD for daily output file naming.
+    """
+    if isinstance(time_value, np.ndarray):
+        time_value = time_value.item()
+    if isinstance(time_value, np.datetime64):
+        if np.isnat(time_value):
+            raise ValueError('Encountered NaT time value in source dataset')
+        time_str = np.datetime_as_string(time_value, unit='D')
+        return time_str.replace('-', '')
+    if (
+        hasattr(time_value, 'year') and
+        hasattr(time_value, 'month') and
+        hasattr(time_value, 'day')
+    ):
+        return (
+            f"{int(time_value.year):04d}"
+            f"{int(time_value.month):02d}"
+            f"{int(time_value.day):02d}"
+        )
+    raise ValueError(
+        'Unable to parse time value for output naming: {}'.format(
+            repr(time_value)
+        )
+    )
+
+
+def get_regrid_output_path(
+    src_file_path,
+    src_dir,
+    target_dir,
+    date_str=None
+):
+    """
+    Build the output path for a regridded file. If date_str is provided, insert
+    a YYYYMMDD token into the basename so multi-time inputs can emit one file
+    per day using the same naming convention as single-day inputs.
+    """
+    relative_subpath = os.path.dirname(
+        os.path.relpath(
+            src_file_path,
+            src_dir
+        )
+    )
+    target_save_full_dir = os.path.join(
+        target_dir,
+        relative_subpath
+    )
+    this_base, this_ext = os.path.splitext(os.path.basename(src_file_path))
+    if this_ext in ['.tif', '.tiff', '.img', '.hdf', '.hdf4', '.hdf5', '.h5']:
+        this_ext = '.nc4'
+    elif this_ext in ['.nc', '.nc4', '.ncdf']:
+        pass
+    else:
+        print('unrecognized file extension: {}'.format(this_ext))
+        print('exiting')
+        sys.exit()
+    if date_str is not None:
+        if re.search(r'_\d{8}$', this_base):
+            # Already looks like a single-day file basename.
+            pass
+        elif re.search(r'_\d{4}$', this_base):
+            # Replace trailing year token (e.g., Daymet yearly file) with day.
+            this_base = re.sub(r'_\d{4}$', '_{}'.format(date_str), this_base)
+        else:
+            # Generic fallback for other multi-time files.
+            this_base = '{}_{}'.format(this_base, date_str)
+    this_fname = f"{this_base}_regridded{this_ext}"
+    return os.path.join(
+        target_save_full_dir,
+        this_fname
+    )
 
 def reproject_and_regrid_whole_directory(
     src_dir,
@@ -69,6 +146,7 @@ def reproject_and_regrid_whole_directory(
     ))
     # get all of the files that have been passed to us to regrid
     src_file_paths = get_all_file_paths(src_dir)
+    plotted_first_output = False
     # loop over each file
     for sfp,this_src_file_path in enumerate(src_file_paths):
         print('working on file {}'.format(
@@ -96,80 +174,89 @@ def reproject_and_regrid_whole_directory(
             )
         # add the source crs here for safety
         this_src_ds.rio.write_crs(src_crs, inplace=True)
-        this_regridded_ds = reproject_and_regrid_single_file(
-            target_grid,
-            this_src_ds,
-            target_crs,
-            src_crs,
-            target_chunks,
-            plot_tests=False,
-            target_dir_last_ext=target_dir_last_ext,
-            chunk_buffer=chunk_buffer
-        )
-        # make sure that we have a crs written to the output
-        if 'crs' not in this_regridded_ds.coords:
-            this_regridded_ds.rio.write_crs(target_crs, inplace=True)
-        if sfp == 0:
-            print('regridded ds from first file:')
-            print(this_regridded_ds)
-            print('plotting the final regridded ds')
-            # get the first var that isn't excluded
-            exclude_when_plotting = [
-                'x',
-                'y',
-                'lon',
-                'lat',
-                'time'
-            ]
-            for var in this_regridded_ds.data_vars:
-                if var.lower() not in exclude_when_plotting:
-                    this_var = var
-                    break
-            plot.plot_from_xarray(
-                'ds',
-                this_regridded_ds,
-                this_var,
+        num_time_steps = this_src_ds.sizes.get('time', 0)
+        is_multi_time_file = ('time' in this_src_ds.dims and num_time_steps > 1)
+        if is_multi_time_file:
+            print(
+                'detected multi-time source file with {} time steps; '
+                'regridding one day at a time'.format(num_time_steps)
+            )
+            time_values = this_src_ds['time'].values
+            src_ds_iter = []
+            for ti in range(num_time_steps):
+                date_str = format_time_value_as_yyyymmdd(time_values[ti])
+                src_ds_iter.append((
+                    this_src_ds.isel(time=ti, drop=True),
+                    date_str,
+                    ti + 1,
+                    num_time_steps
+                ))
+        else:
+            print('detected single-time/daily source file')
+            src_ds_iter = [(this_src_ds, None, 1, 1)]
+
+        for this_src_ds_to_regrid, date_str, ti, nt in src_ds_iter:
+            if date_str is not None:
+                print('working on day {}/{} ({})'.format(ti, nt, date_str))
+            this_regridded_ds = reproject_and_regrid_single_file(
+                target_grid,
+                this_src_ds_to_regrid,
                 target_crs,
-                target_crs,
-                (
-                    '/scratch/users/trobinet/long_lfmc/trent_datasets/' +
-                    'regridding/plots/final_regridded_ds_{}.png'.format(
-                        target_dir_last_ext
+                src_crs,
+                target_chunks,
+                plot_tests=False,
+                target_dir_last_ext=target_dir_last_ext,
+                chunk_buffer=chunk_buffer
+            )
+            # make sure that we have a crs written to the output
+            if 'crs' not in this_regridded_ds.coords:
+                this_regridded_ds.rio.write_crs(target_crs, inplace=True)
+            if not plotted_first_output:
+                print('regridded ds from first output:')
+                print(this_regridded_ds)
+                print('plotting the final regridded ds')
+                # get the first var that isn't excluded
+                exclude_when_plotting = [
+                    'x',
+                    'y',
+                    'lon',
+                    'lat',
+                    'time'
+                ]
+                for var in this_regridded_ds.data_vars:
+                    if var.lower() not in exclude_when_plotting:
+                        this_var = var
+                        break
+                plot.plot_from_xarray(
+                    'ds',
+                    this_regridded_ds,
+                    this_var,
+                    target_crs,
+                    target_crs,
+                    (
+                        '/scratch/users/trobinet/long_lfmc/final_lfmc/' +
+                        'regridding/plots/final_regridded_ds_{}.png'.format(
+                            target_dir_last_ext
+                        )
                     )
                 )
-            )
-        # get the output file name
-        relative_subpath = os.path.dirname(
-            os.path.relpath(
+                plotted_first_output = True
+            target_save_fname = get_regrid_output_path(
                 this_src_file_path,
-                src_dir
+                src_dir,
+                target_dir,
+                date_str=date_str
             )
-        )
-        target_save_full_dir = os.path.join(
-            target_dir,
-            relative_subpath
-        )
-        # create the specific filename
-        this_base,this_ext = os.path.splitext(os.path.basename(
-            this_src_file_path
-        ))
-        if this_ext in ['.tif','.tiff','.img','.hdf','.hdf4','.hdf5','.h5']:
-            this_ext = '.nc4'
-        elif this_ext in ['.nc','.nc4','.ncdf']:
-            pass
-        else:
-            print('unrecognized file extension: {}'.format(this_ext))
-            print('exiting')
-            sys.exit()
-        this_fname = f"{this_base}_regridded{this_ext}"
-        target_save_fname = os.path.join(
-            target_save_full_dir,
-            this_fname
-        )
-        save_xarray_w_encoding(
-            this_regridded_ds,
-            target_save_fname
-        )
+            if os.path.exists(target_save_fname):
+                print(
+                    'WARNING: overwriting existing regridded file: {}'.format(
+                        target_save_fname
+                    )
+                )
+            save_xarray_w_encoding(
+                this_regridded_ds,
+                target_save_fname
+            )
     
 def reproject_and_regrid_single_file(
     target_grid,
@@ -210,7 +297,7 @@ def reproject_and_regrid_single_file(
         # get the corresponding, padded chunk of the source grid
         # we want this chunk to extend at least 10 pixels beyond the
         # boundary of the target chunk in each direction.
-        print('getting chunk')
+        #print('getting chunk')
         this_padded_src_chunk = get_padded_chunk(
             this_target_chunk,
             this_src_ds,
@@ -219,7 +306,12 @@ def reproject_and_regrid_single_file(
         if plot_tests:
             # fill all nans for this plot to show the full extent
             print('plotting datasets on top of each other')
-            this_padded_src_chunk_plot = this_padded_src_chunk.fillna(0.0).isel(time=0)
+            this_padded_src_chunk_plot = this_padded_src_chunk.fillna(0.0)
+            if 'time' in this_padded_src_chunk_plot.dims:
+                this_padded_src_chunk_plot = this_padded_src_chunk_plot.isel(
+                    time=0,
+                    drop=True
+                )
             # get the first var that isn't excluded
             exclude_when_plotting = [
                 'x',
@@ -255,7 +347,7 @@ def reproject_and_regrid_single_file(
                 [0.5,0.5]
             )
         # match the target grid
-        print('reprojecting')
+        #print('reprojecting')
         this_padded_src_chunk_reproj = this_padded_src_chunk.rio.reproject_match(
             this_target_chunk,
             resampling=Resampling.nearest
@@ -275,19 +367,19 @@ def reproject_and_regrid_single_file(
                     )
                 )
             )
-            #plot.plot_from_xarray(
-            #    'ds',
-            #    this_padded_src_chunk,
-            #    src_var,
-            #    src_crs,
-            #    target_crs,
-            #    (
-            #        '/scratch/users/trobinet/long_lfmc/final_lfmc/' +
-            #        'regridding/plots/this_padded_src_chunk_{}.png'.format(
-            #            target_dir_last_ext
-            #        )
-            #    )
-            #)
+            plot.plot_from_xarray(
+                'ds',
+                this_padded_src_chunk,
+                src_var,
+                src_crs,
+                target_crs,
+                (
+                    '/scratch/users/trobinet/long_lfmc/final_lfmc/' +
+                    'regridding/plots/this_padded_src_chunk_{}.png'.format(
+                        target_dir_last_ext
+                    )
+                )
+            )
             plot.plot_from_xarray(
                 'ds',
                 this_padded_src_chunk_reproj,
@@ -295,16 +387,16 @@ def reproject_and_regrid_single_file(
                 target_crs,
                 target_crs,
                 (
-                    '/scratch/users/trobinet/long_lfmc/trent_datasets/' +
+                    '/scratch/users/trobinet/long_lfmc/final_lfmc/' +
                     'regridding/plots/src_chunk_regridded_{}.png'.format(
                         target_dir_last_ext
                     )
                 )
             )
         # add to this_regridded_ds
-        print('combining')
-        print(this_regridded_ds)
-        print(this_padded_src_chunk_reproj)
+        #print('combining')
+        #print(this_regridded_ds)
+        #print(this_padded_src_chunk_reproj)
         this_regridded_ds = this_regridded_ds.combine_first(
             this_padded_src_chunk_reproj
         )
@@ -528,8 +620,6 @@ def get_padded_chunk(
         src_y_dim_name: y_slice
     })
     return src_subset
-
-
 
 
 
