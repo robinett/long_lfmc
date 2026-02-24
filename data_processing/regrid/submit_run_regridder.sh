@@ -1,16 +1,15 @@
 #!/bin/bash
-# script to submit many jobs to process daymet data so that it can be
-# parallelized in time (yearly chunks)
+# script to submit many jobs to process regridding in time chunks
 
 # for all the files that we want to regrid
 start_month="2000-01"
 end_month="2024-12" # inclusive
-src_top_level_dir="/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_earthaccess"
-target_top_level_dir="/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_regrid"
+src_top_level_dir="/scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_combined"
+target_top_level_dir="/scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_regrid"
 target_grid_dir="/scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4"
-src_crs="+proj=lcc +lat_1=25 +lat_2=60 +lat_0=42.5 +lon_0=-100 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+src_crs="+proj=sinu +R=6371007.181 +lon_0=0 +x_0=0 +y_0=0 +units=m +no_defs"
 target_crs="EPSG:5070"
-chunk_buffer=200
+chunk_buffer=100
 #fill_value=-9999
 #sbatch run_regridder.sh "$target_grid_dir" "$src_top_level_dir" "$target_top_level_dir" "$src_crs" "$target_crs" "$chunk_buffer"
 
@@ -31,6 +30,11 @@ while [[ "$current_date" < "$final_date" ]]; do
     else
         src_dir="${src_top_level_dir}/${year}"
         target_dir="${target_top_level_dir}/${year}"
+    fi
+    if [[ ! -d "$src_dir" ]]; then
+        echo "Skipping missing source directory: $src_dir"
+        current_date=$(date -d "$current_date + ${year_delta} year + ${month_delta} month" +%Y-%m-%d)
+        continue
     fi
     # submit the job
     sbatch run_regridder.sh "$target_grid_dir" "$src_dir" "$target_dir" "$src_crs" "$target_crs" "$chunk_buffer"

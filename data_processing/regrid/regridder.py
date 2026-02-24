@@ -257,6 +257,11 @@ def reproject_and_regrid_whole_directory(
                 this_regridded_ds,
                 target_save_fname
             )
+            this_regridded_ds.close()
+            if this_src_ds_to_regrid is not this_src_ds:
+                this_src_ds_to_regrid.close()
+        this_src_ds.close()
+    target_grid.close()
     
 def reproject_and_regrid_single_file(
     target_grid,
@@ -620,7 +625,6 @@ def get_padded_chunk(
         src_y_dim_name: y_slice
     })
     return src_subset
-
 
 
 

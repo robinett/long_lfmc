@@ -35,8 +35,8 @@ def open_lazy(fp: str) -> xr.DataArray:
 
 
 def main():
-    in_dir = "/scratch/users/trobinet/long_lfmc/trent_datasets/nlcd/nlcd_raw"
-    out_zarr = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/nlcd/nlcd_2003_2023.zarr"
+    in_dir = "/scratch/users/trobinet/long_lfmc/final_lfmc/nlcd/nlcd_raw"
+    out_zarr = "/scratch/users/trobinet/long_lfmc/final_lfmc/nlcd/nlcd_2000_2024.zarr"
     files = sorted(glob.glob(f"{in_dir}/*.tif"))
     if not files:
         raise SystemExit(f"No .tif files found in {in_dir}")
@@ -48,6 +48,9 @@ def main():
         arrays,
         dim=xr.DataArray(time, dims="time", name="time"),
         join="exact",
+        coords="minimal",
+        compat="override",
+        combine_attrs="override",
     ).chunk({"time": 1})  # spatial chunks already set
     print(nlcd)
     # Clean out any partial previous store to avoid mode conflicts
@@ -59,7 +62,8 @@ def main():
             out_zarr,
             mode="w",
             consolidated=True,
-            #zarr_format=2,  # ← use v2; avoids v3 codec API hassles
+            safe_chunks=False,
+            zarr_format=2,  # use v2; numcodecs.Blosc compressor is v2-style
             encoding={
                 "nlcd": {
                     "compressor": compressor,     # v2 key

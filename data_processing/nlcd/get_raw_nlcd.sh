@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Config
 URL_FILE="/home/users/trobinet/long_lfmc/data_processing/nlcd/raw_download_urls.txt"
-OUT_DIR="/scratch/users/trobinet/long_lfmc/trent_datasets/nlcd/nlcd_raw"
+OUT_DIR="/scratch/users/trobinet/long_lfmc/final_lfmc/nlcd/nlcd_raw"
 
 mkdir -p "${OUT_DIR}"
 cd "${OUT_DIR}"

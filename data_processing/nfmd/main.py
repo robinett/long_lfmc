@@ -5,33 +5,33 @@ import datetime
 import process_nfmd
 
 def main():
-    oak_dir = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets'
+    scratch_dir = '/scratch/users/trobinet/long_lfmc/final_lfmc'
     orig_csv_fname = os.path.join(
-        oak_dir,
+        scratch_dir,
         'nfmd',
-        'fieldSample.csv'
+        'lfmc_samples_20000101_20260224.csv'
     )
     nfmd_loc_fname = os.path.join(
-        oak_dir,
+        scratch_dir,
         'nfmd',
-        'Site_Metadata.csv'
+        'site_info.csv'
     )
     nlcd_fname = os.path.join(
-        oak_dir,
+        scratch_dir,
         'nlcd',
-        'nlcd_target_grid_2003_2023.zarr'
+        'nlcd_target_grid_2000_2023.zarr'
     )
     species_to_landcover_name = os.path.join(
-        oak_dir,
+        scratch_dir,
         'nfmd',
         'species_to_landcover_mapping.csv'
     )
     start = datetime.datetime(2003, 1, 1)
     end = datetime.datetime(2023, 12, 31)
     nfmd_process_fname = os.path.join(
-        oak_dir,
+        scratch_dir,
         'nfmd',
-        'nfmd_processed_landcovermatches.csv'
+        'nfmd_processed.csv'
     )
     # in the future we need to update this but quick and dirty for now.
     bound_box = [
