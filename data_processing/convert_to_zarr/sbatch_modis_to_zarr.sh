@@ -18,7 +18,7 @@ export HDF5_USE_FILE_LOCKING=FALSE
 ulimit -n 4096
 
 # Activate your environment
-source /home/users/trobinet/uv_activations/activate_lfmc_process.sh
+source /home/users/trobinet/uv_activations/activate_lfmc_process_py312.sh
 
 # Move to the script directory
 cd ~/long_lfmc/data_processing/convert_to_zarr

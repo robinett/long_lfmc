@@ -15,19 +15,19 @@ sys.path.append(os.path.join(
 import plotting
 
 def main():
-    data_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets'
+    data_dir = '/scratch/users/trobinet/long_lfmc/final_lfmc'
     # get the nlcd data
     print('getting original nlcd data...')
     nlcd_zarr_path = os.path.join(
         data_dir,
         'nlcd',#'nlcd_full',
         #'nlcd.zarr'
-        'nlcd_2003_2023.zarr'
+        'nlcd_2000_2024.zarr'
     )
     nlcd_orig = xr.open_zarr(nlcd_zarr_path)
     nlcd_orig = nlcd_orig.sortby('x')
     nlcd_orig = nlcd_orig.sortby('y')
-    print('original nldd:')
+    print('original nlcd:')
     print(nlcd_orig)
     nlcd_dict = {
         11:'water',
@@ -263,7 +263,7 @@ def main():
                 proj_in='EPSG:5070',
                 proj_out='EPSG:5070',
                 fname=(
-                    '/scratch/users/trobinet/long_lfmc/trent_datasets/nlcd/plots/deciduous_forest_box_{}.png'.format(b)
+                    '/scratch/users/trobinet/long_lfmc/final_lfmc/nlcd/plots/deciduous_forest_box_{}.png'.format(b)
                 )
             )
         boxes_used += 1
@@ -357,7 +357,7 @@ def main():
     output_path = os.path.join(
         data_dir,
         'nlcd',
-        'nlcd_target_grid_2003_2023.zarr'
+        'nlcd_target_grid_2000_2024.zarr'
     )
     print(f'saving to {output_path}...')
     # chunk the dataset before saving

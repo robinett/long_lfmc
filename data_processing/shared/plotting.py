@@ -267,3 +267,104 @@ def plot_timeseries(times,vals,xlabel,ylabel,save_name,title=None,time_bound=Non
         plt.title(title)
     plt.savefig(save_name)
     plt.close()
+
+
+def plot_interpolation_diagnostic_timeseries(
+    times,
+    original_series_list,
+    interpolated_series_list,
+    status_series_list,
+    point_labels,
+    save_name,
+    title=None,
+):
+    """
+    Plot original vs interpolated time series for several sampled pixels.
+
+    Parameters
+    ----------
+    times : array-like
+        Time axis shared by all series.
+    original_series_list : list[np.ndarray]
+        Original values (with NaNs) for each sampled point.
+    interpolated_series_list : list[np.ndarray]
+        Interpolated values for each sampled point.
+    status_series_list : list[np.ndarray]
+        Fill status arrays (0 original-valid, 1 interpolated, 2 still missing).
+    point_labels : list[str]
+        Labels for each sampled point.
+    save_name : str
+        Output figure path.
+    title : str, optional
+        Figure title.
+    """
+    n_panels = len(point_labels)
+    fig, axes = plt.subplots(
+        n_panels, 1,
+        figsize=(14, 3.5 * n_panels),
+        sharex=True
+    )
+    if n_panels == 1:
+        axes = [axes]
+
+    for i, ax in enumerate(axes):
+        orig = np.asarray(original_series_list[i], dtype=float)
+        interp = np.asarray(interpolated_series_list[i], dtype=float)
+        status = np.asarray(status_series_list[i])
+
+        ax.plot(times, interp, color='tab:blue', linewidth=1.8, label='interpolated')
+        ax.plot(
+            times, orig,
+            color='black',
+            linewidth=1.0,
+            linestyle='--',
+            marker='o',
+            markersize=2.5,
+            alpha=0.8,
+            label='original'
+        )
+
+        filled_mask = status == 1
+        if np.any(filled_mask):
+            ax.scatter(
+                np.asarray(times)[filled_mask],
+                interp[filled_mask],
+                s=22,
+                color='tab:red',
+                label='filled days',
+                zorder=3
+            )
+
+        still_missing_mask = status == 2
+        if np.any(still_missing_mask):
+            y_min, y_max = ax.get_ylim()
+            y_mark = y_min + 0.05 * (y_max - y_min if y_max > y_min else 1.0)
+            ax.scatter(
+                np.asarray(times)[still_missing_mask],
+                np.full(still_missing_mask.sum(), y_mark),
+                s=12,
+                color='gray',
+                alpha=0.7,
+                label='still missing',
+                zorder=2
+            )
+
+        ax.set_ylabel("Value")
+        ax.set_title(point_labels[i])
+        ax.grid(alpha=0.25)
+        if i == 0:
+            ax.legend(loc='best')
+
+    axes[-1].set_xlabel("Time")
+    plt.xticks(rotation=45)
+    if title:
+        fig.suptitle(title)
+        fig.tight_layout(rect=[0, 0, 1, 0.97])
+    else:
+        fig.tight_layout()
+
+    save_dir = os.path.dirname(save_name)
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+    fig.savefig(save_name, dpi=200)
+    plt.close(fig)

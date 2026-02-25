@@ -12,6 +12,109 @@ import os
 # -------- Compression default (same as MODIS) --------
 DEFAULT_COMP = Blosc(cname="zstd", clevel=4, shuffle=Blosc.BITSHUFFLE)
 
+DAYMET_REGRID_FILE_RE = re.compile(
+    r"^daymet_v\d+_daily_na_(?P<var>[^_]+)_(?P<date>\d{8})_regridded\.(?:nc|nc4)$"
+)
+
+
+def parse_daymet_regrid_filename(path) -> tuple[str | None, str | None]:
+    """
+    Parse filenames like:
+      daymet_v4_daily_na_tmax_20080128_regridded.nc
+    Returns (var, yyyymmdd) or (None, None) if not matched.
+    """
+    name = Path(path).name
+    m = DAYMET_REGRID_FILE_RE.match(name)
+    if not m:
+        return None, None
+    return m.group("var"), m.group("date")
+
+
+def scan_daymet_regrid_month_index(root: Path, patterns=(".nc", ".nc4")):
+    """
+    Scan Daymet regridded files stored as:
+      root/YYYY/*.nc
+
+    Returns:
+      month_index: dict["YYYY-MM"] -> list[str filepath]
+      summary: dict with quick validation stats
+    """
+    month_index = {}
+    vars_seen = set()
+    malformed = []
+    years_seen = []
+    empty_years = []
+    month_date_counts = {}
+
+    valid_suffixes = {p.lower() for p in patterns}
+    year_dirs = []
+    with os.scandir(root) as it:
+        for entry in it:
+            if entry.is_dir(follow_symlinks=False) and re.match(r"^\d{4}$", entry.name):
+                year_dirs.append(Path(entry.path))
+    year_dirs = sorted(year_dirs)
+
+    for ydir in year_dirs:
+        years_seen.append(ydir.name)
+        files = []
+        with os.scandir(ydir) as it:
+            for entry in it:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                suffix = Path(entry.name).suffix.lower()
+                if suffix in valid_suffixes:
+                    files.append(Path(entry.path))
+        if not files:
+            empty_years.append(ydir.name)
+            continue
+
+        for fp in files:
+            var, yyyymmdd = parse_daymet_regrid_filename(fp)
+            if var is None:
+                malformed.append(str(fp))
+                continue
+
+            year = yyyymmdd[:4]
+            month = yyyymmdd[4:6]
+            if year != ydir.name:
+                malformed.append(str(fp))
+                continue
+
+            ym = f"{year}-{month}"
+            month_index.setdefault(ym, []).append(str(fp))
+            vars_seen.add(var)
+            month_date_counts.setdefault(ym, {}).setdefault(yyyymmdd, 0)
+            month_date_counts[ym][yyyymmdd] += 1
+
+    # Stable sort: filename lexicographic groups by variable then date for fallback concat path.
+    for ym in month_index:
+        month_index[ym] = sorted(month_index[ym])
+
+    problematic_months = []
+    for ym, date_counts in sorted(month_date_counts.items()):
+        unique_counts = sorted(set(date_counts.values()))
+        if len(unique_counts) != 1:
+            problematic_months.append(
+                {
+                    "month": ym,
+                    "n_dates": len(date_counts),
+                    "files_per_date_unique": unique_counts,
+                }
+            )
+
+    summary = {
+        "root": str(root),
+        "years_seen": years_seen,
+        "empty_years": empty_years,
+        "vars_seen": sorted(vars_seen),
+        "months_found": sorted(month_index.keys()),
+        "malformed_count": len(malformed),
+        "malformed_examples": malformed[:10],
+        "problematic_months": problematic_months[:20],
+        "month_file_counts": {ym: len(files) for ym, files in month_index.items()},
+    }
+    return month_index, summary
+
 # -------- Attribute cleanup --------
 def preprocess_strip_attrs(ds: xr.Dataset) -> xr.Dataset:
     drop_keys = ["history", "date_created", "creation_date",
@@ -31,6 +134,7 @@ def open_time_batch(
     cast_float32=True,
     preprocess=preprocess_strip_attrs,
     combine="nested",   # <— add this
+    data_var_whitelist=None,
 ):
     import xarray as xr
     with xr.set_options(file_cache_maxsize=2):
@@ -46,29 +150,31 @@ def open_time_batch(
                 preprocess=preprocess,
             )
         except Exception:
+            grouped = {}
+            for file in files:
+                parsed_var, parsed_date = parse_daymet_regrid_filename(file)
+                var_key = parsed_var or str(file).split("/")[-1].split("_")[0]
+                grouped.setdefault(var_key, []).append((parsed_date or "", file))
+
             parts = []
-            last_var_name = None
-            first_iter = True
-            for f,file in enumerate(files):
-                this_var = str(file).split("/")[-1].split("_")[0]
-                dsi = xr.open_dataset(
-                    file,
-                    engine=engine,
-                    decode_times=True,
-                    backend_kwargs={"invalid_netcdf": True, "phony_dims": "sort"},
-                )
-                if this_var != last_var_name:
-                    print(f'finished {this_var}')
-                    if not first_iter:
-                        parts.append(this_ds)
-                    this_ds = dsi
-                    last_var_name = this_var
-                    first_iter = False
-                else:
-                    this_ds = xr.concat([this_ds, dsi], dim="time")
-                dsi.close()
-            print(f'finished {this_var}')
-            parts.append(this_ds)
+            for this_var in sorted(grouped):
+                var_files = [f for _, f in sorted(grouped[this_var], key=lambda x: (x[0], str(x[1])))]
+                this_ds = None
+                for file in var_files:
+                    dsi = xr.open_dataset(
+                        file,
+                        engine=engine,
+                        chunks={},
+                        decode_times=True,
+                        backend_kwargs={"invalid_netcdf": True, "phony_dims": "sort"},
+                    )
+                    if this_ds is None:
+                        this_ds = dsi
+                    else:
+                        this_ds = xr.concat([this_ds, dsi], dim="time")
+                    dsi.close()
+                print(f'finished {this_var}')
+                parts.append(this_ds)
             final_ds = xr.merge(parts, compat="no_conflicts",join="exact")
             for part in parts:
                 part.close()
@@ -83,6 +189,18 @@ def open_time_batch(
     times = pd.to_datetime(final_ds["time"].values)
     mask = ~pd.Index(times).duplicated(keep="first")
     final_ds = final_ds.isel(time=mask)
+    if data_var_whitelist is not None:
+        keep = [v for v in data_var_whitelist if v in final_ds.data_vars]
+        missing = [v for v in data_var_whitelist if v not in final_ds.data_vars]
+        extras = [v for v in final_ds.data_vars if v not in data_var_whitelist]
+        if missing:
+            print("Warning: missing variables:", missing)
+        if extras:
+            print("Dropping non-whitelisted variables:", extras)
+        if keep:
+            final_ds = final_ds[keep]
+        else:
+            raise ValueError("No whitelisted variables found in batch")
     # normalize dtypes (same as before)
     if cast_float32:
         print('casting to float32')
@@ -136,6 +254,7 @@ def write_first(arr: xr.DataArray, out: Path, compressor=DEFAULT_COMP):
         out,
         mode="w",
         consolidated=False,
+        zarr_format=2,
         encoding=zarr_encoding_for(arr, compressor),
         compute=True,
     )
@@ -147,6 +266,7 @@ def append_time(arr: xr.DataArray, out: Path):
         mode="a",
         append_dim="time",
         consolidated=False,
+        zarr_format=2,
     )
 
 def consolidate(out: Path):

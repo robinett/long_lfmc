@@ -3,10 +3,13 @@
 
 from pathlib import Path
 import argparse
+import calendar
 import re
 import time
 import json
 import fcntl
+import numpy as np
+import pandas as pd
 import xarray as xr
 
 from zarr_build_utils import (
@@ -18,52 +21,102 @@ from zarr_build_utils import (
     write_first,
     append_time,
     consolidate,
+    scan_daymet_regrid_month_index,
 )
 
 # --------- CONFIG (adjust paths/chunks as needed) ----------
 ROOT = Path(
-    "/oak/stanford/groups/konings/trobinet/long_lfmc/"
-    "trent_datasets/daymet/daymet_regrid"
+    "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_regrid"
 )
 OUT = Path(
-    "/oak/stanford/groups/konings/trobinet/long_lfmc/"
-    "trent_datasets/daymet/daymet_all_vars.zarr"
+    "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_all_vars.zarr"
 )
 WRITE_CHUNKS = {"time": 1, "variable": 9999, "y": 512, "x": 512}
 CAST_FLOAT32 = True
 ENGINE = "h5netcdf"
 PARALLEL_OPEN = False
 COMP = DEFAULT_COMP
+DAYMET_VAR_WHITELIST = ["prcp", "srad", "swe", "tmax", "tmin", "vp"]
 # -----------------------------------------------------------
 
 MONTH_RE = re.compile(r"^\d{2}$")
 YEAR_RE  = re.compile(r"^\d{4}$")
 
-def find_month_keys(root: Path):
-    """Return sorted [(YYYY, MM)] for all months that exist across variables."""
-    keys = set()
-    for var_dir in root.iterdir():
-        if not var_dir.is_dir():
-            continue
-        for y_dir in var_dir.iterdir():
-            if not (y_dir.is_dir() and YEAR_RE.match(y_dir.name)):
-                continue
-            for m_dir in y_dir.iterdir():
-                if m_dir.is_dir() and MONTH_RE.match(m_dir.name):
-                    keys.add((y_dir.name, m_dir.name))
-    # chronological
-    return sorted(keys, key=lambda ym: (int(ym[0]), int(ym[1])))
+def load_or_build_month_index(coord: Path, root: Path, rebuild: bool = False):
+    """
+    Cache the month->files mapping in coord dir so array workers do not rescan
+    the Daymet tree independently.
+    """
+    cache_path = coord / "daymet_month_index.json"
+    lock_path = coord / "index.lock"
 
-def files_for_month(root: Path, year: str, month: str, patterns=(".nc", ".nc4")):
-    out = []
-    for var_dir in root.iterdir():
-        ydir = var_dir / year
-        mdir = ydir / month
-        if not mdir.is_dir():
-            continue
-        for p in patterns:
-            out.extend(sorted(mdir.glob(f"*{p}")))
-    return out
+    with lock_file(lock_path):
+        if cache_path.exists() and not rebuild:
+            cached = json.loads(cache_path.read_text())
+            if cached.get("root") == str(root):
+                month_index = {
+                    ym: [Path(p) for p in files]
+                    for ym, files in cached.get("month_index", {}).items()
+                }
+                return month_index, cached.get("summary", {})
+
+        month_index_str, summary = scan_daymet_regrid_month_index(root)
+        payload = {
+            "root": str(root),
+            "month_index": month_index_str,
+            "summary": summary,
+        }
+        cache_path.write_text(json.dumps(payload))
+        month_index = {ym: [Path(p) for p in files] for ym, files in month_index_str.items()}
+        return month_index, summary
+
+
+def print_dry_run_summary(summary: dict, month_index: dict):
+    months = sorted(month_index.keys())
+    print("Daymet dry run summary")
+    print("  root:", summary.get("root"))
+    print("  year dirs:", len(summary.get("years_seen", [])))
+    print("  empty years:", summary.get("empty_years", []))
+    print("  vars:", summary.get("vars_seen", []))
+    print("  months found:", len(months))
+    if months:
+        print("  first month:", months[0], "files:", len(month_index[months[0]]))
+        print("  last month:", months[-1], "files:", len(month_index[months[-1]]))
+    print("  malformed filenames:", summary.get("malformed_count", 0))
+    bad_months = summary.get("problematic_months", [])
+    print("  problematic months:", len(bad_months))
+    for item in bad_months[:10]:
+        print("   ", item)
+
+
+def maybe_fill_missing_leap_dec31(ds: xr.Dataset, year: str, month: str) -> xr.Dataset:
+    """
+    Some leap years are missing Dec 31 in the raw regridded files. Duplicate the
+    Dec 30 slice and relabel it to Dec 31 so leap years end with 366 days.
+    """
+    if month != "12" or not calendar.isleap(int(year)):
+        return ds
+    if "time" not in ds.coords:
+        return ds
+
+    times = pd.to_datetime(ds["time"].values)
+    if len(times) == 0:
+        return ds
+
+    norm = pd.DatetimeIndex(times).normalize()
+    dec30 = pd.Timestamp(f"{year}-12-30")
+    dec31 = pd.Timestamp(f"{year}-12-31")
+
+    if (norm == dec31).any():
+        return ds
+    dec30_idx = np.where(norm == dec30)[0]
+    if len(dec30_idx) == 0:
+        raise ValueError(f"Leap-year December missing both Dec 30 and Dec 31 for {year}")
+
+    fill = ds.isel(time=[int(dec30_idx[-1])]).copy(deep=False)
+    fill = fill.assign_coords(time=("time", [dec31.to_datetime64()]))
+    print(f"Inserted synthetic {year}-12-31 from {year}-12-30")
+    return xr.concat([ds, fill], dim="time").sortby("time")
 
 def lock_file(path: Path):
     """Context manager for an exclusive file lock (POSIX flock)."""
@@ -79,7 +132,7 @@ def lock_file(path: Path):
             finally: self.fh.close()
     return _Lock(path)
 
-def init_queue_if_needed(coord: Path, months_all):
+def init_queue_if_needed(coord: Path, month_labels):
     coord.mkdir(parents=True, exist_ok=True)
     todo      = coord / "months.todo"           # lines: YYYY-MM
     done      = coord / "months.done"           # lines: YYYY-MM
@@ -94,7 +147,7 @@ def init_queue_if_needed(coord: Path, months_all):
 
         if not todo.exists():
             # fresh build of todo from all months minus done
-            all_lines = [f"{y}-{m}" for (y, m) in months_all]
+            all_lines = sorted(month_labels)
             all_lines = [ln for ln in all_lines if ln not in done_set]
             todo.write_text("\n".join(all_lines) + ("\n" if all_lines else ""))
 
@@ -135,8 +188,7 @@ def claim_next_month(coord: Path):
         s["last_claim"] = {"ym": line, "seq": seq}
         state.write_text(json.dumps(s) + "\n")
 
-        yyyy, mm = line.split("-")
-        return (yyyy, mm, seq)
+        return (line, seq)
 
 def write_ordered(arr, ym, seq, coord: Path):
     """
@@ -181,19 +233,69 @@ def write_ordered(arr, ym, seq, coord: Path):
             # else: not our turn yet
         time.sleep(2.0)  # brief backoff
 
+
+def mark_done_without_write(ym, seq, coord: Path):
+    """
+    Advance the ordered write sequence for a claimed batch that is intentionally
+    skipped (e.g., no files found) so later workers do not block forever.
+    """
+    next_write = coord / "next_write.txt"
+    done = coord / "months.done"
+    state = coord / "state.json"
+    write_lock = coord / "write.lock"
+
+    while True:
+        with lock_file(write_lock):
+            expected = int(next_write.read_text().strip())
+            if seq == expected:
+                done_lines = [x for x in done.read_text().splitlines() if x.strip()]
+                done_lines.append(f"{ym} (SKIPPED)")
+                done.write_text("\n".join(done_lines) + "\n")
+                next_write.write_text(f"{expected+1}\n")
+
+                try:
+                    s = json.loads(state.read_text() or "{}")
+                except Exception:
+                    s = {}
+                s["last_write"] = {"ym": f"{ym} (SKIPPED)", "seq": seq}
+                state.write_text(json.dumps(s) + "\n")
+
+                print(f"[seq {seq}] Skipped {ym}. next_write -> {expected+1}")
+                return
+        time.sleep(2.0)
+
 def parse_args():
     ap = argparse.ArgumentParser("Daymet multi-worker month queue")
     ap.add_argument("--coord-dir", type=str, required=True,
                     help="Shared coordination directory for queue/locks.")
+    ap.add_argument("--root", type=str, default=str(ROOT),
+                    help="Daymet regridded root (year directories with daily files).")
+    ap.add_argument("--out", type=str, default=str(OUT),
+                    help="Output zarr store path.")
     ap.add_argument("--finalize", action="store_true",
                     help="Only consolidate metadata and exit.")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Scan files, print month/index summary, and exit.")
+    ap.add_argument("--rebuild-index", action="store_true",
+                    help="Force rebuild of cached month index in coord dir.")
     ap.add_argument("--max-months", type=int, default=None,
                     help="Optional: limit number of claimed months this worker will process.")
     return ap.parse_args()
 
 def main():
     args = parse_args()
+    global ROOT, OUT
+    ROOT = Path(args.root)
+    OUT = Path(args.out)
     coord = Path(args.coord_dir)
+    coord.mkdir(parents=True, exist_ok=True)
+
+    month_index, summary = load_or_build_month_index(coord, ROOT, rebuild=args.rebuild_index)
+    month_labels = sorted(month_index.keys())
+
+    if args.dry_run:
+        print_dry_run_summary(summary, month_index)
+        return
 
     if args.finalize:
         if OUT.exists():
@@ -205,8 +307,9 @@ def main():
         return
 
     # Build full month list and init queue files if needed
-    months_all = find_month_keys(ROOT)
-    init_queue_if_needed(coord, months_all)
+    if not month_labels:
+        raise ValueError(f"No daymet monthly batches found under {ROOT}")
+    init_queue_if_needed(coord, month_labels)
 
     processed = 0
     while True:
@@ -214,17 +317,15 @@ def main():
         if claim is None:
             print("No more months in queue. Worker exiting.")
             break
-        yyyy, mm, seq = claim
-        ym = f"{yyyy}-{mm}"
+        ym, seq = claim
+        yyyy, mm = ym.split("-")
         print(f"[seq {seq}] Claimed {ym}")
 
         # Load + prep outside of write lock
-        files = files_for_month(ROOT, yyyy, mm, (".nc", ".nc4"))
+        files = month_index.get(ym, [])
         if not files:
             print(f"[seq {seq}] No files for {ym}. Skipping.")
-            # Still need to "complete" to advance? No: we never wrote it.
-            # Put it into done to avoid infinite loop? Safer to mark done.
-            write_ordered(xr.DataArray(), ym + " (EMPTY)", seq, coord)  # no-op write_first/append won't be called
+            mark_done_without_write(ym, seq, coord)
             continue
 
         ds = open_time_batch(
@@ -234,8 +335,10 @@ def main():
             cast_float32=CAST_FLOAT32,
             preprocess=preprocess_strip_attrs,
             combine="by_coords",
+            data_var_whitelist=DAYMET_VAR_WHITELIST,
         )
         print('ds opened')
+        ds = maybe_fill_missing_leap_dec31(ds, yyyy, mm)
 
         arr = to_stacked_array(ds, WRITE_CHUNKS)
         print('arr stacked')

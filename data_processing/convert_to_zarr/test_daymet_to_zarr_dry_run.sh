@@ -1,23 +1,17 @@
 #!/usr/bin/env bash
-#SBATCH -J daymet_to_zarr_finalize
-#SBATCH -p serc
-#SBATCH -t 01:00:00
-#SBATCH --mem=8G
-#SBATCH -c 1
-#SBATCH -o logs/%x_%j.out
-#SBATCH -e logs/%x_%j.err
-
 set -euo pipefail
+
 source /home/users/trobinet/uv_activations/activate_lfmc_process_py312.sh
 
 cd ~/long_lfmc/data_processing/convert_to_zarr
 
 ROOT="/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_regrid"
 OUT="/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_all_vars.zarr"
-COORD_DIR="/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_queue_coord"
+COORD_DIR="/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_queue_coord_dryrun"
 
 python3 -u daymet_to_zarr_worker.py \
   --coord-dir "${COORD_DIR}" \
   --root "${ROOT}" \
   --out "${OUT}" \
-  --finalize
+  --dry-run \
+  --rebuild-index

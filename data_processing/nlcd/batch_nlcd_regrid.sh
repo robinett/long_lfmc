@@ -16,7 +16,7 @@ echo "[$(date)] Job starting on $(hostname)"
 mkdir -p "$HOME/long_lfmc/data_processing/nlcd/logs"
 
 # 1) activate poetry env
-source "$HOME/uv_activations/activate_lfmc_process.sh"
+source "$HOME/uv_activations/activate_lfmc_process_py312.sh"
 
 # 2) cd to working dir
 cd "$HOME/long_lfmc/data_processing/nlcd"

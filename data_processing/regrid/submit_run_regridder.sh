@@ -14,8 +14,8 @@ chunk_buffer=100
 #sbatch run_regridder.sh "$target_grid_dir" "$src_top_level_dir" "$target_top_level_dir" "$src_crs" "$target_crs" "$chunk_buffer"
 
 # delta between each request submitted
-month_delta=0
-year_delta=1
+month_delta=1
+year_delta=0
 #initialize the current date
 current_date=$(date -d "$start_month-01" +%Y-%m-%d)
 final_date=$(date -d "$end_month-01 +1 month" +%Y-%m-%d) # exclusive

@@ -18,12 +18,16 @@ export HDF5_USE_FILE_LOCKING=FALSE
 ulimit -n 4096
 
 # Activate env
-source /home/users/trobinet/uv_activations/activate_lfmc_process.sh
+source /home/users/trobinet/uv_activations/activate_lfmc_process_py312.sh
 
 cd ~/long_lfmc/data_processing/convert_to_zarr
 mkdir -p logs
 
-COORD_DIR="/scratch/users/trobinet/long_lfmc/trent_datasets/misc/daymet_queue_coord"
+ROOT="/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_regrid"
+OUT="/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_all_vars.zarr"
+COORD_DIR="/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_queue_coord"
 
 python3 -u daymet_to_zarr_worker.py \
-  --coord-dir "${COORD_DIR}"
+  --coord-dir "${COORD_DIR}" \
+  --root "${ROOT}" \
+  --out "${OUT}"
