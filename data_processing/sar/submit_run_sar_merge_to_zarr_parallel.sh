@@ -1,23 +1,22 @@
 #!/bin/bash
-# Submit a parallel-safe MODIS interpolation workflow:
-#   1) init zarr store
-#   2) worker array writes disjoint spatial chunks
-#   3) finalize metadata
+# Submit SAR merge workflow:
+#   1) init output zarr
+#   2) worker array writes disjoint time chunks in parallel
+#   3) finalize metadata + QA plots
 
 set -euo pipefail
 
-# User-configurable settings
-START_DATE="2000-01-01"
-END_DATE="2024-12-31"
-BASE_PATH="/scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_regrid"
-OUTPUT_ZARR="/scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_regrid_interpolated/modis_interp_5d.zarr"
-MAX_INTERPOLATION_DAYS="5"
-BUFFER_DAYS=""
-XY_CHUNK_SIZE="512"
-TIME_CHUNK_SIZE="16"
-NUM_WORKERS="32"
-OVERWRITE_ZARR="1"
-DRY_RUN_CHUNK_PLAN="0"
+VH_ZARR="/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_500m_full.zarr"
+VV_ZARR="/scratch/users/trobinet/long_lfmc/trent_datasets/sar/sar_500m_full_vv.zarr"
+OUTPUT_ZARR="/scratch/users/trobinet/long_lfmc/final_lfmc/sar/sar_all_vars.zarr"
+COORD_DIR="/scratch/users/trobinet/long_lfmc/final_lfmc/sar/sar_merge_queue_coord"
+TIME_BLOCK_DAYS="16"
+NUM_WORKERS="16"
+OVERWRITE_OUT="1"
+MAKE_QA_PLOTS="1"
+QA_PLOT_SEED="42"
+QA_PLOT_BASE_DIR="/scratch/users/trobinet/long_lfmc/final_lfmc/sar/qc_plots"
+MAX_CLAIMS=""
 
 if [[ "${NUM_WORKERS}" -lt 1 ]]; then
     echo "NUM_WORKERS must be >= 1"
@@ -27,20 +26,19 @@ fi
 mkdir -p ./logs
 
 common_export=(
-    "START_DATE=${START_DATE}"
-    "END_DATE=${END_DATE}"
-    "BASE_PATH=${BASE_PATH}"
+    "VH_ZARR=${VH_ZARR}"
+    "VV_ZARR=${VV_ZARR}"
     "OUTPUT_ZARR=${OUTPUT_ZARR}"
-    "MAX_INTERPOLATION_DAYS=${MAX_INTERPOLATION_DAYS}"
-    "XY_CHUNK_SIZE=${XY_CHUNK_SIZE}"
-    "TIME_CHUNK_SIZE=${TIME_CHUNK_SIZE}"
-    "NUM_WORKERS=${NUM_WORKERS}"
-    "OVERWRITE_ZARR=${OVERWRITE_ZARR}"
-    "DRY_RUN_CHUNK_PLAN=${DRY_RUN_CHUNK_PLAN}"
+    "COORD_DIR=${COORD_DIR}"
+    "TIME_BLOCK_DAYS=${TIME_BLOCK_DAYS}"
+    "OVERWRITE_OUT=${OVERWRITE_OUT}"
+    "MAKE_QA_PLOTS=${MAKE_QA_PLOTS}"
+    "QA_PLOT_SEED=${QA_PLOT_SEED}"
+    "QA_PLOT_BASE_DIR=${QA_PLOT_BASE_DIR}"
 )
 
-if [[ -n "${BUFFER_DAYS}" ]]; then
-    common_export+=("BUFFER_DAYS=${BUFFER_DAYS}")
+if [[ -n "${MAX_CLAIMS}" ]]; then
+    common_export+=("MAX_CLAIMS=${MAX_CLAIMS}")
 fi
 
 join_export() {
@@ -66,13 +64,8 @@ join_export() {
 echo "Submitting init job"
 init_job_id=$(sbatch --parsable \
     --export="$(join_export init)" \
-    run_interpolate_new.sh)
+    run_sar_merge_to_zarr_parallel.sh)
 echo "init_job_id=${init_job_id}"
-
-if [[ "${DRY_RUN_CHUNK_PLAN}" == "1" ]]; then
-    echo "DRY_RUN_CHUNK_PLAN=1, not submitting worker/finalize jobs."
-    exit 0
-fi
 
 array_max=$((NUM_WORKERS - 1))
 echo "Submitting worker array: 0-${array_max}"
@@ -80,14 +73,14 @@ worker_job_id=$(sbatch --parsable \
     --dependency="afterok:${init_job_id}" \
     --array="0-${array_max}" \
     --export="$(join_export worker)" \
-    run_interpolate_new.sh)
+    run_sar_merge_to_zarr_parallel.sh)
 echo "worker_job_id=${worker_job_id}"
 
 echo "Submitting finalize job"
 finalize_job_id=$(sbatch --parsable \
     --dependency="afterok:${worker_job_id}" \
     --export="$(join_export finalize)" \
-    run_interpolate_new.sh)
+    run_sar_merge_to_zarr_parallel.sh)
 echo "finalize_job_id=${finalize_job_id}"
 
 echo "Submitted workflow:"

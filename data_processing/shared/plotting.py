@@ -59,7 +59,8 @@ def plot_from_xarray(
     load_type, type_obj, var,
     proj_in, proj_out,
     fname, cmap='rainbow',
-    extent=None
+    extent=None,
+    title=None,
 ):
     # --- load ---
     if load_type == 'fname':
@@ -153,6 +154,8 @@ def plot_from_xarray(
     # --- decorations ---
     ax.add_feature(cfeature.COASTLINE, linewidth=0.15)
     ax.add_feature(cfeature.STATES, linewidth=0.10)
+    if title is not None:
+        ax.set_title(title)
 
     # --- save ---
     plt.savefig(fname, dpi=300, bbox_inches='tight')
@@ -267,6 +270,66 @@ def plot_timeseries(times,vals,xlabel,ylabel,save_name,title=None,time_bound=Non
         plt.title(title)
     plt.savefig(save_name)
     plt.close()
+
+
+def choose_random_valid_time_index_stacked(da_time_yx, rng, sample_stride=256):
+    """
+    Choose a random time index with at least one finite value using a sparse
+    spatial sample for speed.
+    """
+    sample = da_time_yx
+    if "y" in sample.dims and "x" in sample.dims:
+        sample = sample.isel(y=slice(None, None, sample_stride),
+                             x=slice(None, None, sample_stride))
+        valid_any = sample.notnull().any(dim=("y", "x")).compute().values
+    else:
+        valid_any = sample.notnull().any().compute().values
+    idx = np.flatnonzero(valid_any)
+    if len(idx) == 0:
+        return None
+    return int(rng.choice(idx))
+
+
+def save_qc_map_from_dataarray(
+    da2d,
+    out_path,
+    title,
+    colorbar_label=None,
+    cmap='viridis',
+    downsample_stride=8,
+    dpi=150,
+):
+    """
+    Save a quick 2D QC map from an xarray DataArray. If lon/lat coords exist and
+    are 2D, use pcolormesh; otherwise fall back to imshow.
+    """
+    plot_da = da2d
+    if "y" in da2d.dims and "x" in da2d.dims and downsample_stride and downsample_stride > 1:
+        plot_da = da2d.isel(y=slice(None, None, downsample_stride),
+                            x=slice(None, None, downsample_stride))
+    plot_da = plot_da.load()
+
+    fig, ax = plt.subplots(figsize=(8, 6), constrained_layout=True)
+    if ("lon" in plot_da.coords and "lat" in plot_da.coords and
+            getattr(plot_da["lon"], "ndim", 0) == 2 and getattr(plot_da["lat"], "ndim", 0) == 2):
+        mesh = ax.pcolormesh(
+            plot_da["lon"].values,
+            plot_da["lat"].values,
+            plot_da.values,
+            shading="auto",
+            cmap=cmap,
+        )
+        ax.set_xlabel("Longitude")
+        ax.set_ylabel("Latitude")
+    else:
+        mesh = ax.imshow(plot_da.values, origin="lower", cmap=cmap, aspect="auto")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+
+    fig.colorbar(mesh, ax=ax, shrink=0.85, label=colorbar_label)
+    ax.set_title(title)
+    plt.savefig(out_path, dpi=dpi, bbox_inches='tight')
+    plt.close(fig)
 
 
 def plot_interpolation_diagnostic_timeseries(

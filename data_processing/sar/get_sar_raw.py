@@ -51,8 +51,18 @@ def process_range(
     bounding_box,
     target_grid_path,
     out_dir,
-    scratch_dir
+    scratch_dir,
+    polarization="VV",
+    out_var_name=None,
+    skip_existing=False,
 ):
+    polarization = polarization.upper()
+    if polarization not in {"VV", "VH"}:
+        raise ValueError(f"Unsupported polarization: {polarization}")
+    if out_var_name is None:
+        out_var_name = f"{polarization.lower()}_backscatter"
+    tif_suffix = f"_{polarization}.tif"
+
     # localize start and end to pacific time; then get us utc version
     start_date_pac = start_date.tz_localize('America/Los_Angeles')
     end_date_pac = end_date.tz_localize('America/Los_Angeles')
@@ -62,10 +72,10 @@ def process_range(
     tgt_grid = xr.open_dataset(target_grid_path)
     for d,date_utc in enumerate(days_utc):
         print(f'Processing {date_utc.strftime("%Y-%m-%d")}...')
-        out_ds = tgt_grid.rename({'random_vals':'vv_backscatter'})
+        out_ds = tgt_grid.rename({'random_vals': out_var_name})
         #out_ds = out_ds.expand_dims(time=days_utc)
-        out_ds['vv_backscatter'] = xr.full_like(
-            out_ds['vv_backscatter'],
+        out_ds[out_var_name] = xr.full_like(
+            out_ds[out_var_name],
             fill_value=np.nan
         )
         # Implement the processing logic for each date here
@@ -73,6 +83,9 @@ def process_range(
             out_dir,
             f's1_{date_utc.strftime("%Y%m%d")}.nc'
         )
+        if skip_existing and os.path.exists(out_path):
+            print(f"Skipping existing daily file: {out_path}")
+            continue
         date_utc_iso = date_utc.strftime('%Y-%m-%dT%H:%M:%SZ')
         date_utc_iso_end = (date_utc + pd.Timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
         lon_min, lat_min, lon_max, lat_max = bounding_box
@@ -86,7 +99,7 @@ def process_range(
                     processingLevel="RTC",
                     #beamMode="IW",
                     #polarization="VH",
-                    polarization="VV",
+                    polarization=polarization,
                     flightDirection="DESCENDING",
                     start=date_utc_iso,
                     end=date_utc_iso_end,
@@ -109,7 +122,7 @@ def process_range(
             #    None,
             #)
             this_vh_tif = next(
-                (u for u in this_urls if u.endswith("_VV.tif")),
+                (u for u in this_urls if u.endswith(tif_suffix)),
                 None,
             )
             this_mask_tif = next(
@@ -170,7 +183,7 @@ def process_range(
         #    glob.glob(os.path.join(scratch_dir, "*_VH.tif"))
         #)
         vh_files = sorted(
-            glob.glob(os.path.join(scratch_dir, "*_VV.tif"))
+            glob.glob(os.path.join(scratch_dir, f"*{tif_suffix}"))
         )
         # group by track
         by_track = defaultdict(list)
@@ -199,7 +212,7 @@ def process_range(
             this_mask_files = []
             for f in this_vh_files:
                 #mask_file = f.replace('_VH.tif', '_mask.tif')
-                mask_file = f.replace('_VV.tif', '_mask.tif')
+                mask_file = f.replace(tif_suffix, '_mask.tif')
                 if not os.path.exists(mask_file):
                     raise FileNotFoundError(f'Mask file not found: {mask_file}')
                 this_mask_files.append(mask_file)
@@ -304,10 +317,10 @@ def process_range(
             # add to out_ds only where valid
             # Boolean mask of valid data
             valid = (np.isfinite(vh_mean_db))
-            out_ds['vv_backscatter'] = xr.where(
+            out_ds[out_var_name] = xr.where(
                 valid,
                 vh_mean_db,
-                out_ds['vv_backscatter']
+                out_ds[out_var_name]
             )
             #plotting.plot_from_xarray(
             #    'ds',
@@ -320,7 +333,7 @@ def process_range(
             #)
         # save the daily .nc
         # but only save if not all empty
-        valid = out_ds['vv_backscatter'].notnull().any()
+        valid = out_ds[out_var_name].notnull().any()
         if valid:
             comp = dict(zlib=True, complevel=4)
             encoding = {
@@ -358,6 +371,30 @@ def main():
         required=True,
         help='Job number for processing'
     )
+    p.add_argument(
+        '--polarization',
+        type=str,
+        default='VV',
+        choices=['VV', 'VH', 'vv', 'vh'],
+        help='Polarization to download/process (VV or VH)'
+    )
+    p.add_argument(
+        '--out_dir',
+        type=str,
+        default=None,
+        help='Output directory for daily regridded SAR NetCDF files'
+    )
+    p.add_argument(
+        '--out_var_name',
+        type=str,
+        default=None,
+        help='Output variable name in daily NetCDF files (default derived from polarization)'
+    )
+    p.add_argument(
+        '--skip_existing',
+        action='store_true',
+        help='Skip writing days whose output NetCDF already exists'
+    )
     args = p.parse_args()
     bounding_box = [
         -130.0,23,-96.5,52.0
@@ -365,7 +402,9 @@ def main():
     target_grid_path = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/grid/epsg5070_500m_westUS_grid.nc4'
     start_date = pd.Timestamp(args.start_date)
     end_date = pd.Timestamp(args.end_date)
-    out_dir = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily_vv/'
+    pol = args.polarization.upper()
+    out_var_name = args.out_var_name or f'{pol.lower()}_backscatter'
+    out_dir = args.out_dir or f'/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily_{pol.lower()}/'
     scratch_dir = f'/scratch/users/trobinet/long_lfmc/trent_datasets/sar/temp/{args.job_num}/'
     # remove the temp dir if it exists
     shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -377,7 +416,10 @@ def main():
         bounding_box,
         target_grid_path,
         out_dir,
-        scratch_dir
+        scratch_dir,
+        polarization=pol,
+        out_var_name=out_var_name,
+        skip_existing=args.skip_existing,
     )
 
 if __name__ == "__main__":

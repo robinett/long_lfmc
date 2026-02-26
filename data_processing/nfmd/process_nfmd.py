@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import copy
 import xarray as xr
+import rioxarray
 from pyproj import Transformer
 import re
 import os
@@ -40,6 +41,7 @@ def process(
     nfmd_loc_fname,
     nlcd_fname,
     species_to_landcover_name,
+    valid_grid_fname,
     start,
     end,
     bound_box,
@@ -133,18 +135,35 @@ def process(
     nlcd = xr.open_zarr(nlcd_fname)
     tfm = Transformer.from_crs("EPSG:4326",nlcd.rio.crs,always_xy=True)
     tfm_back = Transformer.from_crs(nlcd.rio.crs,"EPSG:4326",always_xy=True)
-    # get rid of any measurements outside the bounds of our target grid
+    valid_grid = xr.open_dataset(valid_grid_fname)
+    valid_grid_vars = list(valid_grid.data_vars)
+    if len(valid_grid_vars) != 1:
+        raise ValueError(
+            f'Expected exactly one data variable in valid grid, found: {valid_grid_vars}'
+        )
+    valid_grid_var = valid_grid_vars[0]
+    valid_grid_da = valid_grid[valid_grid_var]
+    valid_x_min = valid_grid['x'].min().values
+    valid_x_max = valid_grid['x'].max().values
+    valid_y_min = valid_grid['y'].min().values
+    valid_y_max = valid_grid['y'].max().values
+    valid_tfm = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
+    # get rid of any measurements outside the valid area of our target grid
     for i,row in loc_data.iterrows():
         this_lat = row['Latitude']
         this_lon = row['Longitude']
-        this_x,this_y = tfm.transform(this_lon,this_lat)
+        this_x,this_y = valid_tfm.transform(this_lon,this_lat)
         if (
-            this_x < nlcd['x'].min().values or
-            this_x > nlcd['x'].max().values or
-            this_y < nlcd['y'].min().values or
-            this_y > nlcd['y'].max().values
+            this_x < valid_x_min or
+            this_x > valid_x_max or
+            this_y < valid_y_min or
+            this_y > valid_y_max
         ):
             # remove all entries from orig with this site id
+            orig = orig[orig['site_id'] != i]
+            continue
+        nearest_val = valid_grid_da.sel(x=this_x, y=this_y, method='nearest').values
+        if np.isnan(nearest_val):
             orig = orig[orig['site_id'] != i]
     # for each site, go through and eliminate all times outside of relevant
     # time period

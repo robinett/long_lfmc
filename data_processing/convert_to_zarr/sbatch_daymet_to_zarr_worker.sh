@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH -J daymet_to_zarr_workers
 #SBATCH -p serc
-#SBATCH -t 24:00:00
+#SBATCH -t 48:00:00
 #SBATCH --mem=128G
 #SBATCH -c 8
 #SBATCH --mail-type=BEGIN,END,FAIL

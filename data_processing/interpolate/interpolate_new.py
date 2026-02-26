@@ -466,6 +466,7 @@ def build_output_template(
     x_dim,
     target_dates,
     xy_chunk_size,
+    time_chunk_size,
     overwrite=False,
 ):
     output_zarr = Path(output_zarr)
@@ -485,7 +486,11 @@ def build_output_template(
     with xr.open_dataset(ref_file, engine="netcdf4") as ref_ds:
         y_size = ref_ds.sizes[y_dim]
         x_size = ref_ds.sizes[x_dim]
-        chunks = (1, min(xy_chunk_size, y_size), min(xy_chunk_size, x_size))
+        chunks = (
+            min(time_chunk_size, len(target_dates)),
+            min(xy_chunk_size, y_size),
+            min(xy_chunk_size, x_size),
+        )
         coords = {
             "time": ("time", pd.DatetimeIndex(target_dates)),
             y_dim: ref_ds[y_dim],
@@ -630,6 +635,7 @@ def process_interpolation_to_zarr(
     max_interpolation_days,
     buffer_days=None,
     xy_chunk_size=128,
+    time_chunk_size=1,
     overwrite=False,
     mode="all",
     worker_id=0,
@@ -669,6 +675,7 @@ def process_interpolation_to_zarr(
     print(f"buffer_days={buffer_days}, max_interpolation_days={max_interpolation_days}")
     print(f"proc dates={len(proc_dates)} (files present={len(proc_file_map)})")
     print(f"spatial dims: {y_dim}={y_size}, {x_dim}={x_size}")
+    print(f"output chunking: time={time_chunk_size}, xy={xy_chunk_size}")
     print(f"interp vars ({len(interp_vars)}): {interp_vars}")
     total_chunks = print_chunk_plan(y_size, x_size, xy_chunk_size, num_workers)
     print(f"mode={mode}")
@@ -690,6 +697,7 @@ def process_interpolation_to_zarr(
             x_dim=x_dim,
             target_dates=target_dates,
             xy_chunk_size=xy_chunk_size,
+            time_chunk_size=time_chunk_size,
             overwrite=overwrite,
         )
         print(f"initialized zarr store: {output_zarr}")
@@ -943,6 +951,12 @@ def parse_args():
         help="Spatial chunk size for processing and zarr writing.",
     )
     parser.add_argument(
+        "--time_chunk_size",
+        type=int,
+        default=1,
+        help="Time chunk size for output zarr arrays (reduces file count when >1).",
+    )
+    parser.add_argument(
         "--overwrite_zarr",
         action="store_true",
         help="Overwrite output zarr store if it exists.",
@@ -1110,6 +1124,7 @@ def main():
         max_interpolation_days=args.max_interpolation_days,
         buffer_days=args.buffer_days,
         xy_chunk_size=args.xy_chunk_size,
+        time_chunk_size=args.time_chunk_size,
         overwrite=args.overwrite_zarr,
         mode=args.mode,
         worker_id=args.worker_id,

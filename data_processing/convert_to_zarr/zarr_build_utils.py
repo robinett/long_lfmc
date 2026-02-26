@@ -269,6 +269,44 @@ def append_time(arr: xr.DataArray, out: Path):
         zarr_format=2,
     )
 
+def write_time_region_data(arr: xr.DataArray, out: Path, time_start: int):
+    """
+    Write only the main `data` variable into a preinitialized store over a
+    disjoint time region. This avoids rewriting shared coords/metadata.
+    """
+    time_stop = time_start + int(arr.sizes["time"])
+    ds = xr.Dataset(
+        {
+            "data": (
+                ("time", "variable", "y", "x"),
+                arr.data,
+            )
+        }
+    )
+    ds.to_zarr(
+        out,
+        mode="r+",
+        region={"time": slice(time_start, time_stop)},
+        consolidated=False,
+        zarr_format=2,
+    )
+
+def resize_time_axis_data_array(out: Path, total_time: int):
+    """
+    Resize the `data` array in an xarray-produced zarr store from the initial
+    first-batch time length to the full planned time length so workers can
+    write disjoint time regions in parallel.
+    """
+    import zarr
+    root = zarr.open_group(str(out), mode="a")
+    data_arr = root["data"]
+    shape = tuple(data_arr.shape)
+    if len(shape) != 4:
+        raise ValueError(f"Expected 4D data array, got shape={shape}")
+    if shape[0] == total_time:
+        return
+    data_arr.resize((int(total_time), shape[1], shape[2], shape[3]))
+
 def consolidate(out: Path):
     import zarr
     zarr.consolidate_metadata(str(out))
