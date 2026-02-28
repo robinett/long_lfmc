@@ -3,6 +3,7 @@ import sys
 import copy
 import json
 import shutil
+import random
 import tqdm
 import numpy as np
 import pandas as pd
@@ -223,6 +224,41 @@ def get_args():
         nargs='+',
         default=None,
         help='Manual task weights (must match num_tasks)',
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=42,
+        help='Global random seed for model initialization and training randomness',
+    )
+    parser.add_argument(
+        '--split_seed',
+        type=int,
+        default=42,
+        help='Seed for fold/site split generation (keep fixed across ensemble members)',
+    )
+    parser.add_argument(
+        '--batch_seed',
+        type=int,
+        default=None,
+        help='Seed for stratified batch sampling (defaults to --seed when omitted)',
+    )
+    parser.add_argument(
+        '--fold_info_in',
+        type=str,
+        default=None,
+        help='Optional path to an existing fold_info.json to reuse exact folds',
+    )
+    parser.add_argument(
+        '--run_tag',
+        type=str,
+        default=None,
+        help='Optional suffix appended to the model output directory name (e.g., seed000)',
+    )
+    parser.add_argument(
+        '--overwrite',
+        action='store_true',
+        help='If set, delete an existing output directory before training',
     )
     args = parser.parse_args()
     return args
@@ -1084,10 +1120,14 @@ def train_fold_k(
     num_tasks,
     task_weight_type,
     grad_norm,
+    split_seed=None,
+    batch_seed=None,
     plot_distributions=False
 ):
     this_fold_num = fold_test_locs[0]
     this_locs = np.array(fold_test_locs[1])
+    this_split_seed = None if split_seed is None else int(split_seed) + int(this_fold_num)
+    this_batch_seed = None if batch_seed is None else int(batch_seed) + int(this_fold_num)
     fold_save_dir = os.path.join(
         save_dir,
         f'fold_{this_fold_num}'
@@ -1127,6 +1167,7 @@ def train_fold_k(
         desired_insitu_sample_size=int(num_val_obs_insitu),
         desired_vv_sample_size=int(num_val_obs_vv),
         desired_vh_sample_size=int(num_val_obs_vh),
+        seed=this_split_seed,
         stratifier=remaining_stratifier
     )
     val_locs = np.array(val_locs)
@@ -1330,6 +1371,7 @@ def train_fold_k(
         labels=train_joint_stratifier,
         batch_size=batch_size,
         shuffle=True,
+        seed=this_batch_seed,
     )
     train_loader = DataLoader(
         train_dataset,
@@ -1850,11 +1892,37 @@ def train_fold_k(
     )
 
 
+def _fold_locs_to_jsonable(fold_locs):
+    return {
+        str(int(fold)): [[float(lat), float(lon)] for (lat, lon) in locs]
+        for fold, locs in fold_locs.items()
+    }
+
+
+def _load_fold_locs_json(path):
+    with open(path, 'r') as f:
+        raw = json.load(f)
+    if isinstance(raw, dict) and 'fold_locs' in raw:
+        raw = raw['fold_locs']
+    fold_locs = {}
+    for fold_key, locs in raw.items():
+        fold_num = int(fold_key)
+        fold_locs[fold_num] = [tuple(loc) for loc in locs]
+    return dict(sorted(fold_locs.items(), key=lambda kv: int(kv[0])))
+
+
 def main():
-    torch.manual_seed(42)
-    np.random.seed(42)
     # load passed hyperparameter settings
     args = get_args()
+    seed = int(args.seed)
+    split_seed = None if args.split_seed is None else int(args.split_seed)
+    batch_seed = int(args.batch_seed) if args.batch_seed is not None else seed
+    random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    print(f'Using seeds: seed={seed}, split_seed={split_seed}, batch_seed={batch_seed}')
     # configs
     # directories, etc.
     input_data_dir = args.input_data_dir
@@ -1929,48 +1997,60 @@ def main():
         f'_dflong{long_dim_feedforward}_outlong{long_out_dim}'
         f'_basic'
     )
+    if args.run_tag is not None and len(args.run_tag) > 0:
+        this_model_name = f'{this_model_name}_{args.run_tag}'
     # set up the save directories
     full_save_dir = os.path.join(save_dir, this_model_name)
     if os.path.exists(full_save_dir):
-        shutil.rmtree(full_save_dir)
+        if args.overwrite:
+            shutil.rmtree(full_save_dir)
+        else:
+            raise FileExistsError(
+                f'Output directory already exists: {full_save_dir}. '
+                'Pass --overwrite to replace it, or use --run_tag to create a unique directory.'
+            )
     os.makedirs(full_save_dir)
     n_folds = 10
-    desired_insitu_obs_per_fold = num_insitu_obs / n_folds
-    desired_vv_obs_per_fold = num_vv_obs / n_folds
-    desired_vh_obs_per_fold = num_vh_obs / n_folds
-    fold_locs = {}
-    used_sites = []
-    for fold in range(n_folds):
-        print(f'Getting locations for fold {fold+1}/{n_folds}')
-        this_locs = create_site_split(
-            info,
-            desired_insitu_sample_size=int(desired_insitu_obs_per_fold),
-            desired_vv_sample_size=int(desired_vv_obs_per_fold),
-            desired_vh_sample_size=int(desired_vh_obs_per_fold),
-            used_sites=used_sites,
-            stratifier=stratifier
-        )
-        used_sites.extend(this_locs)
-        fold_locs[fold + 1] = this_locs
-    #for fold in fold_locs:
-    #    print(f'Fold {fold} has {len(fold_locs[fold])} locations')
-    #print(fold_locs)
-    # if there is any fold with zero locations, raise an error
-    # we are allowed to get rid of the last fold if it has no locations
-    remove_last = False
-    for fold in fold_locs:
-        if len(fold_locs[fold]) == 0 and fold != n_folds:
-            raise ValueError(f'Fold {fold} has no locations')
-        elif len(fold_locs[fold]) == 0 and fold == n_folds:
-            print(f'Fold {fold} has no locations, removing')
-            remove_last = True
-    if remove_last:    
-        del fold_locs[fold]
-    n_folds = len(fold_locs)
-    print(f'Using {n_folds} folds for training')
-    # save this fold info
+    if args.fold_info_in:
+        print(f'Loading fold definitions from {args.fold_info_in}')
+        fold_locs = _load_fold_locs_json(args.fold_info_in)
+        n_folds = len(fold_locs)
+        print(f'Using {n_folds} precomputed folds for training')
+    else:
+        desired_insitu_obs_per_fold = num_insitu_obs / n_folds
+        desired_vv_obs_per_fold = num_vv_obs / n_folds
+        desired_vh_obs_per_fold = num_vh_obs / n_folds
+        fold_locs = {}
+        used_sites = []
+        for fold in range(n_folds):
+            print(f'Getting locations for fold {fold+1}/{n_folds}')
+            this_locs = create_site_split(
+                info,
+                desired_insitu_sample_size=int(desired_insitu_obs_per_fold),
+                desired_vv_sample_size=int(desired_vv_obs_per_fold),
+                desired_vh_sample_size=int(desired_vh_obs_per_fold),
+                seed=split_seed,
+                used_sites=used_sites,
+                stratifier=stratifier
+            )
+            used_sites.extend(this_locs)
+            fold_locs[fold + 1] = this_locs
+        # if there is any fold with zero locations, raise an error
+        # we are allowed to get rid of the last fold if it has no locations
+        remove_last = False
+        for fold in fold_locs:
+            if len(fold_locs[fold]) == 0 and fold != n_folds:
+                raise ValueError(f'Fold {fold} has no locations')
+            elif len(fold_locs[fold]) == 0 and fold == n_folds:
+                print(f'Fold {fold} has no locations, removing')
+                remove_last = True
+        if remove_last:
+            del fold_locs[fold]
+        n_folds = len(fold_locs)
+        print(f'Using {n_folds} folds for training')
+    # save fold info actually used for this run
     with open(os.path.join(full_save_dir, 'fold_info.json'), 'w') as f:
-        json.dump(fold_locs, f)
+        json.dump(_fold_locs_to_jsonable(fold_locs), f)
     # train this fold
     for fold, locs in enumerate(fold_locs.items()):
         print(f'Training fold {fold+1}/{n_folds} with {len(locs[1])} locations held out for testing')
@@ -2055,6 +2135,8 @@ def main():
             num_tasks,
             task_weight_type,
             grad_norm,
+            split_seed=split_seed,
+            batch_seed=batch_seed,
         )
     # one final version of the model trained on all the data
     print('Training final model on all data')
@@ -2139,6 +2221,8 @@ def main():
         num_tasks,
         task_weight_type,
         grad_norm,
+        split_seed=split_seed,
+        batch_seed=batch_seed,
     )
 
             
