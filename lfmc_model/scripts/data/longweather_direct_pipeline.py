@@ -431,10 +431,14 @@ def _choose_target_per_row(df: pd.DataFrame, target_cols: Sequence[str]) -> pd.D
 def _source_encoding_for_target(target_name: str) -> Tuple[int, str]:
     if target_name == "lfmc":
         return 0, "nfmd"
-    if target_name == "VV":
+    if target_name == "vv":
         return 1, "vv"
-    if target_name == "vh_backscatter":
-        return 2, "vh_backscatter"
+    if target_name == "vh":
+        return 2, "vh"
+    if target_name == 'vv_over_vh':
+        return 1, "vv_over_vh"
+    if target_name == 'vv_minus_vh':
+        return 1, "vv_minus_vh"
     return 99, str(target_name)
 
 

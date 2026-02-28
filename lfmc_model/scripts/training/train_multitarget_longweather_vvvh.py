@@ -23,10 +23,10 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..
 sys.path.append(os.path.join(project_root,'lfmc_model','models','transformer'))
 sys.path.append(os.path.join(project_root,'lfmc_model','utils'))
 
-from transformer_model import LFMCTransformer
-from transformer_model_multitask import LFMCTransformer as LFMCTransformerMultiTask
+from transformer_multitask import LFMCTransformer
+from transformer_multitask_longclimate import LFMCTransformer as LFMCTransformerMultiTask
 #from transformer_multitask_longclimate import LFMCTransformer as LFMCTransformerMultiTaskLongClimate
-from transformer_multitask_longclimate_uncertainty import LFMCTransformer as LFMCTransformerMultiTaskLongClimate
+#from transformer_multitask_longclimate_uncertainty import LFMCTransformer as LFMCTransformerMultiTaskLongClimate
 import plotting
 
 import warnings
@@ -1237,6 +1237,10 @@ def train_fold_k(
     train_static_std = np.nanstd(train_static_data, axis=(0,1))
     lfmc_mean = np.nanmean(train_y[train_source == 0])
     lfmc_std = np.nanstd(train_y[train_source == 0])
+    print(vv_train)
+    print(train_y[train_source == 1])
+    print(np.unique(train_source))
+    sys.exit()
     if vv_train > 0:
         vv_mean = np.nanmean(train_y[train_source == 1])
         vv_std = np.nanstd(train_y[train_source == 1])
@@ -1963,7 +1967,8 @@ def main():
                 raise ValueError(f'Data array {i} contains NaNs!')
         elif type(data) is pd.DataFrame:
             if data.isnull().values.any():
-                raise ValueError(f'DataFrame {i} contains NaNs!')
+                print(data[data.isnull().any(axis=1)])
+                print(f'WARNING: DataFrame {i} contains NaNs!')
         elif type(data) is torch.Tensor:
             if torch.isnan(data).any():
                 raise ValueError(f'Tensor {i} contains NaNs!')
@@ -2055,7 +2060,7 @@ def main():
     for fold, locs in enumerate(fold_locs.items()):
         print(f'Training fold {fold+1}/{n_folds} with {len(locs[1])} locations held out for testing')
         # build the model
-        model = LFMCTransformerMultiTaskLongClimate(
+        model = LFMCTransformerMultiTask(
             short_input_dim=short_input_dim,
             static_input_dim=static_input_dim,
             long_input_dim=long_input_dim,
@@ -2140,7 +2145,7 @@ def main():
         )
     # one final version of the model trained on all the data
     print('Training final model on all data')
-    model = LFMCTransformerMultiTaskLongClimate(
+    model = LFMCTransformerMultiTask(
         short_input_dim=short_input_dim,
         static_input_dim=static_input_dim,
         long_input_dim=long_input_dim,

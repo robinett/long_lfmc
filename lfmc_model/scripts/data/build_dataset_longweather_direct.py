@@ -37,7 +37,7 @@ def main():
         "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/indexes/"
         "sample_index_longweather_2000_2024_lfmc.parquet"
     )
-    default_save_dir = "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc"
+    default_save_dir = "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/testing"
     parser = argparse.ArgumentParser(
         description=(
             "Build direct longweather tensors from a single sample-index file."

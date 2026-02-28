@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 #SBATCH --partition=serc
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=24
-#SBATCH --mem=64G
-#SBATCH --array=0-5
-#SBATCH --output=./logs/build_dataset_longweather_%A_%a.out
-#SBATCH --error=./logs/build_dataset_longweather_%A_%a.err
+#SBATCH --mem=512G
+#SBATCH --array=0-4
+#SBATCH --output=/home/users/trobinet/long_lfmc/lfmc_model/scripts/data/logs/build_dataset_longweather_%A_%a.out
+#SBATCH --error=/home/users/trobinet/long_lfmc/lfmc_model/scripts/data/logs/build_dataset_longweather_%A_%a.err
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=trobinet@stanford.edu
 
 set -euo pipefail
 
 sample_index_paths=(
-    "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/indexes/sample_index_longweather_2000_2024_lfmc.parquet"
+    #"/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/indexes/sample_index_longweather_2000_2024_lfmc.parquet"
     "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/indexes/sample_index_longweather_2000_2024_lfmc_vh.parquet"
     "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/indexes/sample_index_longweather_2000_2024_lfmc_vv.parquet"
     "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/indexes/sample_index_longweather_2000_2024_lfmc_vh_vv.parquet"
@@ -20,7 +20,7 @@ sample_index_paths=(
     "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/indexes/sample_index_longweather_2000_2024_lfmc_vv_over_vh.parquet"
 )
 save_dirs=(
-    "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc"
+    #"/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc"
     "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc_vh"
     "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc_vv"
     "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc_vh_vv"
@@ -28,9 +28,9 @@ save_dirs=(
     "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc_vv_over_vh"
 )
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+script_dir="/home/users/trobinet/long_lfmc/lfmc_model/scripts/data"
 cd "${script_dir}"
-mkdir -p ./logs
+mkdir -p /home/users/trobinet/long_lfmc/lfmc_model/scripts/data/logs
 
 source /home/users/trobinet/uv_activations/activate_lfmc_model_py312.sh
 
@@ -52,4 +52,4 @@ echo "Running task ${idx} / $(( ${#sample_index_paths[@]} - 1 ))"
 echo "sample_index_path=${sample_index_path}"
 echo "save_dir=${save_dir}"
 
-python3 -u build_dataset_longweather_direct.py "${sample_index_path}" "${save_dir}"
+python3 -u /home/users/trobinet/long_lfmc/lfmc_model/scripts/data/build_dataset_longweather_direct.py "${sample_index_path}" "${save_dir}"

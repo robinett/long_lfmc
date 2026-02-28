@@ -24,9 +24,9 @@
 #    --task_weight_type 'manual' \
 #    --manual_task_weights 5.0 1.0
 
-python3 -u train_multitarget_vh.py \
-    --input_data_dir '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/nomodis' \
-    --save_dir '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/testing' \
+python3 -u train_multitarget_longweather_vvvh.py \
+    --input_data_dir '/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc_vh_vv' \
+    --save_dir '/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/testing' \
     --batch_size 128 \
     --lr 1e-4 \
     --val_split 0.15 \
@@ -36,7 +36,13 @@ python3 -u train_multitarget_vh.py \
     --num_layers 2 \
     --dim_feedforward 128 \
     --dropout 0.15 \
-    --num_tasks 1 \
+    --long_d_model 128 \
+    --long_nhead 4 \
+    --long_num_layers 3 \
+    --long_dim_feedforward 512 \
+    --long_out_dim 32 \
+    --num_tasks 2 \
     --task_weight_type 'manual' \
-    --manual_task_weights 1.0 1.0
+    --manual_task_weights 5.0 1.0 1.0 \
+    --overwrite
  
