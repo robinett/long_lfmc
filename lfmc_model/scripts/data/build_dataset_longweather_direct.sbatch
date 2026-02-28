@@ -4,8 +4,8 @@
 #SBATCH --cpus-per-task=24
 #SBATCH --mem=64G
 #SBATCH --array=0-5
-#SBATCH --output=logs/build_dataset_longweather_%A_%a.out
-#SBATCH --error=logs/build_dataset_longweather_%A_%a.err
+#SBATCH --output=./logs/build_dataset_longweather_%A_%a.out
+#SBATCH --error=./logs/build_dataset_longweather_%A_%a.err
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=trobinet@stanford.edu
 
@@ -30,7 +30,7 @@ save_dirs=(
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${script_dir}"
-mkdir -p logs
+mkdir -p ./logs
 
 source /home/users/trobinet/uv_activations/activate_lfmc_model_py312.sh
 
