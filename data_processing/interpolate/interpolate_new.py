@@ -337,7 +337,7 @@ def plot_interpolation_diagnostics(
     plot_path,
     map_plot_path=None,
     band_name=None,
-    n_points=3,
+    n_points=5,
     seed=0,
 ):
     repo_root = Path(__file__).resolve().parents[2]
@@ -389,48 +389,99 @@ def plot_interpolation_diagnostics(
             status_da = status_da.sel(time=target_dates)
 
         print(f"diagnostic band: {base_band}")
-        status_vals = status_da.values  # (time, y, x)
-        interp_vals = interp_da.values  # (time, y, x)
-
-        fill_any = np.any(status_vals == 1, axis=0)
-        candidate_flat = np.flatnonzero(fill_any.ravel())
-        if candidate_flat.size == 0:
-            raise ValueError(f"No pixels with interpolated values found for {base_band} in requested dates.")
-
-        n_select = min(n_points, candidate_flat.size)
         rng = np.random.default_rng(seed)
-        selected = rng.choice(candidate_flat, size=n_select, replace=False)
-        ys, xs = np.unravel_index(selected, fill_any.shape)
+        y_size = int(ds_zarr.sizes[y_dim])
+        x_size = int(ds_zarr.sizes[x_dim])
+        time_values = pd.DatetimeIndex(interp_da["time"].values)
+        n_time = len(time_values)
+        if n_time == 0:
+            raise ValueError("No time values available for diagnostics.")
 
-        original_series = np.full((len(target_dates), n_select), np.nan, dtype=np.float32)
-        all_dates, file_map = build_daily_file_map(base_path, target_dates[0].to_pydatetime(), target_dates[-1].to_pydatetime())
-        for t_i, dt in enumerate(all_dates):
-            path = file_map.get(pd.Timestamp(dt))
+        # Fast diagnostics: find a few points that actually have interpolation events,
+        # then plot only short windows around one event per point.
+        max_events = max(1, int(n_points))
+        window_radius = 30
+        offsets = np.arange(-window_radius, window_radius + 1, dtype=int)
+        window_len = len(offsets)
+        max_attempts = max(200, max_events * 250)
+
+        all_dates, file_map = build_daily_file_map(
+            base_path,
+            target_dates[0].to_pydatetime(),
+            target_dates[-1].to_pydatetime(),
+        )
+        _ = all_dates  # retained for interface parity
+
+        def _read_raw_point(ts, yi, xi):
+            path = file_map.get(pd.Timestamp(ts))
             if path is None:
-                continue
+                return np.nan
             with xr.open_dataset(path, engine="netcdf4") as ds_day:
-                arr = ds_day[base_band].values
-                original_series[t_i, :] = arr[ys, xs]
+                day_da = ds_day[base_band]
+                day_y_dim = next((d for d in ["y", "lat", "latitude"] if d in day_da.dims), None)
+                day_x_dim = next((d for d in ["x", "lon", "longitude"] if d in day_da.dims), None)
+                if day_y_dim is None or day_x_dim is None:
+                    raise ValueError(
+                        f"Could not infer spatial dims for {base_band} in {path}; dims={day_da.dims}"
+                    )
+                point = day_da.isel({day_y_dim: int(yi), day_x_dim: int(xi)}).values
+                return float(np.asarray(point).squeeze())
 
         point_labels = []
         original_list = []
         interp_list = []
         status_list = []
-        for i in range(n_select):
-            n_filled = int(np.sum(status_vals[:, ys[i], xs[i]] == 1))
-            point_labels.append(f"Point {i+1}: y={ys[i]}, x={xs[i]} ({n_filled} filled days)")
-            original_list.append(original_series[:, i])
-            interp_list.append(interp_vals[:, ys[i], xs[i]])
-            status_list.append(status_vals[:, ys[i], xs[i]])
+        chosen_points = set()
+        attempts = 0
+        while len(point_labels) < max_events and attempts < max_attempts:
+            attempts += 1
+            yi = int(rng.integers(0, y_size))
+            xi = int(rng.integers(0, x_size))
+            if (yi, xi) in chosen_points:
+                continue
+
+            point_status = status_da.isel({y_dim: yi, x_dim: xi}).values
+            event_indices = np.flatnonzero(point_status == 1)
+            if event_indices.size == 0:
+                continue
+
+            chosen_points.add((yi, xi))
+            event_idx = int(rng.choice(event_indices))
+            event_time = pd.Timestamp(time_values[event_idx])
+            point_interp = interp_da.isel({y_dim: yi, x_dim: xi}).values
+
+            point_original_window = np.full(window_len, np.nan, dtype=np.float32)
+            point_interp_window = np.full(window_len, np.nan, dtype=np.float32)
+            point_status_window = np.full(window_len, 2, dtype=np.uint8)
+
+            for j, off in enumerate(offsets):
+                t_idx = event_idx + int(off)
+                if t_idx < 0 or t_idx >= n_time:
+                    continue
+                ts = pd.Timestamp(time_values[t_idx])
+                point_interp_window[j] = float(point_interp[t_idx])
+                point_status_window[j] = int(point_status[t_idx])
+                point_original_window[j] = _read_raw_point(ts, yi, xi)
+
+            n_filled = int(event_indices.size)
+            point_labels.append(
+                f"Point {len(point_labels)+1}: y={yi}, x={xi}, event={event_time.date()} ({n_filled} filled days)"
+            )
+            original_list.append(point_original_window)
+            interp_list.append(point_interp_window)
+            status_list.append(point_status_window)
+
+        if not point_labels:
+            raise ValueError(f"No pixels with interpolated values found for {base_band} in requested dates.")
 
         plot_interpolation_diagnostic_timeseries(
-            times=target_dates.to_pydatetime(),
+            times=offsets,
             original_series_list=original_list,
             interpolated_series_list=interp_list,
             status_series_list=status_list,
             point_labels=point_labels,
             save_name=str(plot_path),
-            title=f"Interpolation diagnostic: {base_band} ({start_date} to {end_date})",
+            title=f"Interpolation diagnostic: {base_band} (event-centered ±{window_radius} days)",
         )
         print(f"saved diagnostic plot: {plot_path}")
 
@@ -1050,6 +1101,11 @@ def parse_args():
         help="Plot original vs interpolated time series for random pixels with interpolation.",
     )
     parser.add_argument(
+        "--plot-only",
+        action="store_true",
+        help="Generate diagnostic plots from an existing output zarr and exit (no interpolation writes).",
+    )
+    parser.add_argument(
         "--diagnostic_plot_path",
         type=str,
         default="/scratch/users/trobinet/long_lfmc/final_lfmc/modis/plots/interpolation_diagnostic.png",
@@ -1070,7 +1126,7 @@ def parse_args():
     parser.add_argument(
         "--diagnostic_n_points",
         type=int,
-        default=3,
+        default=5,
         help="Number of random interpolated pixels to plot in diagnostic output.",
     )
     parser.add_argument(
@@ -1102,7 +1158,7 @@ def main():
     if not args.start_date or not args.end_date:
         raise ValueError("start_date and end_date are required for interpolation output.")
 
-    if args.plot_interpolation_diagnostics:
+    if args.plot_interpolation_diagnostics or args.plot_only:
         plot_interpolation_diagnostics(
             start_date=args.start_date,
             end_date=args.end_date,

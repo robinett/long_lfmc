@@ -290,10 +290,21 @@ def process_range(
             #))
             # convert to our target grid for this day.
             #print('averaging up to target grid')
+            src_crs = vh_mosaic.rio.crs
+            if src_crs is None:
+                raise ValueError("vh_mosaic missing CRS before reproject_match")
+
             vh_mask = xr.where(
-                np.isfinite(vh_mosaic),1.0,0.0
-            ).astype('float32')
-            num = (vh_mosaic.fillna(0) * vh_mask).rio.reproject_match(
+                np.isfinite(vh_mosaic), 1.0, 0.0
+            ).astype("float32")
+            if vh_mask.rio.crs is None:
+                vh_mask = vh_mask.rio.write_crs(src_crs, inplace=False)
+
+            weighted = vh_mosaic.fillna(0) * vh_mask
+            if weighted.rio.crs is None:
+                weighted = weighted.rio.write_crs(src_crs, inplace=False)
+
+            num = weighted.rio.reproject_match(
                 out_ds,resampling = Resampling.average
             )
             num = num.where(num != np.finfo(np.float32).max)

@@ -29,6 +29,7 @@ NUM_WORKERS="${NUM_WORKERS:-1}"
 BUFFER_DAYS="${BUFFER_DAYS:-}"
 OVERWRITE_ZARR="${OVERWRITE_ZARR:-0}"
 DRY_RUN_CHUNK_PLAN="${DRY_RUN_CHUNK_PLAN:-0}"
+PLOT_ONLY="${PLOT_ONLY:-0}"
 
 WORKER_ID="${WORKER_ID:-0}"
 if [[ "${MODE}" == "worker" && -n "${SLURM_ARRAY_TASK_ID:-}" ]]; then
@@ -47,6 +48,7 @@ echo "NUM_WORKERS=${NUM_WORKERS}"
 echo "WORKER_ID=${WORKER_ID}"
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-none}"
 echo "SLURM_ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID:-none}"
+echo "PLOT_ONLY=${PLOT_ONLY}"
 
 cmd=(
     python3 -u interpolate_new.py
@@ -75,6 +77,10 @@ fi
 
 if [[ "${DRY_RUN_CHUNK_PLAN}" == "1" ]]; then
     cmd+=(--dry_run_chunk_plan)
+fi
+
+if [[ "${PLOT_ONLY}" == "1" ]]; then
+    cmd+=(--plot-only)
 fi
 
 echo "Running: ${cmd[*]}"

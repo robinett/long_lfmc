@@ -19,7 +19,7 @@ VH_END_DATE="2024-12-31"
 VV_START_DATE="2024-01-01"
 VV_END_DATE="2024-12-31"
 
-VH_RAW_DIR="/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily_vh"
+VH_RAW_DIR="/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily"
 VV_RAW_DIR="/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily_vv"
 
 VH_SOURCE_ZARR="/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_500m_full.zarr"

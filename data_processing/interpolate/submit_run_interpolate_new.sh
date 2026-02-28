@@ -18,6 +18,7 @@ TIME_CHUNK_SIZE="16"
 NUM_WORKERS="32"
 OVERWRITE_ZARR="1"
 DRY_RUN_CHUNK_PLAN="0"
+PLOT_ONLY="0"
 
 if [[ "${NUM_WORKERS}" -lt 1 ]]; then
     echo "NUM_WORKERS must be >= 1"
@@ -37,6 +38,7 @@ common_export=(
     "NUM_WORKERS=${NUM_WORKERS}"
     "OVERWRITE_ZARR=${OVERWRITE_ZARR}"
     "DRY_RUN_CHUNK_PLAN=${DRY_RUN_CHUNK_PLAN}"
+    "PLOT_ONLY=${PLOT_ONLY}"
 )
 
 if [[ -n "${BUFFER_DAYS}" ]]; then

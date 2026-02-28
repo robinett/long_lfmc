@@ -341,10 +341,25 @@ def align_month_time_to_manifest(ds: xr.Dataset, month_meta: dict) -> xr.Dataset
     current_len = int(ds.sizes["time"])
 
     if current_len == expected_len - 1 and month_meta.get("synth_dec31", False):
+        # expected is your manifest list-like of timestamps
+        exp = [d.to_datetime64() for d in expected]
+        # ds is missing its time coordinate; attach the one it should have
+        ds = ds.assign_coords(time=exp[:current_len])
         last_date = expected[-1]
-        fill = ds.isel(time=[-1]).copy(deep=False)
-        fill = fill.assign_coords(time=("time", [last_date.to_datetime64()]))
-        ds = xr.concat([ds, fill], dim="time")
+        fill = ds.isel(time=slice(-1, None)).copy(deep=False)
+        fill = fill.assign_coords(time=[last_date.to_datetime64()])
+        print("ds.dims:", ds.dims)
+        print("fill.dims:", fill.dims)
+        print("ds time coord dims:", ds["time"].dims if "time" in ds.coords else None)
+        print("fill time coord dims:", fill["time"].dims if "time" in fill.coords else None)
+        #ds = xr.concat([ds, fill], dim="time")
+        ds = xr.concat(
+            [ds, fill],
+            dim="time",
+            coords="minimal",
+            compat="override",
+            join="override",
+        )
         current_len = int(ds.sizes["time"])
         print(f"Inserted synthetic {last_date.strftime('%Y-%m-%d')} from prior day for {month_meta['ym']}")
 
@@ -395,6 +410,14 @@ def maybe_remove_out(out: Path):
 
 
 def run_init(args, coord: Path, root: Path, out: Path):
+    if args.overwrite_out:
+        maybe_remove_out(out)
+        if coord.exists():
+            shutil.rmtree(coord)
+        coord.mkdir(parents=True, exist_ok=True)
+    elif out.exists():
+        raise FileExistsError(f"Output store exists: {out}. Use --overwrite-out for init.")
+
     month_index, summary = load_or_build_month_index(coord, root, rebuild=args.rebuild_index)
     month_labels = sorted(month_index.keys())
     if not month_labels:
@@ -406,11 +429,6 @@ def run_init(args, coord: Path, root: Path, out: Path):
     first_ym = manifest["months"][0]["ym"]
     print(f"Init month: {first_ym}")
     print(f"Total planned time length: {manifest['total_time']}")
-
-    if args.overwrite_out:
-        maybe_remove_out(out)
-    elif out.exists():
-        raise FileExistsError(f"Output store exists: {out}. Use --overwrite-out for init.")
 
     ds, arr = open_and_prepare_month(month_index, first_ym)
     if ds is None:

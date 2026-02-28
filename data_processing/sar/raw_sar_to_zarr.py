@@ -181,7 +181,7 @@ def main():
         finally:
             ds.close()
 
-    zarr.convenience.consolidate_metadata(out_zarr)
+    zarr.consolidate_metadata(out_zarr)
     print("Done:", out_zarr)
 
 

@@ -5,7 +5,7 @@
 #SBATCH --error=./logs/slurm-%x-%A_%a.err
 #SBATCH --time=24:00:00
 #SBATCH --partition=serc
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --cpus-per-task=2
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=trobinet@stanford.edu
