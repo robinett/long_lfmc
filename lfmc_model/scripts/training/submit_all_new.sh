@@ -83,7 +83,7 @@ for batch_size in "${batch_sizes[@]}"; do
                 sbatch \
                   --export=ALL,LOCK_FILE="${lock_dir}/lock_${run_name}.lock" \
                   --job-name="${run_name}" \
-                  train_job.sbatch \
+                  "/home/users/trobinet/long_lfmc/lfmc_model/scripts/training/train_job_longweather.sbatch" \
                   --input_data_dir "${input_data_dir}" \
                   --save_dir "${save_root}" \
                   --batch_size "${batch_size}" \
@@ -102,7 +102,8 @@ for batch_size in "${batch_sizes[@]}"; do
                   --long_out_dim "${long_out_dim}" \
                   --num_tasks "${num_tasks}" \
                   --task_weight_type "${weighting_type}" \
-                  --manual_task_weights "${task_weights[@]}"
+                  --manual_task_weights "${task_weights[@]}" \
+                  --overwrite
 
                 exp_idx=$((exp_idx + 1))
 
