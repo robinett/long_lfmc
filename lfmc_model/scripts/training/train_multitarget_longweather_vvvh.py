@@ -45,6 +45,29 @@ def check_tensor(name, x):
         "max:", x.max().item()
     )
 
+def _safe_mae_rmse_r2(y_true, y_pred):
+    y_true = np.asarray(y_true, dtype=np.float64).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=np.float64).reshape(-1)
+    if y_true.size == 0 or y_pred.size == 0:
+        return np.nan, np.nan, np.nan
+    finite_mask = np.isfinite(y_true) & np.isfinite(y_pred)
+    y_true = y_true[finite_mask]
+    y_pred = y_pred[finite_mask]
+    if y_true.size == 0:
+        return np.nan, np.nan, np.nan
+    mae = float(np.mean(np.abs(y_pred - y_true)))
+    rmse = float(np.sqrt(np.mean((y_pred - y_true) ** 2)))
+    if y_true.size < 2:
+        r2 = np.nan
+    elif np.allclose(y_true, y_true[0]):
+        r2 = np.nan
+    else:
+        try:
+            r2 = float(r2_score(y_true, y_pred))
+        except Exception:
+            r2 = np.nan
+    return mae, rmse, r2
+
 class GradNorm:
     """
     GradNorm (Chen et al., 2018) for *T* tasks.
@@ -1237,10 +1260,10 @@ def train_fold_k(
     train_static_std = np.nanstd(train_static_data, axis=(0,1))
     lfmc_mean = np.nanmean(train_y[train_source == 0])
     lfmc_std = np.nanstd(train_y[train_source == 0])
-    print(vv_train)
-    print(train_y[train_source == 1])
-    print(np.unique(train_source))
-    sys.exit()
+    #print(vv_train)
+    #print(train_y[train_source == 1])
+    #print(np.unique(train_source))
+    #sys.exit()
     if vv_train > 0:
         vv_mean = np.nanmean(train_y[train_source == 1])
         vv_std = np.nanstd(train_y[train_source == 1])
@@ -1423,6 +1446,10 @@ def train_fold_k(
     val_loss_insitu = []
     val_loss_vv = []
     val_loss_vh = []
+    test_loss = []
+    test_loss_insitu = []
+    test_loss_vv = []
+    test_loss_vh = []
     global_step = 0
     for epoch in range(1,max_epochs):
         print(f'Fold {this_fold_num}, Epoch {epoch}/{max_epochs}')
@@ -1504,6 +1531,36 @@ def train_fold_k(
         print(f'Validation insitu loss: {this_val_loss_insitu:.4f}')
         print(f'Validation vv loss: {this_val_loss_vv:.4f}')
         print(f'Validation vh loss: {this_val_loss_vh:.4f}')
+        # run test each epoch so progress plots include test curves
+        (
+            _,
+            this_test_loss_epoch,
+            this_test_loss_insitu_epoch,
+            this_test_loss_vv_epoch,
+            this_test_loss_vh_epoch,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _
+        ) = run_model(
+            model,
+            test_loader,
+            device,
+            loss_fn=criterion,
+            train_model=False,
+            num_tasks=num_tasks,
+            task_weight_type=task_weight_type,
+        )
+        test_loss.append(this_test_loss_epoch)
+        test_loss_insitu.append(this_test_loss_insitu_epoch)
+        test_loss_vv.append(this_test_loss_vv_epoch)
+        test_loss_vh.append(this_test_loss_vh_epoch)
         # denorm
         lfmc_val_only = mu_i_val[val_source == 0] * lfmc_std + lfmc_mean
         lfmc_std_val_only = np.sqrt(np.exp(logv_i_val[val_source == 0])) * lfmc_std
@@ -1516,10 +1573,8 @@ def train_fold_k(
         #    logv_rs_val,
         #)
         # calculate metrics of interet
-        val_mae = np.mean(np.abs(lfmc_val_only - lfmc_val_true))
-        val_r2 = r2_score(lfmc_val_true, lfmc_val_only)
+        val_mae, val_rmse, val_r2 = _safe_mae_rmse_r2(lfmc_val_true, lfmc_val_only)
         val_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_val_only) + ((lfmc_val_true - lfmc_val_only) ** 2) / (lfmc_std_val_only ** 2)))
-        val_rmse = np.sqrt(np.mean((lfmc_val_only - lfmc_val_true) ** 2))
         val_avg_lfmc = np.mean(lfmc_val_only)
         val_avg_std = np.mean(lfmc_std_val_only)
         ## and for the mixed data
@@ -1534,10 +1589,8 @@ def train_fold_k(
             vv_val_only = mu_vv_val[val_source == 1] * vv_std + vv_mean
             vv_std_val_only = np.sqrt(np.exp(logv_vv_val[val_source == 1])) * vv_std
             vv_val_true = true_vv * vv_std + vv_mean
-            val_mae_vv = np.mean(np.abs(vv_val_only - vv_val_true))
-            val_r2_vv = r2_score(vv_val_true, vv_val_only)
+            val_mae_vv, val_rmse_vv, val_r2_vv = _safe_mae_rmse_r2(vv_val_true, vv_val_only)
             val_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vv_std_val_only) + ((vv_val_true - vv_val_only) ** 2) / (vv_std_val_only ** 2)))
-            val_rmse_vv = np.sqrt(np.mean((vv_val_only - vv_val_true) ** 2))
             val_avg_vv = np.mean(vv_val_only)
             val_avg_std_vv = np.mean(vv_std_val_only)
             ## also calculate the mixtures
@@ -1551,10 +1604,8 @@ def train_fold_k(
             vh_val_only = mu_vh_val[val_source == 2] * vh_std + vh_mean
             vh_std_val_only = np.sqrt(np.exp(logv_vh_val[val_source == 2])) * vh_std
             vh_val_true = true_vh * vh_std + vh_mean
-            val_mae_vh = np.mean(np.abs(vh_val_only - vh_val_true))
-            val_r2_vh = r2_score(vh_val_true, vh_val_only)
+            val_mae_vh, val_rmse_vh, val_r2_vh = _safe_mae_rmse_r2(vh_val_true, vh_val_only)
             val_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vh_std_val_only) + ((vh_val_true - vh_val_only) ** 2) / (vh_std_val_only ** 2)))
-            val_rmse_vh = np.sqrt(np.mean((vh_val_only - vh_val_true) ** 2))
             val_avg_vh = np.mean(vh_val_only)
             val_avg_std_vh = np.mean(vh_std_val_only)
         # average values for sanity check
@@ -1615,10 +1666,10 @@ def train_fold_k(
     print('re-running val with best model')
     (
         model,
-        val_loss,
-        val_loss_insitu,
-        val_loss_vv,
-        val_loss_vh,
+        _,
+        _,
+        _,
+        _,
         mu_i_val,
         logv_i_val,
         mu_vv_val,
@@ -1650,10 +1701,8 @@ def train_fold_k(
     #    logv_rs_val,
     #)
     # calculate metrics of interet
-    val_mae = np.mean(np.abs(lfmc_val_only - lfmc_val_true))
-    val_r2 = r2_score(lfmc_val_true, lfmc_val_only)
+    val_mae, val_rmse, val_r2 = _safe_mae_rmse_r2(lfmc_val_true, lfmc_val_only)
     val_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_val_only) + ((lfmc_val_true - lfmc_val_only) ** 2) / (lfmc_std_val_only ** 2)))
-    val_rmse = np.sqrt(np.mean((lfmc_val_only - lfmc_val_true) ** 2))
     ## and for the mixed data
     #lfmc_mix_val = mu_mix_val[val_source.numpy() == 1 ] * y_std + y_mean
     #lfmc_std_mix_val = np.sqrt(np.exp(logv_mix_val[val_source.numpy() == 1])) * y_std
@@ -1666,10 +1715,8 @@ def train_fold_k(
         vv_val_only = mu_vv_val[val_source == 1] * vv_std + vv_mean
         vv_std_val_only = np.sqrt(np.exp(logv_vv_val[val_source == 1])) * vv_std
         vv_val_true = true_vv * vv_std + vv_mean
-        val_mae_vv = np.mean(np.abs(vv_val_only - vv_val_true))
-        val_r2_vv = r2_score(vv_val_true, vv_val_only)
+        val_mae_vv, val_rmse_vv, val_r2_vv = _safe_mae_rmse_r2(vv_val_true, vv_val_only)
         val_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vv_std_val_only) + ((vv_val_true - vv_val_only) ** 2) / (vv_std_val_only ** 2)))
-        val_rmse_vv = np.sqrt(np.mean((vv_val_only - vv_val_true) ** 2))
         ## also calculate the mixtures
         #lfmc_rs_mix_val = mu_mix_val[val_source.numpy() == 0] * y_std + y_mean
         #lfmc_std_rs_mix_val = np.sqrt(np.exp(logv_mix_val[val_source.numpy() == 0])) * y_std
@@ -1689,10 +1736,8 @@ def train_fold_k(
         vh_val_only = mu_vh_val[val_source == 2] * vh_std + vh_mean
         vh_std_val_only = np.sqrt(np.exp(logv_vh_val[val_source == 2])) * vh_std
         vh_val_true = true_vh * vh_std + vh_mean
-        val_mae_vh = np.mean(np.abs(vh_val_only - vh_val_true))
-        val_r2_vh = r2_score(vh_val_true, vh_val_only)
+        val_mae_vh, val_rmse_vh, val_r2_vh = _safe_mae_rmse_r2(vh_val_true, vh_val_only)
         val_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vh_std_val_only) + ((vh_val_true - vh_val_only) ** 2) / (vh_std_val_only ** 2)))
-        val_rmse_vh = np.sqrt(np.mean((vh_val_only - vh_val_true) ** 2))
     else:
         vh_val_only = np.array([])
         vh_std_val_only = np.array([])
@@ -1728,10 +1773,10 @@ def train_fold_k(
     # run the test
     (
         model,
-        test_loss,
-        test_loss_insitu,
-        test_loss_vv,
-        test_loss_vh,
+        this_test_loss,
+        this_test_loss_insitu,
+        this_test_loss_vv,
+        this_test_loss_vh,
         mu_i_test,
         logv_i_test,
         mu_vv_test,
@@ -1753,10 +1798,10 @@ def train_fold_k(
     )
     # denorm
     if len(mu_i_test) == 0:
-        test_loss = np.nan
-        test_loss_insitu = np.nan
-        test_loss_vv = np.nan
-        test_loss_vh = np.nan
+        this_test_loss = np.nan
+        this_test_loss_insitu = np.nan
+        this_test_loss_vv = np.nan
+        this_test_loss_vh = np.nan
         lfmc_test_only = np.nan
         lfmc_std_test_only = np.nan
         vv_test_only = np.nan
@@ -1771,18 +1816,29 @@ def train_fold_k(
         test_nll = np.nan
         test_rmse = np.nan
     else:
+        plotting.plot_training_progression(
+            train_loss,
+            val_loss,
+            test_loss,
+            best_epoch,
+            'all',
+            fold_save_dir
+        )
         if len(true_i_test) > 0:
             lfmc_test_only = mu_i_test[test_source.numpy() == 0] * lfmc_std + lfmc_mean
             lfmc_std_test_only = np.sqrt(np.exp(logv_i_test[test_source.numpy() == 0])) * lfmc_std
             lfmc_test_true = true_i_test * lfmc_std + lfmc_mean
             # calculate metrics of interet
-            print(mu_i_test)
-            print(lfmc_test_only)
-            print(lfmc_test_true)
-            test_mae = np.mean(np.abs(lfmc_test_only - lfmc_test_true))
-            test_r2 = r2_score(lfmc_test_true, lfmc_test_only)
+            test_mae, test_rmse, test_r2 = _safe_mae_rmse_r2(lfmc_test_true, lfmc_test_only)
             test_nll = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(lfmc_std_test_only) + ((lfmc_test_true - lfmc_test_only) ** 2) / (lfmc_std_test_only ** 2)))
-            test_rmse = np.sqrt(np.mean((lfmc_test_only - lfmc_test_true) ** 2))
+            plotting.plot_training_progression(
+                train_loss_insitu,
+                val_loss_insitu,
+                test_loss_insitu,
+                best_epoch,
+                'insitu',
+                fold_save_dir
+            )
         else:
             lfmc_test_only = np.nan
             lfmc_std_test_only = np.nan
@@ -1796,10 +1852,16 @@ def train_fold_k(
             vv_test_only = mu_vv_test[test_source.numpy() == 1] * vv_std + vv_mean
             vv_std_test_only = np.sqrt(np.exp(logv_vv_test[test_source.numpy() == 1])) * vv_std
             vv_test_true = true_vv_test * vv_std + vv_mean
-            test_mae_vv = np.mean(np.abs(vv_test_only - vv_test_true))
-            test_r2_vv = r2_score(vv_test_true, vv_test_only)
+            test_mae_vv, test_rmse_vv, test_r2_vv = _safe_mae_rmse_r2(vv_test_true, vv_test_only)
             test_nll_vv = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vv_std_test_only) + ((vv_test_true - vv_test_only) ** 2) / (vv_std_test_only ** 2)))
-            test_rmse_vv = np.sqrt(np.mean((vv_test_only - vv_test_true) ** 2))
+            plotting.plot_training_progression(
+                train_loss_vv,
+                val_loss_vv,
+                test_loss_vv,
+                best_epoch,
+                'vv',
+                fold_save_dir
+            )
         else:
             vv_test_only = np.nan
             vv_std_test_only = np.nan
@@ -1812,10 +1874,16 @@ def train_fold_k(
             vh_test_only = mu_vh_test[test_source.numpy() == 2] * vh_std + vh_mean
             vh_std_test_only = np.sqrt(np.exp(logv_vh_test[test_source.numpy() == 2])) * vh_std
             vh_test_true = true_vh_test * vh_std + vh_mean
-            test_mae_vh = np.mean(np.abs(vh_test_only - vh_test_true))
-            test_r2_vh = r2_score(vh_test_true, vh_test_only)
+            test_mae_vh, test_rmse_vh, test_r2_vh = _safe_mae_rmse_r2(vh_test_true, vh_test_only)
             test_nll_vh = np.mean(0.5 * (np.log(2.0 * np.pi) + 2.0 * np.log(vh_std_test_only) + ((vh_test_true - vh_test_only) ** 2) / (vh_std_test_only ** 2)))
-            test_rmse_vh = np.sqrt(np.mean((vh_test_only - vh_test_true) ** 2))
+            plotting.plot_training_progression(
+                train_loss_vh,
+                val_loss_vh,
+                test_loss_vh,
+                best_epoch,
+                'vh',
+                fold_save_dir
+            )
         else:
             vh_test_only = np.nan
             vh_std_test_only = np.nan
@@ -1866,10 +1934,10 @@ def train_fold_k(
     )
     torch.save(
         {
-            'loss':test_loss,
-            'loss_insitu':test_loss_insitu,
-            'loss_vv':test_loss_vv,
-            'loss_vh':test_loss_vh,
+            'loss':this_test_loss,
+            'loss_insitu':this_test_loss_insitu,
+            'loss_vv':this_test_loss_vv,
+            'loss_vh':this_test_loss_vh,
             'lfmc_preds':lfmc_test_only,
             'lfmc_std':lfmc_std_test_only,
             'vv_preds':vv_test_only,
@@ -1932,6 +2000,7 @@ def main():
     input_data_dir = args.input_data_dir
     save_dir = args.save_dir
     # training settings
+    n_folds = 6
     batch_size = args.batch_size
     max_epochs = 100
     lr = args.lr
@@ -2015,7 +2084,6 @@ def main():
                 'Pass --overwrite to replace it, or use --run_tag to create a unique directory.'
             )
     os.makedirs(full_save_dir)
-    n_folds = 10
     if args.fold_info_in:
         print(f'Loading fold definitions from {args.fold_info_in}')
         fold_locs = _load_fold_locs_json(args.fold_info_in)

@@ -52,4 +52,4 @@ echo "Running task ${idx} / $(( ${#sample_index_paths[@]} - 1 ))"
 echo "sample_index_path=${sample_index_path}"
 echo "save_dir=${save_dir}"
 
-python3 -u /home/users/trobinet/long_lfmc/lfmc_model/scripts/data/build_dataset_longweather_direct.py "${sample_index_path}" "${save_dir}"
+python3 -u /home/users/trobinet/long_lfmc/lfmc_model/scripts/data/build_dataset_longweather_direct.py "${sample_index_path}" "${save_dir}" --overwrite

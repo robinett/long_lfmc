@@ -4,6 +4,7 @@ import datetime
 import glob
 import json
 import os
+import shutil
 
 from longweather_direct_pipeline import (
     build_direct_tensors_from_sample_index,
@@ -56,6 +57,11 @@ def main():
         nargs="?",
         default=None,
         help="Output save directory (optional).",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="If set, remove save_dir before writing outputs.",
     )
     args = parser.parse_args()
     if args.sample_index_path is None:
@@ -268,6 +274,8 @@ def main():
 
     build_cfg = {
         "sample_index_path": sample_index_path,
+        "save_dir": save_dir,
+        "overwrite": bool(args.overwrite),
         "dataset_paths": dataset_paths,
         "grid_source": grid_source,
         "var_locs": var_locs,
@@ -289,6 +297,7 @@ def main():
     print(
         "[build_dataset] Config summary: "
         f"sample_index_path={sample_index_path}, "
+        f"save_dir={save_dir}, overwrite={bool(args.overwrite)}, "
         f"grid_source={grid_source}, stratifier={stratifier}, "
         f"short_features={len(short_features)}, long_features={len(long_features)}, "
         f"static_features={len(static_features)}, "
@@ -333,6 +342,10 @@ def main():
         temporal_num_workers=temporal_num_workers,
         temporal_max_inflight=temporal_max_inflight,
     )
+
+    if args.overwrite and os.path.isdir(save_dir):
+        print(f"[build_dataset] --overwrite set, removing existing directory: {save_dir}")
+        shutil.rmtree(save_dir)
 
     os.makedirs(save_dir, exist_ok=True)
     print(f"[build_dataset] Saving outputs to: {save_dir}")
