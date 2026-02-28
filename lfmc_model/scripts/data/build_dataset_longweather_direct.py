@@ -37,6 +37,7 @@ def main():
         "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/indexes/"
         "sample_index_longweather_2000_2024_lfmc.parquet"
     )
+    default_save_dir = "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc"
     parser = argparse.ArgumentParser(
         description=(
             "Build direct longweather tensors from a single sample-index file."
@@ -49,6 +50,13 @@ def main():
         default=None,
         help="Path or glob to sample-index parquet/csv (optional).",
     )
+    parser.add_argument(
+        "save_dir",
+        type=str,
+        nargs="?",
+        default=None,
+        help="Output save directory (optional).",
+    )
     args = parser.parse_args()
     if args.sample_index_path is None:
         print(
@@ -58,19 +66,20 @@ def main():
         sample_index_path = default_sample_index_path
     else:
         sample_index_path = str(args.sample_index_path)
+    if args.save_dir is None:
+        print(
+            "Warning: no save_dir provided. Defaulting to "
+            f"{default_save_dir}"
+        )
+        save_dir = default_save_dir
+    else:
+        save_dir = str(args.save_dir)
 
     # All configuration is explicitly set here.
     scratch_dir = "/scratch/users/trobinet/long_lfmc/final_lfmc"
     oak_dir = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets"
 
     sample_index_inputs = [sample_index_path]
-
-    save_dir = os.path.join(
-        scratch_dir,
-        "lfmc_model",
-        "inputs",
-        "lfmc",
-    )
 
     #start_date = None
     #end_date = None
