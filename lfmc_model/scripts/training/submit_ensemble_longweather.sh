@@ -12,14 +12,14 @@ mkdir -p logs
 # Constant directories
 ########################
 
-input_data_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/inputs/news1_multitask_cleaned"
-save_root="/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_multitask_ensemble"
+input_data_dir="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc_vh_vv"
+save_root="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_ens"
 
 ########################
 # Ensemble settings
 ########################
 
-ensemble_size=16
+ensemble_size=32
 base_seed=1000
 split_seed=42
 
@@ -28,7 +28,7 @@ split_seed=42
 ########################
 
 max_jobs=8
-lock_dir="/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/gpu_locks"
+lock_dir="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/gpu_locks"
 mkdir -p "${lock_dir}"
 
 ########################
@@ -36,26 +36,26 @@ mkdir -p "${lock_dir}"
 # Edit these values after selecting the winning config from submit_all_new.sh
 ########################
 
-num_tasks=2
+num_tasks=3
 weighting_type='manual'
-task_weights=(5.0 1.0)
+task_weights=(3.0 1.0 1.0)
 
 batch_size=128
 lr=5e-4
-val_split=0.2
+val_split=0.15
 adam_wd=1e-4
 dropout=0.15
 
-d_model=64
-nhead=$(( d_model / 32 ))
-num_layers=3
-dim_feedforward=$(( d_model * 2 ))
+d_model=32
+nhead=1
+num_layers=2
+dim_feedforward=64
 
-long_d_model=128
-long_nhead=$(( long_d_model / 32 ))
-long_num_layers=4
-long_dim_feedforward=$(( long_d_model * 2 ))
-long_out_dim=64
+long_d_model=64
+long_nhead=2
+long_num_layers=3
+long_dim_feedforward=128
+long_out_dim=16
 
 ########################
 # Submission loop (seeds)
@@ -104,7 +104,8 @@ for (( member_idx=0; member_idx<ensemble_size; member_idx++ )); do
     --seed "${seed}" \
     --batch_seed "${seed}" \
     --split_seed "${split_seed}" \
-    --run_tag "${run_tag}"
+    --run_tag "${run_tag}" \
+    --overwrite
 
   submitted=$(( submitted + 1 ))
   sleep $(( 30 + RANDOM % 31 ))

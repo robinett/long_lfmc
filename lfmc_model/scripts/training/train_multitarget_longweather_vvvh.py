@@ -749,6 +749,7 @@ class EarlyStopping:
 
 def create_site_split(
     data_info: pd.DataFrame,
+    source,
     desired_insitu_sample_size: int,
     desired_vv_sample_size: int,
     desired_vh_sample_size: int,
@@ -757,21 +758,26 @@ def create_site_split(
     round_decimals: int = 10,
     stratifier = None
 ):
-    # split sources
-    insitu = data_info[data_info['source_legible'] == 'nfmd']
-    vv     = data_info[data_info['source_legible'] == 'vv']
-    vh     = data_info[data_info['source_legible'] == 'vh_backscatter']
-    # get the index and split by stratifier if provided
-    if stratifier is not None:
-        insitu_idx = data_info[data_info['source_legible'] == 'nfmd'].index
-        vv_idx     = data_info[data_info['source_legible'] == 'vv'].index
-        vh_idx     = data_info[data_info['source_legible'] == 'vh_backscatter'].index
-        insitu_strat = stratifier[insitu_idx]
-        vv_strat     = stratifier[vv_idx]
-        vh_strat     = stratifier[vh_idx]
+    source_np = np.asarray(source).reshape(-1)
+    if source_np.shape[0] != data_info.shape[0]:
+        raise ValueError(
+            f"source and data_info length mismatch: {source_np.shape[0]} vs {data_info.shape[0]}"
+        )
+    # split sources by numeric source code
+    # 0=insitu, 1=vv/ratios, 2=vh
+    insitu_rows = np.where(source_np == 0)[0]
+    vv_rows = np.where(source_np == 1)[0]
+    vh_rows = np.where(source_np == 2)[0]
+    insitu = data_info.iloc[insitu_rows].copy()
+    vv = data_info.iloc[vv_rows].copy()
+    vh = data_info.iloc[vh_rows].copy()
+    insitu["row_idx"] = insitu_rows
+    vv["row_idx"] = vv_rows
+    vh["row_idx"] = vh_rows
+    strat_np = None if stratifier is None else np.asarray(stratifier)
     # clean/standardize lat/lon once
     def clean(df):
-        out = df[['date', 'latitude', 'longitude']].copy()
+        out = df[['date', 'latitude', 'longitude', 'row_idx']].copy()
         out = out.rename(columns={'latitude': 'lat',
                                   'longitude': 'lon'})
         out['lat'] = pd.to_numeric(out['lat'], errors='coerce')
@@ -812,25 +818,22 @@ def create_site_split(
             .reset_index()
     )
     # get the land cover type for each grouping
-    if stratifier is not None:
+    if strat_np is not None:
         insitu_lcs = []
         vv_lcs = []
         vh_lcs = []
         for idx,row in insitu_counts.iterrows():
-            all_idx = row['idx']
-            all_lcs = insitu_strat[all_idx]
             ex_idx = row['idx'][0]
-            insitu_lcs.append(insitu_strat[ex_idx])
+            row_idx = int(insitu.iloc[ex_idx]['row_idx'])
+            insitu_lcs.append(strat_np[row_idx])
         for idx,row in vv_counts.iterrows():
-            all_idx = row['idx']
-            all_lcs = vv_strat[all_idx]
             ex_idx = row['idx'][0]
-            vv_lcs.append(vv_strat[ex_idx])
+            row_idx = int(vv.iloc[ex_idx]['row_idx'])
+            vv_lcs.append(strat_np[row_idx])
         for idx,row in vh_counts.iterrows():
-            all_idx = row['idx']
-            all_lcs = vh_strat[all_idx]
             ex_idx = row['idx'][0]
-            vh_lcs.append(vh_strat[ex_idx])
+            row_idx = int(vh.iloc[ex_idx]['row_idx'])
+            vh_lcs.append(strat_np[row_idx])
         insitu_counts['stratifier'] = insitu_lcs
         vv_counts['stratifier'] = vv_lcs
         vh_counts['stratifier'] = vh_lcs
@@ -872,8 +875,32 @@ def create_site_split(
     if len(insitu_sites) == len(val_i):
         desired_vv_sample_size = 1_000_000
         desired_vh_sample_size = 1_000_000
-    val_vv = pick_sites_stratified(vv_counts, vv_counts_orig, desired_vv_sample_size, must_use_sites=val_i, not_allowed_sites=insitu_sites)
-    val_vh = pick_sites_stratified(vh_counts, vh_counts_orig, desired_vh_sample_size, must_use_sites=val_i, not_allowed_sites=insitu_sites)
+    rs_goal = int(desired_vv_sample_size + desired_vh_sample_size)
+    rs_counts = pd.concat(
+        [
+            vv_counts[['lat', 'lon', 'n', 'stratifier']],
+            vh_counts[['lat', 'lon', 'n', 'stratifier']]
+        ],
+        ignore_index=True
+    )
+    rs_counts = rs_counts.groupby(['lat', 'lon', 'stratifier'], as_index=False)['n'].sum()
+    rs_counts_orig = pd.concat(
+        [
+            vv_counts_orig[['lat', 'lon', 'n', 'stratifier']],
+            vh_counts_orig[['lat', 'lon', 'n', 'stratifier']]
+        ],
+        ignore_index=True
+    )
+    rs_counts_orig = rs_counts_orig.groupby(['lat', 'lon', 'stratifier'], as_index=False)['n'].sum()
+    val_rs = pick_sites_stratified(
+        rs_counts,
+        rs_counts_orig,
+        rs_goal,
+        must_use_sites=val_i,
+        not_allowed_sites=insitu_sites
+    )
+    val_vv = val_rs
+    val_vh = val_rs
     perc_i_sites = len(val_i) / len(insitu_counts_orig) * 100 if len(insitu_counts_orig) > 0 else 0
     perc_vv_sites = len(val_vv) / len(vv_counts_orig) * 100 if len(vv_counts_orig) > 0 else 0
     perc_vh_sites = len(val_vh) / len(vh_counts_orig) * 100 if len(vh_counts_orig) > 0 else 0
@@ -901,7 +928,7 @@ def create_site_split(
     perc_data_vh = num_sel_vh / len(vh) * 100 if len(vh) > 0 else 0
     print(f'Selected {perc_data_i:.2f}% of insitu data, {perc_data_vv:.2f}% of VV data, {perc_data_vh:.2f}% of VH data')
     # combine (allow duplicates if the same site is selected for multiple sources)
-    val_locs = val_i + val_vv + val_vh
+    val_locs = val_i + val_rs
     # If you want unique sites only:
     # val_locs = list(dict.fromkeys(val_locs))
     return val_locs
@@ -918,6 +945,7 @@ def run_model(
     warmup_start_lr=None,
     warmup_end_lr=None,
     num_tasks=None,
+    second_task_source_code=None,
     task_weight_type=None,
     grad_norm=None,
 ):
@@ -1019,7 +1047,12 @@ def run_model(
             if num_tasks == 1:
                 task_losses = [loss_i]
             elif num_tasks == 2:
-                task_losses = [loss_i, loss_vh]
+                if second_task_source_code not in (1, 2):
+                    raise ValueError(
+                        f'num_tasks=2 requires second_task_source_code in {{1,2}}, got {second_task_source_code}'
+                    )
+                loss_second = loss_vv if second_task_source_code == 1 else loss_vh
+                task_losses = [loss_i, loss_second]
             elif num_tasks == 3:
                 task_losses = [loss_i, loss_vv, loss_vh]
             if train_model and use_gradnorm:
@@ -1030,9 +1063,14 @@ def run_model(
                 if num_tasks == 1:
                     total_loss = model.task_weights[0] * loss_i
                 elif num_tasks == 2:
+                    if second_task_source_code not in (1, 2):
+                        raise ValueError(
+                            f'num_tasks=2 requires second_task_source_code in {{1,2}}, got {second_task_source_code}'
+                        )
+                    loss_second = loss_vv if second_task_source_code == 1 else loss_vh
                     total_loss = (
                         model.task_weights[0] * loss_i +
-                        model.task_weights[1] * loss_vh
+                        model.task_weights[1] * loss_second
                     )
                 elif num_tasks == 3:
                     total_loss = (
@@ -1179,14 +1217,15 @@ def train_fold_k(
         stratifier
     )
     # split out the validation data
-    remaining_insitu_obs = remaining_info[remaining_info['source_legible'] == 'nfmd'].shape[0]
-    remaining_vv_obs = remaining_info[remaining_info['source_legible'] == 'vv'].shape[0]
-    remaining_vh_obs = remaining_info[remaining_info['source_legible'] == 'vh_backscatter'].shape[0]
+    remaining_insitu_obs = int((remaining_source == 0).sum().item())
+    remaining_vv_obs = int((remaining_source == 1).sum().item())
+    remaining_vh_obs = int((remaining_source == 2).sum().item())
     num_val_obs_insitu = remaining_insitu_obs * val_split
     num_val_obs_vv = remaining_vv_obs * val_split
     num_val_obs_vh = remaining_vh_obs * val_split
     val_locs = create_site_split(
         remaining_info,
+        remaining_source,
         desired_insitu_sample_size=int(num_val_obs_insitu),
         desired_vv_sample_size=int(num_val_obs_vv),
         desired_vh_sample_size=int(num_val_obs_vh),
@@ -1210,17 +1249,39 @@ def train_fold_k(
     )
     # Sanity check
     total_test = test_info.shape[0]
-    insitu_test = test_info[test_info['source_legible'] == 'nfmd'].shape[0]
-    vv_test = test_info[test_info['source_legible'] == 'vv'].shape[0]
-    vh_test = test_info[test_info['source_legible'] == 'vh_backscatter'].shape[0]
+    insitu_test = int((test_source == 0).sum().item())
+    vv_test = int((test_source == 1).sum().item())
+    vh_test = int((test_source == 2).sum().item())
     total_val = val_info.shape[0]
-    insitu_val = val_info[val_info['source_legible'] == 'nfmd'].shape[0]
-    vv_val = val_info[val_info['source_legible'] == 'vv'].shape[0]
-    vh_val = val_info[val_info['source_legible'] == 'vh_backscatter'].shape[0]
+    insitu_val = int((val_source == 0).sum().item())
+    vv_val = int((val_source == 1).sum().item())
+    vh_val = int((val_source == 2).sum().item())
     total_train = train_info.shape[0]
-    insitu_train = train_info[train_info['source_legible'] == 'nfmd'].shape[0]
-    vv_train = train_info[train_info['source_legible'] == 'vv'].shape[0]
-    vh_train = train_info[train_info['source_legible'] == 'vh_backscatter'].shape[0]
+    insitu_train = int((train_source == 0).sum().item())
+    vv_train = int((train_source == 1).sum().item())
+    vh_train = int((train_source == 2).sum().item())
+    second_task_source_code = None
+    if num_tasks == 2:
+        train_source_codes = np.unique(np.asarray(train_source)).astype(int)
+        non_insitu_codes = sorted(
+            int(code) for code in train_source_codes if int(code) != 0
+        )
+        if len(non_insitu_codes) != 1:
+            raise ValueError(
+                'num_tasks=2 requires exactly one non-insitu source code in train_source '
+                f'for this fold, got {non_insitu_codes}'
+            )
+        second_task_source_code = non_insitu_codes[0]
+        if second_task_source_code not in (1, 2):
+            raise ValueError(
+                'num_tasks=2 only supports non-insitu source codes 1 (vv) or 2 (vh), '
+                f'got {second_task_source_code}'
+            )
+        second_task_name = 'vv' if second_task_source_code == 1 else 'vh'
+        print(
+            f'num_tasks=2: using second task source code={second_task_source_code} '
+            f'({second_task_name})'
+        )
     print(
         f"Test: {total_test} ({insitu_test} insitu, {vv_test} vv, {vh_test} vh) | "
         f"Val: {total_val} ({insitu_val} insitu, {vv_val} vv, {vh_val} vh) | "
@@ -1482,6 +1543,7 @@ def train_fold_k(
             warmup_start_lr=warmup_start_lr,
             warmup_end_lr=warmup_end_lr,
             num_tasks=num_tasks,
+            second_task_source_code=second_task_source_code,
             task_weight_type=task_weight_type,
             grad_norm=grad_norm,
         )
@@ -1521,6 +1583,7 @@ def train_fold_k(
             loss_fn=criterion,
             train_model=False,
             num_tasks=num_tasks,
+            second_task_source_code=second_task_source_code,
             task_weight_type=task_weight_type,
         )
         val_loss.append(this_val_loss)
@@ -1555,6 +1618,7 @@ def train_fold_k(
             loss_fn=criterion,
             train_model=False,
             num_tasks=num_tasks,
+            second_task_source_code=second_task_source_code,
             task_weight_type=task_weight_type,
         )
         test_loss.append(this_test_loss_epoch)
@@ -1687,6 +1751,7 @@ def train_fold_k(
         loss_fn=criterion,
         train_model=False,
         num_tasks=num_tasks,
+        second_task_source_code=second_task_source_code,
         task_weight_type=task_weight_type,
     )
     # denorm
@@ -1794,6 +1859,7 @@ def train_fold_k(
         loss_fn=criterion,
         train_model=False,
         num_tasks=num_tasks,
+        second_task_source_code=second_task_source_code,
         task_weight_type=task_weight_type,
     )
     # denorm
@@ -2052,24 +2118,32 @@ def main():
     short_data = datasets[0]
     long_data = datasets[1]
     static_data = datasets[2]
+    source = datasets[4]
     info = datasets[5]
     stratifier = datasets[6]
-    num_insitu_obs = info[info['source_legible'] == 'nfmd'].shape[0]
-    num_vv_obs = info[info['source_legible'] == 'vv'].shape[0]
-    num_vh_obs = info[info['source_legible'] == 'vh_backscatter'].shape[0]
+    num_insitu_obs = int((source == 0).sum().item())
+    num_vv_obs = int((source == 1).sum().item())
+    num_vh_obs = int((source == 2).sum().item())
     # make warmup the first 3 epochs
     batches_per_epoch = (num_insitu_obs + num_vv_obs + num_vh_obs) / batch_size * 0.7
     warmup_steps = int(3 * batches_per_epoch)
     print(f'Number of insitu observations: {num_insitu_obs}')
     print(f'Number of VV observations: {num_vv_obs}')
     print(f'Number of VH observations: {num_vh_obs}')
+    first_task_weight_tag = ''
+    if (
+        args.task_weight_type == 'manual'
+        and args.manual_task_weights is not None
+        and len(args.manual_task_weights) > 0
+    ):
+        first_task_weight_tag = f'_tw0{args.manual_task_weights[0]}'
     this_model_name = (
         f'transformer_dm{d_model}_nh{nhead}_nl{num_layers}_df{dim_feedforward}'
         f'_do{dropout}_bs{batch_size}_lr{lr}_warmup{warmup_steps}'
         f'_wd{adam_weight_decay}_iobs{num_insitu_obs}_vvobs{num_vv_obs}_vhobs{num_vh_obs}'
         f'_dmlong{long_d_model}_nhlong{long_nhead}_nllong{long_num_layers}'
         f'_dflong{long_dim_feedforward}_outlong{long_out_dim}'
-        f'_basic'
+        f'_firstweight{first_task_weight_tag}'
     )
     if args.run_tag is not None and len(args.run_tag) > 0:
         this_model_name = f'{this_model_name}_{args.run_tag}'
@@ -2099,6 +2173,7 @@ def main():
             print(f'Getting locations for fold {fold+1}/{n_folds}')
             this_locs = create_site_split(
                 info,
+                source,
                 desired_insitu_sample_size=int(desired_insitu_obs_per_fold),
                 desired_vv_sample_size=int(desired_vv_obs_per_fold),
                 desired_vh_sample_size=int(desired_vh_obs_per_fold),
