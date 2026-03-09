@@ -1,574 +1,1580 @@
-import os
-from compare_models_at_sites import get_site_error, site_analysis
-import sys
-import pandas as pd
-import json
-import xarray as xr
-import numpy as np
+import argparse
 import glob
-import torch
+import json
+import os
 import re
+import sys
+
+import numpy as np
+import pandas as pd
+import torch
+import xarray as xr
+from tqdm import tqdm
+
+from compare_models_at_sites import get_site_error
 
 here = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.join(here, '..', '..','..')
-sys.path.append(os.path.join(project_root,'lfmc_model','scripts','inference'))
-sys.path.append(os.path.join(project_root,'lfmc_model','models','transformer'))
-sys.path.append(os.path.join(project_root,'lfmc_model','utils'))
+project_root = os.path.join(here, "..", "..", "..")
+sys.path.append(os.path.join(project_root, "lfmc_model", "scripts", "inference"))
+sys.path.append(os.path.join(project_root, "lfmc_model", "utils"))
 
 from point_tool_new import build_tensors, run_model_forward
-from transformer_multitask_longclimate import LFMCTransformer
-from transformer_multitask_longclimate_uncertainty import LFMCTransformer as LFMCTransformerUncertainty
 import plotting
 
-def compare_models_at_site(
-    site,
-    this_model_site_error,
-    model_gen_names,
-    scratch_dir,
-    model_dirs,
-    model_tasks,
-    model_types,
-    input_data_names,
-    comparison_type
-):
-        lat_float = float(site.split('_')[0])
-        lon_float = float(site.split('_')[1])
-        site_fmt = f"{lat_float:.5f}_{lon_float:.5f}"
-        this_fold = this_model_site_error[site]['fold']
-        this_folds = np.repeat(this_fold, len(model_gen_names))
-        this_site_lfmc = get_site_preds(
-            site,
-            this_model_site_error,
-            scratch_dir,
-            model_gen_names,
-            model_dirs,
-            this_folds,
-            model_tasks,
-            model_types,
-            input_data_names
-        )
-        print(this_site_lfmc)
-        dates = []
-        preds = []
-        labels = []
-        for model_name in model_gen_names:
-            this_preds = this_site_lfmc[this_site_lfmc['source'] == model_name]
-            this_lfmc = this_preds['vals']
-            this_dates = this_preds['dates']
-            preds.append(this_lfmc)
-            dates.append(this_dates)
-            labels.append(model_name)
-        preds.append(this_site_lfmc[this_site_lfmc['source'] == 'true']['vals'])
-        dates.append(this_site_lfmc[this_site_lfmc['source'] == 'true']['dates'])
-        labels.append('true')
-        #preds.append(this_model_site_error[site]['predictions'])
-        #dates.append(this_site_lfmc[this_site_lfmc['source'] == 'true']['dates'])
-        #labels.append('pred_orig')
-        #linestyles = ['' if 'true' in label or 'pred_orig' in label else '-' for label in labels]
-        linestyles = []
-        markers = ['o' if 'true' in label or 'pred_orig' in label else '' for label in labels]
-        for label in labels:
-            if 'true' in label or 'pred_orig' in label:
-                linestyles.append('')
-            elif 'nll' in label:
-                linestyles.append('--')
-            else:
-                linestyles.append('-')
-        save_path = os.path.join(
-            scratch_dir,
-            'outputs',
-            'model_comparisons',
-            f'comparison_timeseries_{site_fmt}_{comparison_type}.png'
-        )
-        plotting.plot_multiple_timeseries(dates, preds, labels, linestyles, markers,save_path)
 
-def epoch_num(p):
-    m = re.search(r"model_epoch(\d+)\.pt$", p)
-    return int(m.group(1)) if m else -1
+DEFAULT_INPUTS_ROOT = "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs"
+DEFAULT_PLOT_DIR = (
+    "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/plots/timeseries"
+)
+DEFAULT_OAK_ROOT = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets"
+DEFAULT_SCRATCH_ROOT = "/scratch/users/trobinet/long_lfmc/final_lfmc"
+DAYMET_ZARR_PATH = os.path.join(DEFAULT_SCRATCH_ROOT, "daymet", "daymet_all_vars.zarr")
+MODIS_ZARR_PATH = os.path.join(
+    DEFAULT_SCRATCH_ROOT,
+    "modis",
+    "modis_regrid_interpolated",
+    "modis_interp_5d.zarr",
+)
+NLCD_ZARR_PATH = os.path.join(DEFAULT_SCRATCH_ROOT, "nlcd", "nlcd_target_grid_2000_2024.zarr")
+STATIC_NC_PATH = os.path.join(DEFAULT_OAK_ROOT, "static", "static_features_500m_epsg5070_float32.nc")
+CLIMATE_NC_PATH = os.path.join(
+    DEFAULT_OAK_ROOT,
+    "climate_zones",
+    "climate_zone_per_pixel_westUS.nc4",
+)
+SHORT_LAG_DAYS = list(range(31))
+LONG_LAG_DAYS = list(range(181))
+VAR_LOCS = {
+    "daymet": ["prcp", "srad", "swe", "tmax", "vp"],
+    "modis": [
+        "Nadir_Reflectance_Band1_interp",
+        "Nadir_Reflectance_Band2_interp",
+        "Nadir_Reflectance_Band3_interp",
+        "Nadir_Reflectance_Band4_interp",
+        "Nadir_Reflectance_Band5_interp",
+        "Nadir_Reflectance_Band6_interp",
+        "Nadir_Reflectance_Band7_interp",
+    ],
+    "static": ["slope", "elevation", "canopy_height", "clay", "sand"],
+    "climate_zone": [f"climate_zone_{i}" for i in range(1, 30)],
+    "landcover_frac": [
+        "barren",
+        "crops",
+        "deciduous_forest",
+        "developed",
+        "evergreen_forest",
+        "grass",
+        "mixed_forest",
+        "other",
+        "shrub",
+        "water",
+        "wetlands",
+    ],
+}
+_INFERENCE_DSS = None
+_MODEL_LAG_DAYS = {}
+_LANDCOVER_STATIC_TOKENS = (
+    "barren",
+    "crops",
+    "forest",
+    "developed",
+    "grass",
+    "other",
+    "shrub",
+    "water",
+    "wetlands",
+)
 
-def run_point_tool(locs,start_dates,end_dates,var_names_path,norm_params_path,checkpoint_path,model_num_tasks,model_type):
-    scratch_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/'
-    oak_dir = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/'
-    # where to save the outputs of the model
-    # just take the first location for now for testing
-    #site_info = site_info.iloc[:1]
-    # information that we load from the model
-    with open(var_names_path) as f:
-        var_names = json.load(f)
-    with open(norm_params_path) as f:
-        norm_params = json.load(f)
-    # lets lay out where the varaibles are that we are going to need to find
-    # location of possible long input variables
-    var_locs = {
-        'daymet':[
-            'prcp','srad','swe','tmax','vp'
-        ],
-        'modis':[
-            'Nadir_Reflectance_Band1_filled',
-            'Nadir_Reflectance_Band2_filled',
-            'Nadir_Reflectance_Band3_filled',
-            'Nadir_Reflectance_Band4_filled',
-            'Nadir_Reflectance_Band5_filled',
-            'Nadir_Reflectance_Band6_filled',
-            'Nadir_Reflectance_Band7_filled'
-        ],
-        'static':[
-            'slope',
-            'elevation',
-            'canopy_height',
-            'clay',
-            'sand'
-        ],
-        'climate_zone':[
-            'climate_zone_1','climate_zone_2','climate_zone_3',
-            'climate_zone_4','climate_zone_5','climate_zone_6',
-            'climate_zone_7','climate_zone_8','climate_zone_9',
-            'climate_zone_10','climate_zone_11','climate_zone_12',
-            'climate_zone_13','climate_zone_14','climate_zone_15',
-            'climate_zone_16','climate_zone_17','climate_zone_18',
-            'climate_zone_19','climate_zone_20','climate_zone_21',
-            'climate_zone_22','climate_zone_23','climate_zone_24',
-            'climate_zone_25','climate_zone_26','climate_zone_27',
-            'climate_zone_28','climate_zone_29',
-        ],
-        'landcover_frac':[
-            'barren',
-            'crops',
-            'deciduous_forest',
-            'developed',
-            'evergreen_forest',
-            'grass',
-            'mixed_forest',
-            'other',
-            'shrub',
-            'water',
-            'wetlands'
-        ]
-    }
-    print('opening datasets...')
-    dss = {
-        'daymet': xr.open_zarr(
-            os.path.join(oak_dir, 'daymet/daymet_all_vars.zarr'),
-            consolidated=False
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compare LFMC time series across one or more model families. "
+            "Model curves are generated by running point-tool inference."
+        )
+    )
+    parser.add_argument(
+        "--num_sites_per_criterion",
+        type=int,
+        default=3,
+        help=(
+            "How many sites to plot per criterion (good, average, poor) "
+            "for each anchor model."
         ),
-        'modis': xr.open_zarr(
-            os.path.join(
-                oak_dir,
-                'modis/modis_regridded_gapfilled/quality_1/interpolated/modis_all_vars.zarr'
+    )
+    parser.add_argument(
+        "--min_measurements",
+        type=int,
+        default=10,
+        help="Minimum observations required at a site for ranking/plotting.",
+    )
+    parser.add_argument(
+        "--plot_dir",
+        type=str,
+        default=DEFAULT_PLOT_DIR,
+        help="Directory where timeseries plots are written.",
+    )
+    parser.add_argument(
+        "--inputs_root",
+        type=str,
+        default=DEFAULT_INPUTS_ROOT,
+        help="Root directory containing model input folders with var_names.json.",
+    )
+    parser.add_argument(
+        "--padding_days",
+        type=int,
+        default=60,
+        help="Days added before/after observed LFMC dates when building inference windows.",
+    )
+    parser.add_argument(
+        "--max_years",
+        type=int,
+        default=3,
+        help="Maximum years of output window to plot per site.",
+    )
+    parser.add_argument(
+        "--model_df_index",
+        type=int,
+        default=None,
+        help=(
+            "Optional original DataFrame index from model_summary_results.csv "
+            "to select a specific model row."
+        ),
+    )
+    parser.add_argument(
+        "--plot_vv",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether to plot VV observations/inference on the right axis.",
+    )
+    parser.add_argument(
+        "--plot_vh",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether to plot VH observations/inference on the right axis.",
+    )
+    parser.add_argument(
+        "--model_roots",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional list of output-root directories (each containing "
+            "transformer_* subdirs and model_summary_results.csv)."
+        ),
+    )
+    parser.add_argument(
+        "--model_names",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional display names aligned with --model_roots. If omitted, "
+            "basenames of --model_roots are used."
+        ),
+    )
+    parser.add_argument(
+        "--model_input_data_names",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional input-data folder names aligned with --model_roots. If omitted, "
+            "the corresponding model display names are used."
+        ),
+    )
+    parser.add_argument(
+        "--ensemble_model_roots",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional list of ensemble output-root directories. Each root should "
+            "contain multiple completed transformer_* seed member directories."
+        ),
+    )
+    parser.add_argument(
+        "--ensemble_model_names",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional display names aligned with --ensemble_model_roots. If omitted, "
+            "basenames of --ensemble_model_roots are used."
+        ),
+    )
+    parser.add_argument(
+        "--ensemble_input_data_names",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional input-data folder names aligned with --ensemble_model_roots. "
+            "If omitted, the corresponding ensemble display names are used."
+        ),
+    )
+    return parser.parse_args()
+
+
+def default_model_configs():
+    base_root = "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs"
+    return [
+        {
+            "name": "lfmc_vh_vv",
+            "outputs_root": os.path.join(base_root, "lfmc_vh_vv"),
+            "input_data_name": "lfmc_vh_vv",
+            "model_type": "standard",
+            "model_num_tasks": 3,
+
+        },
+    ]
+
+
+def get_inference_datasets():
+    global _INFERENCE_DSS
+    if _INFERENCE_DSS is not None:
+        return _INFERENCE_DSS
+    required_paths = [
+        DAYMET_ZARR_PATH,
+        MODIS_ZARR_PATH,
+        NLCD_ZARR_PATH,
+        STATIC_NC_PATH,
+        CLIMATE_NC_PATH,
+    ]
+    for path in required_paths:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Missing required inference dataset: {path}")
+    print("Opening inference datasets...")
+    _INFERENCE_DSS = {
+        "daymet": xr.open_zarr(DAYMET_ZARR_PATH, consolidated=False),
+        "modis": xr.open_zarr(MODIS_ZARR_PATH),
+        "static": xr.open_dataset(STATIC_NC_PATH),
+        "climate_zone": xr.open_dataset(CLIMATE_NC_PATH),
+        "landcover_frac": xr.open_zarr(NLCD_ZARR_PATH),
+    }
+    return _INFERENCE_DSS
+
+
+def is_complete_model_dir(model_dir):
+    if not os.path.isdir(model_dir):
+        return False
+    if not os.path.exists(os.path.join(model_dir, "fold_info.json")):
+        return False
+    fold_dirs = [
+        d
+        for d in os.listdir(model_dir)
+        if d.startswith("fold_") and os.path.isdir(os.path.join(model_dir, d))
+    ]
+    return len(fold_dirs) > 0
+
+
+def is_complete_ensemble_member_dir(model_dir):
+    return is_complete_model_dir(model_dir) and os.path.isdir(os.path.join(model_dir, "fold_9998"))
+
+
+def select_ensemble_member_dirs(outputs_root):
+    member_dirs = []
+    for name in os.listdir(outputs_root):
+        model_dir = os.path.join(outputs_root, name)
+        if name.startswith("transformer_") and is_complete_ensemble_member_dir(model_dir):
+            member_dirs.append(model_dir)
+    if len(member_dirs) == 0:
+        raise FileNotFoundError(
+            f"No complete ensemble member dirs found under {outputs_root}"
+        )
+    member_dirs = sorted(member_dirs, key=lambda x: os.path.getmtime(x))
+    return member_dirs
+
+
+def select_model_dir(outputs_root, model_df_index=None):
+    summary_csv = os.path.join(outputs_root, "model_summary_results.csv")
+    if os.path.exists(summary_csv):
+        df = pd.read_csv(summary_csv)
+        if "model_dir" in df.columns:
+            if model_df_index is not None:
+                if model_df_index not in df.index:
+                    raise KeyError(
+                        f"Requested model_df_index={model_df_index} not found in "
+                        f"{summary_csv}. Available index range: "
+                        f"{int(df.index.min())} to {int(df.index.max())}."
+                    )
+                model_dir = df.loc[model_df_index, "model_dir"]
+                if not is_complete_model_dir(model_dir):
+                    raise FileNotFoundError(
+                        f"Model dir at DataFrame index {model_df_index} is incomplete: {model_dir}"
+                    )
+                return model_dir
+            if "test_insitu_rmse" in df.columns:
+                df["test_insitu_rmse"] = pd.to_numeric(df["test_insitu_rmse"], errors="coerce")
+                df = df.dropna(subset=["test_insitu_rmse"])
+                df = df.sort_values("test_insitu_rmse", ascending=True)
+            for model_dir in df["model_dir"].tolist():
+                if is_complete_model_dir(model_dir):
+                    return model_dir
+    elif model_df_index is not None:
+        raise FileNotFoundError(
+            f"--model_df_index was provided but no model_summary_results.csv exists under {outputs_root}"
+        )
+    candidates = []
+    for name in os.listdir(outputs_root):
+        model_dir = os.path.join(outputs_root, name)
+        if name.startswith("transformer_") and is_complete_model_dir(model_dir):
+            candidates.append(model_dir)
+    if len(candidates) == 0:
+        raise FileNotFoundError(
+            f"No complete transformer_* model dirs found under {outputs_root}"
+        )
+    candidates = sorted(candidates, key=lambda x: os.path.getmtime(x), reverse=True)
+    return candidates[0]
+
+
+def build_model_entries(model_configs, model_df_index=None):
+    entries = []
+    for config in model_configs:
+        if config.get("is_ensemble", False):
+            member_dirs = select_ensemble_member_dirs(config["outputs_root"])
+            print(f"Using ensemble for {config['name']}: {len(member_dirs)} members")
+            member_site_errors = {}
+            member_site_error_list = []
+            for member_idx, member_dir in enumerate(member_dirs, start=1):
+                print(f"  member {member_idx}/{len(member_dirs)}: {member_dir}")
+                this_site_error = get_site_error(member_dir)
+                member_site_errors[member_dir] = this_site_error
+                member_site_error_list.append(this_site_error)
+            site_error = aggregate_site_errors(member_site_error_list)
+            entries.append(
+                {
+                    "name": config["name"],
+                    "outputs_root": config["outputs_root"],
+                    "input_data_name": config["input_data_name"],
+                    "model_type": config.get("model_type", "standard"),
+                    "model_num_tasks": int(config.get("model_num_tasks", 3)),
+                    "model_dir": config["outputs_root"],
+                    "is_ensemble": True,
+                    "member_dirs": member_dirs,
+                    "member_site_errors": member_site_errors,
+                    "site_error": site_error,
+                }
             )
+        else:
+            model_dir = select_model_dir(config["outputs_root"], model_df_index=model_df_index)
+            print(f"Using model for {config['name']}: {model_dir}")
+            site_error = get_site_error(model_dir)
+            entries.append(
+                {
+                    "name": config["name"],
+                    "outputs_root": config["outputs_root"],
+                    "input_data_name": config["input_data_name"],
+                    "model_type": config.get("model_type", "standard"),
+                    "model_num_tasks": int(config.get("model_num_tasks", 3)),
+                    "model_dir": model_dir,
+                    "is_ensemble": False,
+                    "site_error": site_error,
+                }
+            )
+    return entries
+
+
+def aggregate_site_errors(member_site_error_list):
+    if len(member_site_error_list) == 0:
+        raise ValueError("Cannot aggregate an empty ensemble site-error list")
+    template = member_site_error_list[0]
+    site_keys = sorted(template.keys())
+    out = {}
+    for site in site_keys:
+        template_site = template[site]
+        pred_stack = []
+        template_dates = pd.to_datetime(template_site["dates"], errors="coerce")
+        template_true = np.asarray(template_site["true_values"], dtype=float)
+        template_preds = np.asarray(template_site["predictions"], dtype=float)
+        template_frame = pd.DataFrame(
+            {
+                "date": template_dates,
+                "true": template_true,
+                "pred": template_preds,
+            }
+        ).sort_values(["date", "true", "pred"], kind="mergesort").reset_index(drop=True)
+        template_date_key = template_frame["date"].astype(str).tolist()
+        pred_stack.append(template_frame["pred"].to_numpy(dtype=float))
+        for member_idx, site_error in enumerate(member_site_error_list[1:], start=2):
+            if site not in site_error:
+                raise ValueError(f"Ensemble member missing site {site}")
+            this_site = site_error[site]
+            if this_site["fold"] != template_site["fold"]:
+                raise ValueError(f"Fold mismatch for site {site}")
+            this_dates = pd.to_datetime(this_site["dates"], errors="coerce")
+            this_true = np.asarray(this_site["true_values"], dtype=float)
+            this_preds = np.asarray(this_site["predictions"], dtype=float)
+            this_frame = pd.DataFrame(
+                {
+                    "date": this_dates,
+                    "true": this_true,
+                    "pred": this_preds,
+                }
+            ).sort_values(["date", "true", "pred"], kind="mergesort").reset_index(drop=True)
+            this_date_key = this_frame["date"].astype(str).tolist()
+            if this_date_key != template_date_key:
+                raise ValueError(
+                    f"LFMC date mismatch for site {site} in ensemble member {member_idx}"
+                )
+            if not np.allclose(
+                this_frame["true"].to_numpy(dtype=float),
+                template_frame["true"].to_numpy(dtype=float),
+                rtol=0.0,
+                atol=1e-4,
+                equal_nan=True,
+            ):
+                raise ValueError(
+                    f"LFMC truth mismatch for site {site} in ensemble member {member_idx}"
+                )
+            pred_stack.append(this_frame["pred"].to_numpy(dtype=float))
+        pred_stack = np.stack(pred_stack, axis=1)
+        true_vals = template_frame["true"].to_numpy(dtype=float)
+        pred_mean = pred_stack.mean(axis=1)
+        site_rmse = float(np.sqrt(np.mean((true_vals - pred_mean) ** 2)))
+        if len(true_vals) < 2:
+            site_r2 = float("nan")
+            site_var = float("nan")
+        else:
+            ss_res = np.sum((true_vals - pred_mean) ** 2)
+            ss_tot = np.sum((true_vals - np.mean(true_vals)) ** 2)
+            site_r2 = float("nan") if ss_tot == 0 else float(1.0 - (ss_res / ss_tot))
+            site_var = float(np.var(true_vals))
+        out[site] = {
+            "num_measurements": int(len(true_vals)),
+            "true_values": true_vals.tolist(),
+            "predictions": pred_mean.tolist(),
+            "prediction_std": pred_stack.std(axis=1, ddof=0).tolist(),
+            "dates": template_frame["date"].astype(str).tolist(),
+            "rmse": site_rmse,
+            "r2": site_r2,
+            "var": site_var,
+            "fold": template_site["fold"],
+        }
+    return out
+
+
+def build_site_df(site_error, site_keys):
+    records = []
+    for site in site_keys:
+        this = site_error[site]
+        records.append(
+            {
+                "site": site,
+                "rmse": float(this["rmse"]),
+                "num_measurements": int(this["num_measurements"]),
+            }
+        )
+    return pd.DataFrame.from_records(records)
+
+
+def _pick_sites(df, n_sites, used_sites):
+    picked = []
+    for site in df["site"].tolist():
+        if site in used_sites:
+            continue
+        used_sites.add(site)
+        picked.append(site)
+        if len(picked) >= n_sites:
+            break
+    return picked
+
+
+def select_sites_for_anchor(site_df, n_sites, min_measurements):
+    out = {"good": [], "average": [], "poor": []}
+    ranked = site_df.copy()
+    ranked = ranked[ranked["num_measurements"] >= min_measurements]
+    ranked = ranked[np.isfinite(ranked["rmse"])]
+    if len(ranked) == 0:
+        return out
+    ranked = ranked.sort_values("rmse", ascending=True).reset_index(drop=True)
+    median_rmse = float(ranked["rmse"].median())
+    used_sites = set()
+    out["good"] = _pick_sites(ranked.sort_values("rmse", ascending=True), n_sites, used_sites)
+    avg_df = ranked.copy()
+    avg_df["median_dist"] = np.abs(avg_df["rmse"] - median_rmse)
+    avg_df = avg_df.sort_values(["median_dist", "rmse"], ascending=[True, True])
+    out["average"] = _pick_sites(avg_df, n_sites, used_sites)
+    out["poor"] = _pick_sites(ranked.sort_values("rmse", ascending=False), n_sites, used_sites)
+    return out
+
+
+def _site_to_fmt(site):
+    lat_str, lon_str = site.split("_", 1)
+    return f"{float(lat_str):.5f}_{float(lon_str):.5f}"
+
+
+def _to_naive_datetime(vals):
+    dt = pd.to_datetime(vals)
+    try:
+        return dt.tz_localize(None)
+    except TypeError:
+        return dt
+
+
+def _parse_site_lat_lon(site):
+    lat_str, lon_str = site.split("_", 1)
+    return float(lat_str), float(lon_str)
+
+
+def model_color(model_name):
+    name = str(model_name).strip().lower().replace("-", "_")
+    if name in {"lfmc", "lfmc_ens", "single_task", "singletask"}:
+        return "#6a3d9a"
+    if name in {"lfmc_vh_vv", "lfmc_vv_vh", "lfmc_vh_vv_ens", "lfmc_vh_vv_ens_fullrandom", "multitask"}:
+        return "#e75480"
+    return None
+
+
+def _sort_dates_and_values(dates, pred_vals, true_vals):
+    if len(pred_vals) == 0:
+        return dates, pred_vals, true_vals
+    dt = pd.to_datetime(dates)
+    order = np.argsort(dt.values)
+    dt = dt.values[order]
+    pred_vals = np.asarray(pred_vals)[order]
+    true_vals = np.asarray(true_vals)[order]
+    return dt, pred_vals, true_vals
+
+
+def epoch_num(path):
+    match = re.search(r"model_epoch(\d+)\.pt$", path)
+    return int(match.group(1)) if match else -1
+
+
+def get_latest_checkpoint(fold_dir):
+    checkpoints = sorted(
+        glob.glob(os.path.join(fold_dir, "model_epoch*.pt")),
+        key=epoch_num,
+    )
+    if len(checkpoints) == 0:
+        raise FileNotFoundError(f"No model_epoch*.pt files found in {fold_dir}")
+    return checkpoints[-1]
+
+
+def _parse_data_seed_from_model_dir(model_dir):
+    match = re.search(r"_ds(\d+)", os.path.basename(model_dir))
+    return match.group(1) if match else None
+
+
+def _resolve_input_data_dir(inputs_root, input_data_name, model_dir=None):
+    direct_dir = os.path.join(inputs_root, input_data_name)
+    direct_var_names = os.path.join(direct_dir, "var_names.json")
+    if os.path.exists(direct_var_names):
+        return direct_dir
+    if model_dir is not None and os.path.isdir(direct_dir):
+        data_seed = _parse_data_seed_from_model_dir(model_dir)
+        if data_seed is not None:
+            member_candidates = []
+            for child_name in os.listdir(direct_dir):
+                child_dir = os.path.join(direct_dir, child_name)
+                if not os.path.isdir(child_dir):
+                    continue
+                if not child_name.endswith(f"ds{data_seed}"):
+                    continue
+                if os.path.exists(os.path.join(child_dir, "var_names.json")):
+                    member_candidates.append(child_dir)
+            if len(member_candidates) == 1:
+                return member_candidates[0]
+    raise FileNotFoundError(
+        f"Could not resolve input data dir for input_data_name={input_data_name} "
+        f"under inputs_root={inputs_root} (model_dir={model_dir})"
+    )
+
+
+def infer_model_num_tasks(checkpoint_path, fallback_num_tasks):
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state = ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt
+    task_weights = state.get("task_weights", None)
+    if task_weights is None:
+        return int(fallback_num_tasks)
+    if isinstance(task_weights, torch.Tensor):
+        return int(task_weights.numel())
+    arr = np.asarray(task_weights)
+    return int(arr.size)
+
+
+def get_site_time_window(anchor_site, padding_days=60, max_years=3):
+    true_dates = _to_naive_datetime(anchor_site["dates"])
+    true_vals = np.asarray(anchor_site["true_values"], dtype=float)
+    start_date = pd.Timestamp(true_dates.min()) - pd.DateOffset(days=padding_days)
+    end_date = pd.Timestamp(true_dates.max()) + pd.DateOffset(days=padding_days)
+    if start_date < pd.Timestamp("2004-01-01"):
+        start_date = pd.Timestamp("2004-01-01")
+    max_days = int(365 * max_years)
+    if (end_date - start_date).days > max_days:
+        end_date = start_date + pd.DateOffset(days=max_days)
+    keep_mask = (pd.to_datetime(true_dates) >= start_date) & (pd.to_datetime(true_dates) <= end_date)
+    true_dates = pd.to_datetime(true_dates)[keep_mask]
+    true_vals = true_vals[keep_mask]
+    return start_date.normalize(), end_date.normalize(), true_dates, true_vals
+
+
+def _combined_obs_window(lfmc_dates, vv_vh_obs, padding_days):
+    date_arrays = []
+    if lfmc_dates is not None and len(lfmc_dates) > 0:
+        date_arrays.append(pd.to_datetime(lfmc_dates))
+    if vv_vh_obs is not None:
+        vv_dates = vv_vh_obs.get("vv_dates", None)
+        vh_dates = vv_vh_obs.get("vh_dates", None)
+        if vv_dates is not None and len(vv_dates) > 0:
+            date_arrays.append(pd.to_datetime(vv_dates))
+        if vh_dates is not None and len(vh_dates) > 0:
+            date_arrays.append(pd.to_datetime(vh_dates))
+    if len(date_arrays) == 0:
+        raise ValueError("No observed LFMC/VV/VH dates available to define window")
+    all_dates = pd.DatetimeIndex(np.concatenate([arr.values for arr in date_arrays]))
+    start_date = pd.Timestamp(all_dates.min()) - pd.DateOffset(days=padding_days)
+    end_date = pd.Timestamp(all_dates.max()) + pd.DateOffset(days=padding_days)
+    return start_date.normalize(), end_date.normalize()
+
+
+def _slice_series_to_window(dates, vals, start_date, end_date):
+    if dates is None or vals is None or len(dates) == 0:
+        return dates, vals
+    dt = pd.to_datetime(dates)
+    keep = (dt >= start_date) & (dt <= end_date)
+    out_dates = dt[keep].values
+    out_vals = np.asarray(vals)[keep]
+    return out_dates, out_vals
+
+
+def get_model_training_series(model_entry, site, start_date, end_date):
+    site_entry = model_entry["site_error"][site]
+    train_dates = _to_naive_datetime(site_entry["dates"])
+    train_preds = np.asarray(site_entry["predictions"], dtype=float)
+    keep = (pd.to_datetime(train_dates) >= start_date) & (pd.to_datetime(train_dates) <= end_date)
+    train_dates = pd.to_datetime(train_dates)[keep].values
+    train_preds = train_preds[keep]
+    if len(train_dates) > 0:
+        order = np.argsort(pd.to_datetime(train_dates).values)
+        train_dates = train_dates[order]
+        train_preds = train_preds[order]
+    return train_dates, train_preds
+
+
+def get_model_lag_days(input_data_dir):
+    cache_key = input_data_dir
+    if cache_key in _MODEL_LAG_DAYS:
+        return _MODEL_LAG_DAYS[cache_key]
+    build_config_path = os.path.join(input_data_dir, "build_config.json")
+    short_lag_days = SHORT_LAG_DAYS
+    long_lag_days = LONG_LAG_DAYS
+    if os.path.exists(build_config_path):
+        with open(build_config_path, "r") as file_obj:
+            build_config = json.load(file_obj)
+        if "short_lag_days" in build_config and len(build_config["short_lag_days"]) > 0:
+            short_lag_days = [int(v) for v in build_config["short_lag_days"]]
+        if "long_lag_days" in build_config and len(build_config["long_lag_days"]) > 0:
+            long_lag_days = [int(v) for v in build_config["long_lag_days"]]
+    _MODEL_LAG_DAYS[cache_key] = (short_lag_days, long_lag_days)
+    return short_lag_days, long_lag_days
+
+
+def _input_norm_signature(norm_params):
+    relevant = {
+        "train_short_mean": norm_params.get("train_short_mean"),
+        "train_short_std": norm_params.get("train_short_std"),
+        "train_long_mean": norm_params.get("train_long_mean"),
+        "train_long_std": norm_params.get("train_long_std"),
+        "train_static_mean": norm_params.get("train_static_mean"),
+        "train_static_std": norm_params.get("train_static_std"),
+    }
+    return json.dumps(relevant, sort_keys=True)
+
+
+def _static_var_is_unnormalized(var_name):
+    if "climate_zone" in var_name:
+        return True
+    return any(token in var_name for token in _LANDCOVER_STATIC_TOKENS)
+
+
+def _effective_static_norm_arrays(static_vars, norm_params):
+    mean = np.asarray(norm_params["train_static_mean"], dtype=np.float32).copy()
+    std = np.asarray(norm_params["train_static_std"], dtype=np.float32).copy()
+    for idx, var_name in enumerate(static_vars):
+        if _static_var_is_unnormalized(var_name):
+            mean[idx] = 0.0
+            std[idx] = 1.0
+    return mean, std
+
+
+def _renormalize_tensor(tensor, ref_mean, ref_std, new_mean, new_std):
+    arr = tensor.detach().cpu().numpy().astype(np.float32, copy=True)
+    ref_mean = np.asarray(ref_mean, dtype=np.float32)
+    ref_std = np.asarray(ref_std, dtype=np.float32)
+    new_mean = np.asarray(new_mean, dtype=np.float32)
+    new_std = np.asarray(new_std, dtype=np.float32)
+    safe_ref_std = np.where(np.abs(ref_std) > 0, ref_std, 1.0)
+    safe_new_std = np.where(np.abs(new_std) > 0, new_std, 1.0)
+    reshape = (1,) * (arr.ndim - 1) + (arr.shape[-1],)
+    raw = arr * safe_ref_std.reshape(reshape) + ref_mean.reshape(reshape)
+    renorm = (raw - new_mean.reshape(reshape)) / safe_new_std.reshape(reshape)
+    return torch.tensor(renorm, dtype=tensor.dtype)
+
+
+def _runtimes_share_feature_layout(reference_runtime, runtime):
+    return (
+        reference_runtime["var_names"] == runtime["var_names"] and
+        list(reference_runtime["short_lag_days"]) == list(runtime["short_lag_days"]) and
+        list(reference_runtime["long_lag_days"]) == list(runtime["long_lag_days"])
+    )
+
+
+def _convert_tensor_payload_norm(reference_payload, reference_runtime, runtime, tensor_cache, site):
+    cache_key = (
+        "renorm",
+        site,
+        str(reference_payload["safe_start"].date()),
+        str(reference_payload["safe_end"].date()),
+        reference_runtime["input_data_dir"],
+        runtime["input_data_dir"],
+        _input_norm_signature(reference_runtime["norm_params"]),
+        _input_norm_signature(runtime["norm_params"]),
+    )
+    if cache_key in tensor_cache:
+        return tensor_cache[cache_key]
+    short_ref_mean = np.asarray(reference_runtime["norm_params"]["train_short_mean"], dtype=np.float32)
+    short_ref_std = np.asarray(reference_runtime["norm_params"]["train_short_std"], dtype=np.float32)
+    short_new_mean = np.asarray(runtime["norm_params"]["train_short_mean"], dtype=np.float32)
+    short_new_std = np.asarray(runtime["norm_params"]["train_short_std"], dtype=np.float32)
+    long_ref_mean = np.asarray(reference_runtime["norm_params"]["train_long_mean"], dtype=np.float32)
+    long_ref_std = np.asarray(reference_runtime["norm_params"]["train_long_std"], dtype=np.float32)
+    long_new_mean = np.asarray(runtime["norm_params"]["train_long_mean"], dtype=np.float32)
+    long_new_std = np.asarray(runtime["norm_params"]["train_long_std"], dtype=np.float32)
+    static_ref_mean, static_ref_std = _effective_static_norm_arrays(
+        reference_runtime["var_names"]["static_vars"],
+        reference_runtime["norm_params"],
+    )
+    static_new_mean, static_new_std = _effective_static_norm_arrays(
+        runtime["var_names"]["static_vars"],
+        runtime["norm_params"],
+    )
+    out = {
+        "empty": False,
+        "safe_start": reference_payload["safe_start"],
+        "safe_end": reference_payload["safe_end"],
+        "short_tensor": _renormalize_tensor(
+            reference_payload["short_tensor"],
+            short_ref_mean,
+            short_ref_std,
+            short_new_mean,
+            short_new_std,
         ),
-        'static': xr.open_dataset(
-            os.path.join(oak_dir, 'static', 'static_features_500m_epsg5070_float32.nc')
+        "long_tensor": _renormalize_tensor(
+            reference_payload["long_tensor"],
+            long_ref_mean,
+            long_ref_std,
+            long_new_mean,
+            long_new_std,
         ),
-        'climate_zone': xr.open_dataset(
-            os.path.join(oak_dir, 'climate_zones', 'climate_zone_per_pixel_westUS.nc4')
+        "static_tensor": _renormalize_tensor(
+            reference_payload["static_tensor"],
+            static_ref_mean,
+            static_ref_std,
+            static_new_mean,
+            static_new_std,
         ),
-        'landcover_frac': xr.open_zarr(
-            os.path.join(oak_dir, 'nlcd', 'nlcd_target_grid_2003_2023.zarr')
+        "info_df": reference_payload["info_df"].copy(),
+    }
+    tensor_cache[cache_key] = out
+    return out
+
+
+def _empty_inference_output():
+    return {
+        "dates": np.array([], dtype="datetime64[ns]"),
+        "lfmc_pred": np.array([]),
+        "lfmc_pred_std": np.array([]),
+        "vv_pred": np.array([]),
+        "vv_pred_std": np.array([]),
+        "vh_pred": np.array([]),
+        "vh_pred_std": np.array([]),
+    }
+
+
+def _run_runtime_forward(runtime, model_type, tensor_payload):
+    if tensor_payload["empty"]:
+        return _empty_inference_output()
+    preds_df = run_model_forward(
+        tensor_payload["short_tensor"],
+        tensor_payload["long_tensor"],
+        tensor_payload["static_tensor"],
+        tensor_payload["info_df"].copy(),
+        runtime["checkpoint_path"],
+        runtime["norm_params"],
+        model_task_weights=runtime["model_num_tasks"],
+        model_type=model_type,
+    )
+    return {
+        "dates": _to_naive_datetime(preds_df["date"].values),
+        "lfmc_pred": np.asarray(preds_df["lfmc_pred"].values, dtype=float),
+        "lfmc_pred_std": (
+            np.asarray(preds_df["lfmc_pred_std"].values, dtype=float)
+            if "lfmc_pred_std" in preds_df.columns
+            else np.array([])
+        ),
+        "vv_pred": (
+            np.asarray(preds_df["vv_pred"].values, dtype=float)
+            if "vv_pred" in preds_df.columns
+            else np.array([])
+        ),
+        "vv_pred_std": (
+            np.asarray(preds_df["vv_pred_std"].values, dtype=float)
+            if "vv_pred_std" in preds_df.columns
+            else np.array([])
+        ),
+        "vh_pred": (
+            np.asarray(preds_df["vh_pred"].values, dtype=float)
+            if "vh_pred" in preds_df.columns
+            else np.array([])
+        ),
+        "vh_pred_std": (
+            np.asarray(preds_df["vh_pred_std"].values, dtype=float)
+            if "vh_pred_std" in preds_df.columns
+            else np.array([])
         ),
     }
-    short_lag_days = [
-        0,1,2,3,4,5,6,7,8,9,10,
-        11,12,13,14,15,16,17,18,19,20,
-        21,22,23,24,25,26,27,28,29,30
-    ]
-    long_lag_days = [
-        0,1,2,3,4,5,6,7,8,9,10,
-        11,12,13,14,15,16,17,18,19,20,
-        21,22,23,24,25,26,27,28,29,30,
-        31,32,33,34,35,36,37,38,39,40,
-        41,42,43,44,45,46,47,48,49,50,
-        51,52,53,54,55,56,57,58,59,60,
-        61,62,63,64,65,66,67,68,69,70,
-        71,72,73,74,75,76,77,78,79,80,
-        81,82,83,84,85,86,87,88,89,90,
-        91,92,93,94,95,96,97,98,99,100,
-        101,102,103,104,105,106,107,108,109,110,
-        111,112,113,114,115,116,117,118,119,120,
-        121,122,123,124,125,126,127,128,129,130,
-        131,132,133,134,135,136,137,138,139,140,
-        141,142,143,144,145,146,147,148,149,150,
-        151,152,153,154,155,156,157,158,159,160,
-        161,162,163,164,165,166,167,168,169,170,
-        171,172,173,174,175,176,177,178,179,180,
-    ]
-    # locations of possible static input variables
-    short_tensor, long_tensor, static_tensor, info_df = build_tensors(
-        locs,
-        start_dates,
-        end_dates,
-        var_names,
-        var_locs,
-        dss,
-        short_lag_days,
-        long_lag_days,
-        norm_params,
-    )
-    ## large section for debuggin why we couldn't reproduce results for a long time...
-    ## e.g. checking point tool tensors vs. training tensors
-    #short_example_tensor = os.path.join(
-    #    os.path.abspath(os.path.dirname(var_names_path)),
-    #    'X_short.pt'
-    #)
-    #long_example_tensor = os.path.join(
-    #    os.path.abspath(os.path.dirname(var_names_path)),
-    #    'X_long.pt'
-    #)
-    #static_example_tensor = os.path.join(
-    #    os.path.abspath(os.path.dirname(var_names_path)),
-    #    'X_static.pt'
-    #)
-    #example_info = os.path.join(
-    #    os.path.abspath(os.path.dirname(var_names_path)),
-    #    'info.csv'
-    #)
-    #short_example_tensor = torch.load(short_example_tensor)
-    #long_example_tensor = torch.load(long_example_tensor)
-    #static_example_tensor = torch.load(static_example_tensor)
-    #example_info = pd.read_csv(example_info)
-    #example_info['date'] = pd.to_datetime(example_info['date']).dt.normalize().dt.tz_localize(None)
-    #idx = example_info[
-    #    (example_info['longitude']  == locs[0][0]) &
-    #    (example_info['latitude']   == locs[0][1]) &
-    #    (example_info['date']       == start_dates[0])
-    #].index.tolist()[0]
-    #short_example_tensor = short_example_tensor[idx,:,:]
-    #long_example_tensor = long_example_tensor[idx,:,:]
-    #static_example_tensor = static_example_tensor[idx,:,:]
-    #our_test_short_tensor = short_tensor[0,:,:]
-    #our_test_long_tensor = long_tensor[0,:,:]
-    #our_test_static_tensor = static_tensor[0,:,:]
-    #for v,var in enumerate(var_names['short_vars']):
-    #    this_mean = norm_params['train_short_mean'][v]
-    #    this_std = norm_params['train_short_std'][v]
-    #    short_example_tensor[:,v] = (short_example_tensor[:,v] - this_mean) / this_std
-    #for v,var in enumerate(var_names['long_vars']):
-    #    this_mean = norm_params['train_long_mean'][v]
-    #    this_std = norm_params['train_long_std'][v]
-    #    long_example_tensor[:,v] = (long_example_tensor[:,v] - this_mean) / this_std
-    #for v,var in enumerate(var_names['static_vars']):
-    #    if (
-    #        'barren' in var or
-    #        'crops' in var or
-    #        'forest' in var or
-    #        'developed' in var or
-    #        'grass' in var or
-    #        'other' in var or
-    #        'shrub' in var or
-    #        'water' in var or
-    #        'wetlands' in var or 
-    #        'climate_zone' in var
-    #    ):
-    #        continue
-    #    this_mean = norm_params['train_static_mean'][v]
-    #    this_std = norm_params['train_static_std'][v]
-    #    static_example_tensor[:,v] = (static_example_tensor[:,v] - this_mean) / this_std
-    #short_model = np.asarray(short_example_tensor)
-    #short_ours = np.asarray(our_test_short_tensor)
-    #short_diff = np.abs(short_model - short_ours)
-    #short_bad = np.where((short_diff > 1e-6) | np.isnan(short_ours))
-    #long_model = np.asarray(long_example_tensor)
-    #long_ours = np.asarray(our_test_long_tensor)
-    #long_diff = np.abs(long_model - long_ours)
-    #long_bad = np.where((long_diff > 1e-6) | np.isnan(long_ours))
-    #static_model = np.asarray(static_example_tensor)
-    #static_ours = np.asarray(our_test_static_tensor)
-    #static_diff = np.abs(static_model - static_ours)
-    #static_bad = np.where((static_diff > 1e-6) | np.isnan(static_ours))
-    #print(short_bad)
-    #print(long_bad)
-    #print(static_bad)
-    ##print(short_model)
-    ##print(short_ours)
-    ##print(long_model)
-    ##print(long_ours)
-    ##print(np.where(np.isnan(long_ours)))
-    ##print(np.where(np.isnan(long_model)))
-    ##print(static_model)
-    ##print(static_ours)
-    ##sys.exit()
-    ## if these aren't empty then we have a problem
-    #if short_bad[0].size > 0:
-    #    raise ValueError("Short tensor mismatch")
-    #if long_bad[0].size > 0:
-    #    raise ValueError("Long tensor mismatch")
-    #if static_bad[0].size > 0:
-    #    raise ValueError("Static tensor mismatch")
-    preds_df = run_model_forward(
-        short_tensor,
-        long_tensor,
-        static_tensor,
-        info_df,
-        checkpoint_path,
-        norm_params,
-        model_task_weights=model_num_tasks,
-        model_type=model_type
-    )
-    return preds_df
 
-def get_site_preds(
+
+def _clamp_inference_window(dss, start_date, end_date, short_lag_days, long_lag_days):
+    modis_time = pd.to_datetime(dss["modis"]["time"].values)
+    daymet_time = pd.to_datetime(dss["daymet"]["time"].values)
+    modis_min = pd.Timestamp(modis_time.min()).normalize()
+    modis_max = pd.Timestamp(modis_time.max()).normalize()
+    daymet_min = pd.Timestamp(daymet_time.min()).normalize()
+    daymet_max = pd.Timestamp(daymet_time.max()).normalize()
+    short_lag_needed = int(max(short_lag_days)) if len(short_lag_days) > 0 else 0
+    long_lag_needed = int(max(long_lag_days)) if len(long_lag_days) > 0 else 0
+    min_start = max(
+        modis_min + pd.DateOffset(days=short_lag_needed),
+        daymet_min + pd.DateOffset(days=long_lag_needed),
+    )
+    max_end = min(modis_max, daymet_max)
+    safe_start = max(pd.Timestamp(start_date).normalize(), min_start)
+    safe_end = min(pd.Timestamp(end_date).normalize(), max_end)
+    return safe_start, safe_end
+
+
+def _load_model_runtime(model_dir, fold, inputs_root, input_data_name, fallback_num_tasks, runtime_cache):
+    input_data_dir = _resolve_input_data_dir(
+        inputs_root,
+        input_data_name,
+        model_dir=model_dir,
+    )
+    cache_key = (model_dir, fold, input_data_dir)
+    if cache_key in runtime_cache:
+        return runtime_cache[cache_key]
+    fold_dir = os.path.join(model_dir, f"fold_{fold}")
+    var_names_path = os.path.join(input_data_dir, "var_names.json")
+    norm_params_path = os.path.join(fold_dir, "norm_params.json")
+    checkpoint_path = get_latest_checkpoint(fold_dir)
+    model_num_tasks = infer_model_num_tasks(checkpoint_path, fallback_num_tasks)
+    if not os.path.exists(var_names_path):
+        raise FileNotFoundError(f"Missing var_names.json: {var_names_path}")
+    if not os.path.exists(norm_params_path):
+        raise FileNotFoundError(f"Missing norm_params.json: {norm_params_path}")
+    with open(var_names_path, "r") as file_obj:
+        var_names = json.load(file_obj)
+    with open(norm_params_path, "r") as file_obj:
+        norm_params = json.load(file_obj)
+    short_lag_days, long_lag_days = get_model_lag_days(input_data_dir)
+    runtime = {
+        "fold_dir": fold_dir,
+        "checkpoint_path": checkpoint_path,
+        "model_num_tasks": model_num_tasks,
+        "input_data_dir": input_data_dir,
+        "var_names": var_names,
+        "norm_params": norm_params,
+        "short_lag_days": short_lag_days,
+        "long_lag_days": long_lag_days,
+    }
+    runtime_cache[cache_key] = runtime
+    return runtime
+
+
+def _get_or_build_inference_tensors(
     site,
-    site_error,
-    scratch_dir,
-    model_names,
-    model_dirs,
-    model_folds,
-    model_tasks,
-    model_types,
-    input_data_names
+    start_date,
+    end_date,
+    input_data_name,
+    runtime,
+    tensor_cache,
+    progress_label=None,
 ):
-    this_lat = float(site.split('_')[0])
-    this_lon = float(site.split('_')[1])
-    this_site = site_error[site]
-    this_trues = this_site['true_values']
-    this_trues_dates = pd.to_datetime(this_site['dates'])
-    this_trues_dates = this_trues_dates.tz_localize(None)
-    start_date = this_trues_dates.min() - pd.DateOffset(days=60)
-    end_date = this_trues_dates.max() + pd.DateOffset(days=60)
-    # if longer than 3 years, just show three years
-    if start_date < pd.Timestamp('2004-01-01'):
-        start_date = pd.Timestamp('2004-01-01')
-    if (end_date - start_date).days > 365 * 3:
-        end_date = start_date + pd.DateOffset(days=365 * 3)
-        trues_df = pd.DataFrame({
-            'vals':this_trues,
-            'dates':this_trues_dates
-        })
-        trues_df_trimmed = trues_df[(trues_df['dates'] >= start_date) & (trues_df['dates'] <= end_date)]
-        this_trues = trues_df_trimmed['vals'].values
-        this_trues_dates = trues_df_trimmed['dates'].values
-    #start_date = this_trues_dates.min()
-    #end_date = this_trues_dates.max()
-    print(start_date)
-    print(end_date)
-    source = np.repeat('true', len(this_trues_dates))
-    # normalize to 00:00:00
-    out_df = pd.DataFrame({
-        'dates':this_trues_dates,
-        'vals':this_trues,
-        'source':source
-    })
-    start_date = start_date.normalize()
-    end_date = end_date.normalize()
-    all_dates = pd.date_range(start=start_date, end=end_date, freq='D')
-    for m,this_model_name in enumerate(model_names):
-        this_model_dir = model_dirs[m]
-        this_var_names_path = os.path.join(
-            scratch_dir,'inputs',input_data_names[m],'var_names.json'
+    dss = get_inference_datasets()
+    safe_start, safe_end = _clamp_inference_window(
+        dss,
+        start_date,
+        end_date,
+        runtime["short_lag_days"],
+        runtime["long_lag_days"],
+    )
+    if safe_start > safe_end:
+        return {
+            "empty": True,
+            "safe_start": safe_start,
+            "safe_end": safe_end,
+        }
+    cache_key = (
+        site,
+        str(safe_start.date()),
+        str(safe_end.date()),
+        input_data_name,
+        tuple(runtime["short_lag_days"]),
+        tuple(runtime["long_lag_days"]),
+        _input_norm_signature(runtime["norm_params"]),
+    )
+    if cache_key in tensor_cache:
+        if progress_label is not None:
+            print(f"{progress_label}: tensor cache hit")
+        return tensor_cache[cache_key]
+    if progress_label is not None:
+        print(
+            f"{progress_label}: building initial tensors "
+            f"for {site} from {safe_start.date()} to {safe_end.date()}"
         )
-        this_norm_params_path = os.path.join(
-            this_model_dir,
-            f'fold_{model_folds[m]}',
-            'norm_params.json'
+    lat, lon = _parse_site_lat_lon(site)
+    short_tensor, long_tensor, static_tensor, info_df = build_tensors(
+        locs=[[lon, lat]],
+        start_dates=[safe_start],
+        end_dates=[safe_end],
+        var_names=runtime["var_names"],
+        var_locs=VAR_LOCS,
+        dss=dss,
+        short_lag_days=runtime["short_lag_days"],
+        long_lag_days=runtime["long_lag_days"],
+        norm_params=runtime["norm_params"],
+    )
+    out = {
+        "empty": False,
+        "safe_start": safe_start,
+        "safe_end": safe_end,
+        "short_tensor": short_tensor,
+        "long_tensor": long_tensor,
+        "static_tensor": static_tensor,
+        "info_df": info_df,
+    }
+    tensor_cache[cache_key] = out
+    return out
+
+
+def get_model_inference_series(
+    model_entry,
+    site,
+    start_date,
+    end_date,
+    inference_cache,
+    tensor_cache,
+    runtime_cache,
+    inputs_root,
+):
+    if model_entry.get("is_ensemble", False):
+        return get_ensemble_inference_series(
+            model_entry,
+            site,
+            start_date,
+            end_date,
+            inference_cache,
+            tensor_cache,
+            runtime_cache,
+            inputs_root,
         )
-        this_epochs = glob.glob(
-            os.path.join(this_model_dir,f'fold_{model_folds[m]}','model_epoch*.pt')
+    fold = str(model_entry["site_error"][site]["fold"])
+    runtime = _load_model_runtime(
+        model_entry["model_dir"],
+        fold,
+        inputs_root,
+        model_entry["input_data_name"],
+        model_entry["model_num_tasks"],
+        runtime_cache,
+    )
+    cache_key = (
+        model_entry["model_dir"],
+        site,
+        str(start_date.date()),
+        str(end_date.date()),
+        runtime["input_data_dir"],
+        tuple(runtime["short_lag_days"]),
+        tuple(runtime["long_lag_days"]),
+        _input_norm_signature(runtime["norm_params"]),
+    )
+    if cache_key in inference_cache:
+        return inference_cache[cache_key]
+    tensor_payload = _get_or_build_inference_tensors(
+        site,
+        start_date,
+        end_date,
+        runtime["input_data_dir"],
+        runtime,
+        tensor_cache,
+        progress_label=f"[{model_entry['name']}] tensor prep",
+    )
+    out = _run_runtime_forward(runtime, model_entry["model_type"], tensor_payload)
+    inference_cache[cache_key] = out
+    return out
+
+
+def get_ensemble_inference_series(
+    model_entry,
+    site,
+    start_date,
+    end_date,
+    inference_cache,
+    tensor_cache,
+    runtime_cache,
+    inputs_root,
+):
+    if len(model_entry["member_dirs"]) == 0:
+        raise ValueError(f"No ensemble member dirs found for {model_entry['name']}")
+    reference_member_dir = model_entry["member_dirs"][0]
+    reference_fold = str(model_entry["member_site_errors"][reference_member_dir][site]["fold"])
+    reference_runtime = _load_model_runtime(
+        reference_member_dir,
+        reference_fold,
+        inputs_root,
+        model_entry["input_data_name"],
+        model_entry["model_num_tasks"],
+        runtime_cache,
+    )
+    cache_key = (
+        model_entry["outputs_root"],
+        "ensemble",
+        site,
+        str(start_date.date()),
+        str(end_date.date()),
+        reference_runtime["input_data_dir"],
+        tuple(reference_runtime["short_lag_days"]),
+        tuple(reference_runtime["long_lag_days"]),
+    )
+    if cache_key in inference_cache:
+        return inference_cache[cache_key]
+    reference_payload = _get_or_build_inference_tensors(
+        site,
+        start_date,
+        end_date,
+        reference_runtime["input_data_dir"],
+        reference_runtime,
+        tensor_cache,
+        progress_label=f"[{model_entry['name']}] reference member tensor prep",
+    )
+    member_outputs = []
+    member_iter = tqdm(
+        enumerate(model_entry["member_dirs"], start=1),
+        total=len(model_entry["member_dirs"]),
+        desc=f"Running ensemble members for {model_entry['name']} at {site}",
+        unit="member",
+    )
+    for member_idx, member_dir in member_iter:
+        member_iter.set_postfix_str(os.path.basename(member_dir)[-24:])
+        member_fold = str(model_entry["member_site_errors"][member_dir][site]["fold"])
+        runtime = _load_model_runtime(
+            member_dir,
+            member_fold,
+            inputs_root,
+            model_entry["input_data_name"],
+            model_entry["model_num_tasks"],
+            runtime_cache,
         )
-        #this_epochs = sorted(this_epochs)
-        this_epochs = sorted(this_epochs, key=epoch_num)
-        this_checkpoint_path = this_epochs[-1]
-        this_model_num_tasks = model_tasks[m]
-        this_model_type = model_types[m]
-        this_model_preds = run_point_tool(
-            locs=[[this_lon,this_lat]],
-            start_dates=[start_date],
-            end_dates=[end_date],
-            var_names_path=this_var_names_path,
-            norm_params_path=this_norm_params_path,
-            checkpoint_path=this_checkpoint_path,
-            model_num_tasks=this_model_num_tasks,
-            model_type=this_model_type
+        member_cache_key = (
+            member_dir,
+            site,
+            str(start_date.date()),
+            str(end_date.date()),
+            runtime["input_data_dir"],
+            tuple(runtime["short_lag_days"]),
+            tuple(runtime["long_lag_days"]),
+            _input_norm_signature(runtime["norm_params"]),
         )
-        this_out = pd.DataFrame({
-            'dates': all_dates,
-            'vals': this_model_preds['lfmc_pred'],
-            'source': np.repeat(this_model_name, len(all_dates))
-        })
-        out_df = pd.concat([out_df, this_out], ignore_index=True)
-    return out_df
+        if member_cache_key in inference_cache:
+            tqdm.write(f"[{model_entry['name']}] member {member_idx}/{len(model_entry['member_dirs'])}: inference cache hit")
+            member_outputs.append(inference_cache[member_cache_key])
+            continue
+        if member_idx == 1:
+            tqdm.write(
+                f"[{model_entry['name']}] member {member_idx}/{len(model_entry['member_dirs'])}: "
+                "running reference tensors through model"
+            )
+            tensor_payload = reference_payload
+        elif _runtimes_share_feature_layout(reference_runtime, runtime):
+            tqdm.write(
+                f"[{model_entry['name']}] member {member_idx}/{len(model_entry['member_dirs'])}: "
+                "re-normalizing cached tensors for this member"
+            )
+            tensor_payload = _convert_tensor_payload_norm(
+                reference_payload,
+                reference_runtime,
+                runtime,
+                tensor_cache,
+                site,
+            )
+        else:
+            tqdm.write(
+                f"[{model_entry['name']}] member {member_idx}/{len(model_entry['member_dirs'])}: "
+                "feature layout differs, rebuilding tensors"
+            )
+            tensor_payload = _get_or_build_inference_tensors(
+                site,
+                start_date,
+                end_date,
+                runtime["input_data_dir"],
+                runtime,
+                tensor_cache,
+                progress_label=f"[{model_entry['name']}] member {member_idx}/{len(model_entry['member_dirs'])} tensor prep",
+            )
+        member_out = _run_runtime_forward(runtime, model_entry["model_type"], tensor_payload)
+        inference_cache[member_cache_key] = member_out
+        member_outputs.append(member_out)
+    dates = member_outputs[0]["dates"]
+    lfmc_stack = np.stack([out["lfmc_pred"] for out in member_outputs], axis=1)
+    out = {
+        "dates": dates,
+        "lfmc_pred": lfmc_stack.mean(axis=1),
+        "lfmc_pred_std": lfmc_stack.std(axis=1, ddof=0),
+    }
+    for key in ["vv_pred", "vh_pred"]:
+        available = [out_i[key] for out_i in member_outputs if len(out_i[key]) == len(dates)]
+        if len(available) == len(member_outputs) and len(available) > 0:
+            stack = np.stack(available, axis=1)
+            out[key] = stack.mean(axis=1)
+            out[f"{key}_std"] = stack.std(axis=1, ddof=0)
+        else:
+            out[key] = np.array([])
+            out[f"{key}_std"] = np.array([])
+    inference_cache[cache_key] = out
+    return out
+
+
+def get_vv_vh_site_series(vhvv_entry, site, fold_cache, start_date=None, end_date=None):
+    if vhvv_entry is None or site not in vhvv_entry["site_error"]:
+        return None
+    if vhvv_entry.get("is_ensemble", False):
+        vv_frames = []
+        vh_frames = []
+        for member_dir in vhvv_entry["member_dirs"]:
+            member_entry = {
+                "model_dir": member_dir,
+                "site_error": vhvv_entry["member_site_errors"][member_dir],
+            }
+            if site not in member_entry["site_error"]:
+                continue
+            member_series = get_vv_vh_site_series(
+                member_entry,
+                site,
+                fold_cache,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if member_series is None:
+                continue
+            if len(member_series["vv_dates"]) > 0:
+                vv_frames.append(
+                    pd.DataFrame(
+                        {
+                            "date": pd.to_datetime(member_series["vv_dates"]),
+                            "true": np.asarray(member_series["vv_true"], dtype=float),
+                        }
+                    )
+                )
+            if len(member_series["vh_dates"]) > 0:
+                vh_frames.append(
+                    pd.DataFrame(
+                        {
+                            "date": pd.to_datetime(member_series["vh_dates"]),
+                            "true": np.asarray(member_series["vh_true"], dtype=float),
+                        }
+                    )
+                )
+        if len(vv_frames) == 0 and len(vh_frames) == 0:
+            return None
+        if len(vv_frames) > 0:
+            vv_df = (
+                pd.concat(vv_frames, ignore_index=True)
+                .drop_duplicates(subset=["date", "true"])
+                .sort_values(["date", "true"])
+                .reset_index(drop=True)
+            )
+            vv_dates = _to_naive_datetime(vv_df["date"].values)
+            vv_true = vv_df["true"].to_numpy(dtype=float)
+        else:
+            vv_dates = np.array([])
+            vv_true = np.array([])
+        if len(vh_frames) > 0:
+            vh_df = (
+                pd.concat(vh_frames, ignore_index=True)
+                .drop_duplicates(subset=["date", "true"])
+                .sort_values(["date", "true"])
+                .reset_index(drop=True)
+            )
+            vh_dates = _to_naive_datetime(vh_df["date"].values)
+            vh_true = vh_df["true"].to_numpy(dtype=float)
+        else:
+            vh_dates = np.array([])
+            vh_true = np.array([])
+        return {
+            "vv_dates": vv_dates,
+            "vv_pred": np.array([]),
+            "vv_true": vv_true,
+            "vh_dates": vh_dates,
+            "vh_pred": np.array([]),
+            "vh_true": vh_true,
+        }
+    fold = str(vhvv_entry["site_error"][site]["fold"])
+    fold_key = (vhvv_entry["model_dir"], fold)
+    if fold_key not in fold_cache:
+        fold_dir = os.path.join(vhvv_entry["model_dir"], f"fold_{fold}")
+        info_path = os.path.join(fold_dir, "test_info.csv")
+        out_path = os.path.join(fold_dir, "test_outputs.pth")
+        if not (os.path.exists(info_path) and os.path.exists(out_path)):
+            fold_cache[fold_key] = None
+        else:
+            info = pd.read_csv(info_path, low_memory=False)
+            out = torch.load(out_path, weights_only=False)
+            fold_cache[fold_key] = (info, out)
+    cached = fold_cache.get(fold_key)
+    if cached is None:
+        return None
+    info, out = cached
+    source = info["source"].astype(str)
+    vv_info = info[source.str.startswith("vv")].copy().reset_index(drop=True)
+    vh_info = info[source.str.startswith("vh")].copy().reset_index(drop=True)
+    vv_preds = out.get("vv_preds", None)
+    vv_true = out.get("vv_true", None)
+    vh_preds = out.get("vh_preds", None)
+    vh_true = out.get("vh_true", None)
+    lat, lon = _parse_site_lat_lon(site)
+    if vv_preds is None or vv_true is None or len(vv_info) != len(vv_preds):
+        vv_dates = np.array([])
+        vv_site_preds = np.array([])
+        vv_site_true = np.array([])
+    else:
+        vv_preds = np.asarray(vv_preds)
+        vv_true = np.asarray(vv_true)
+        vv_mask = np.isclose(vv_info["latitude"].astype(float).values, lat) & np.isclose(
+            vv_info["longitude"].astype(float).values, lon
+        )
+        vv_idx = np.where(vv_mask)[0]
+        vv_dates = _to_naive_datetime(vv_info.loc[vv_mask, "date"].values)
+        vv_site_preds = vv_preds[vv_idx]
+        vv_site_true = vv_true[vv_idx]
+        vv_dates, vv_site_preds, vv_site_true = _sort_dates_and_values(vv_dates, vv_site_preds, vv_site_true)
+    if vh_preds is None or vh_true is None or len(vh_info) != len(vh_preds):
+        vh_dates = np.array([])
+        vh_site_preds = np.array([])
+        vh_site_true = np.array([])
+    else:
+        vh_preds = np.asarray(vh_preds)
+        vh_true = np.asarray(vh_true)
+        vh_mask = np.isclose(vh_info["latitude"].astype(float).values, lat) & np.isclose(
+            vh_info["longitude"].astype(float).values, lon
+        )
+        vh_idx = np.where(vh_mask)[0]
+        vh_dates = _to_naive_datetime(vh_info.loc[vh_mask, "date"].values)
+        vh_site_preds = vh_preds[vh_idx]
+        vh_site_true = vh_true[vh_idx]
+        vh_dates, vh_site_preds, vh_site_true = _sort_dates_and_values(vh_dates, vh_site_preds, vh_site_true)
+    if start_date is not None and end_date is not None:
+        if len(vv_dates) > 0:
+            vv_keep = (pd.to_datetime(vv_dates) >= start_date) & (pd.to_datetime(vv_dates) <= end_date)
+            vv_dates = pd.to_datetime(vv_dates)[vv_keep].values
+            vv_site_preds = vv_site_preds[vv_keep]
+            vv_site_true = vv_site_true[vv_keep]
+        if len(vh_dates) > 0:
+            vh_keep = (pd.to_datetime(vh_dates) >= start_date) & (pd.to_datetime(vh_dates) <= end_date)
+            vh_dates = pd.to_datetime(vh_dates)[vh_keep].values
+            vh_site_preds = vh_site_preds[vh_keep]
+            vh_site_true = vh_site_true[vh_keep]
+    if len(vv_site_preds) == 0 and len(vh_site_preds) == 0:
+        return None
+    return {
+        "vv_dates": vv_dates,
+        "vv_pred": vv_site_preds,
+        "vv_true": vv_site_true,
+        "vh_dates": vh_dates,
+        "vh_pred": vh_site_preds,
+        "vh_true": vh_site_true,
+    }
+
+
+def find_vhvv_entry(model_entries):
+    for entry in model_entries:
+        entry_str = f"{entry['name']} {entry['outputs_root']} {entry['model_dir']}".lower()
+        if "vh_vv" in entry_str or "vv_vh" in entry_str:
+            return entry
+    return None
+
+
+def plot_site_comparison(
+    site,
+    criterion,
+    rank_idx,
+    anchor_entry,
+    model_entries,
+    plot_dir,
+    inputs_root,
+    inference_cache,
+    vhvv_entry=None,
+    vhvv_fold_cache=None,
+    padding_days=60,
+    max_years=3,
+    plot_vv=True,
+    plot_vh=True,
+    tensor_cache=None,
+    runtime_cache=None,
+):
+    anchor_site = anchor_entry["site_error"][site]
+    true_dates = _to_naive_datetime(anchor_site["dates"])
+    true_vals = np.asarray(anchor_site["true_values"], dtype=float)
+    vv_vh_obs = None
+    if plot_vv or plot_vh:
+        vv_vh_obs = get_vv_vh_site_series(
+            vhvv_entry,
+            site,
+            vhvv_fold_cache if vhvv_fold_cache is not None else {},
+            start_date=None,
+            end_date=None,
+        )
+    start_date, end_date = _combined_obs_window(
+        true_dates,
+        vv_vh_obs,
+        padding_days=padding_days,
+    )
+    true_dates, true_vals = _slice_series_to_window(
+        true_dates,
+        true_vals,
+        start_date,
+        end_date,
+    )
+    if vv_vh_obs is not None:
+        vv_dates, vv_true = _slice_series_to_window(
+            vv_vh_obs["vv_dates"],
+            vv_vh_obs["vv_true"],
+            start_date,
+            end_date,
+        )
+        vv_vh_obs["vv_dates"] = vv_dates
+        vv_vh_obs["vv_true"] = vv_true
+        vh_dates, vh_true = _slice_series_to_window(
+            vv_vh_obs["vh_dates"],
+            vv_vh_obs["vh_true"],
+            start_date,
+            end_date,
+        )
+        vv_vh_obs["vh_dates"] = vh_dates
+        vv_vh_obs["vh_true"] = vh_true
+    all_dates = []
+    all_vals = []
+    all_labels = []
+    all_linestyles = []
+    all_markers = []
+    all_colors = []
+    all_lowers = []
+    all_uppers = []
+    for model_entry in model_entries:
+        this_infer = get_model_inference_series(
+            model_entry,
+            site,
+            start_date,
+            end_date,
+            inference_cache,
+            tensor_cache if tensor_cache is not None else {},
+            runtime_cache if runtime_cache is not None else {},
+            inputs_root,
+        )
+        this_color = model_color(model_entry["name"])
+        all_dates.append(this_infer["dates"])
+        all_vals.append(this_infer["lfmc_pred"])
+        all_labels.append(f"{model_entry['name']}_infer")
+        all_linestyles.append("-")
+        all_markers.append("")
+        all_colors.append(this_color)
+        if "lfmc_pred_std" in this_infer and len(this_infer["lfmc_pred_std"]) == len(this_infer["lfmc_pred"]):
+            all_lowers.append(this_infer["lfmc_pred"] - this_infer["lfmc_pred_std"])
+            all_uppers.append(this_infer["lfmc_pred"] + this_infer["lfmc_pred_std"])
+        else:
+            all_lowers.append(None)
+            all_uppers.append(None)
+    all_dates.append(true_dates)
+    all_vals.append(true_vals)
+    all_labels.append("lfmc_true")
+    all_linestyles.append("")
+    all_markers.append("X")
+    all_colors.append("black")
+    all_lowers.append(None)
+    all_uppers.append(None)
+    vv_infer_dates = None
+    vv_infer_vals = None
+    vv_infer_std = None
+    vh_infer_dates = None
+    vh_infer_vals = None
+    vh_infer_std = None
+    if vhvv_entry is not None and (plot_vv or plot_vh):
+        vhvv_infer = get_model_inference_series(
+            vhvv_entry,
+            site,
+            start_date,
+            end_date,
+            inference_cache,
+            tensor_cache if tensor_cache is not None else {},
+            runtime_cache if runtime_cache is not None else {},
+            inputs_root,
+        )
+        if plot_vv:
+            vv_infer_dates = vhvv_infer["dates"]
+            vv_infer_vals = vhvv_infer["vv_pred"]
+            vv_infer_std = vhvv_infer.get("vv_pred_std", None)
+        if plot_vh:
+            vh_infer_dates = vhvv_infer["dates"]
+            vh_infer_vals = vhvv_infer["vh_pred"]
+            vh_infer_std = vhvv_infer.get("vh_pred_std", None)
+    site_fmt = _site_to_fmt(site)
+    anchor_name_safe = anchor_entry["name"].replace(" ", "_")
+    plotted_parts = ["lfmc"]
+    if plot_vv:
+        plotted_parts.append("vv")
+    if plot_vh:
+        plotted_parts.append("vh")
+    plotted_tag = "-".join(plotted_parts)
+    save_name = (
+        f"comparison_timeseries_{site_fmt}_model-{anchor_name_safe}_"
+        f"{criterion}_rank{rank_idx:02d}_plot-{plotted_tag}.png"
+    )
+    save_path = os.path.join(plot_dir, save_name)
+    plotting.plot_lfmc_with_vv_vh(
+        lfmc_dates=all_dates,
+        lfmc_vals=all_vals,
+        lfmc_labels=all_labels,
+        lfmc_linestyles=all_linestyles,
+        lfmc_markers=all_markers,
+        lfmc_colors=all_colors,
+        save_path=save_path,
+        lfmc_lower_vals=all_lowers,
+        lfmc_upper_vals=all_uppers,
+        vv_obs_dates=None if (vv_vh_obs is None or not plot_vv) else vv_vh_obs["vv_dates"],
+        vv_obs=None if (vv_vh_obs is None or not plot_vv) else vv_vh_obs["vv_true"],
+        vv_pred_dates=vv_infer_dates,
+        vv_pred=vv_infer_vals,
+        vv_pred_std=vv_infer_std,
+        vh_obs_dates=None if (vv_vh_obs is None or not plot_vh) else vv_vh_obs["vh_dates"],
+        vh_obs=None if (vv_vh_obs is None or not plot_vh) else vv_vh_obs["vh_true"],
+        vh_pred_dates=vh_infer_dates,
+        vh_pred=vh_infer_vals,
+        vh_pred_std=vh_infer_std,
+    )
+
 
 def main():
-    scratch_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/'
-    model_gen_dirs = [
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_base',
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_multitask_5_1',
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_base_nll',
-        '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/outputs/news1_multitask_5_1_nll',
-    ]
-    model_1_gen_name = 'base'
-    model_2_gen_name = 'multitask_5_1'
-    model_3_gen_name = 'base_nll'
-    model_4_gen_name = 'multitask_5_1_nll'
-    # settings for the best sarstats model
-    dms = [32,32,32,32]
-    nh = [1,1,1,1]
-    nl = [2,2,2,2]
-    df = [64,64,64,64]
-    do = [0.15,0.15,0.15,0.15]
-    bs = [128,128,128,128]
-    lr = [5e-4,5e-4,5e-4,5e-4]
-    warmup = [502,2458,502,2458]
-    wd = [1e-4,1e-4,1e-4,1e-4]
-    iobs = [30638,30638,30638,30638]
-    vvobs = [0,0,0,0]
-    vhobs = [0,119237,0,119237]
-    dmlong = [32,64,64,32]
-    nhlong = [1,2,2,1]
-    nllong = [2,3,3,2]
-    dflong = [64,128,128,64]
-    outlong = [32,32,32,32]
-    model_1_name = (
-        f'transformer_dm{dms[0]}_nh{nh[0]}_nl{nl[0]}_df{df[0]}_do{do[0]}'
-        f'_bs{bs[0]}_lr{lr[0]}_warmup{warmup[0]}_wd{wd[0]}'
-        f'_iobs{iobs[0]}_vvobs{vvobs[0]}_vhobs{vhobs[0]}'
-        f'_dmlong{dmlong[0]}_nhlong{nhlong[0]}_nllong{nllong[0]}'
-        f'_dflong{dflong[0]}_outlong{outlong[0]}_basic'
-    )
-    model_2_name = (
-        f'transformer_dm{dms[1]}_nh{nh[1]}_nl{nl[1]}_df{df[1]}_do{do[1]}'
-        f'_bs{bs[1]}_lr{lr[1]}_warmup{warmup[1]}_wd{wd[1]}'
-        f'_iobs{iobs[1]}_vvobs{vvobs[1]}_vhobs{vhobs[1]}'
-        f'_dmlong{dmlong[1]}_nhlong{nhlong[1]}_nllong{nllong[1]}'
-        f'_dflong{dflong[1]}_outlong{outlong[1]}_basic'
-    )
-    model_3_name = (
-        f'transformer_dm{dms[2]}_nh{nh[2]}_nl{nl[2]}_df{df[2]}_do{do[2]}'
-        f'_bs{bs[2]}_lr{lr[2]}_warmup{warmup[2]}_wd{wd[2]}'
-        f'_iobs{iobs[2]}_vvobs{vvobs[2]}_vhobs{vhobs[2]}'
-        f'_dmlong{dmlong[2]}_nhlong{nhlong[2]}_nllong{nllong[2]}'
-        f'_dflong{dflong[2]}_outlong{outlong[2]}_basic'
-    )
-    model_4_name = (
-        f'transformer_dm{dms[3]}_nh{nh[3]}_nl{nl[3]}_df{df[3]}_do{do[3]}'
-        f'_bs{bs[3]}_lr{lr[3]}_warmup{warmup[3]}_wd{wd[3]}'
-        f'_iobs{iobs[3]}_vvobs{vvobs[3]}_vhobs{vhobs[3]}'
-        f'_dmlong{dmlong[3]}_nhlong{nhlong[3]}_nllong{nllong[3]}'
-        f'_dflong{dflong[3]}_outlong{outlong[3]}_basic'
-    )
-    model_1_dir = os.path.join(model_gen_dirs[0], model_1_name)
-    model_2_dir = os.path.join(model_gen_dirs[1], model_2_name)
-    model_3_dir = os.path.join(model_gen_dirs[2], model_3_name)
-    model_4_dir = os.path.join(model_gen_dirs[3], model_4_name)
-    model_tasks = [1,2,1,2]
-    model_types = ['standard','standard','uncertainty','uncertainty']
-    #final_epochs = [
-    #    'model_epoch5.pt',
-    #    'model_epoch4.pt',
-    #    'model_epoch5.pt',
-    #    'model_epoch8.pt'
-    #]
-    input_data_names = ['news1_base','news1_multitask','news1_base','news1_multitask']
-    model_gen_names = [model_1_gen_name, model_2_gen_name, model_3_gen_name, model_4_gen_name]
-    model_dirs = [model_1_dir, model_2_dir, model_3_dir, model_4_dir]
-    model_1_site_error = get_site_error(model_1_dir)
-    model_2_site_error = get_site_error(model_2_dir)
-    model_3_site_error = get_site_error(model_3_dir)
-    model_4_site_error = get_site_error(model_4_dir)
-    model_1_2_comparison_df = site_analysis(
-        model_1_site_error,
-        model_2_site_error,
-        model_1_gen_name,
-        model_2_gen_name,
-        make_plots = False
-    )
-    model_3_4_comparison_df = site_analysis(
-        model_3_site_error,
-        model_4_site_error,
-        model_3_gen_name,
-        model_4_gen_name,
-        make_plots = False
-    )
-    # get the 5 sites where base is far better than multitask
-    model_1_2_comparison_df = model_1_2_comparison_df[model_1_2_comparison_df['num_measurements'] > 10]
-    rmse_diffs_1_2 = model_1_2_comparison_df['rmse_diff']
-    best_sites_1_df = rmse_diffs_1_2.nlargest(5)
-    best_sites_1 = rmse_diffs_1_2.nlargest(5).index.tolist()
-    print('best sites for model 1:')
-    print(best_sites_1_df)
-    for s,site in enumerate(best_sites_1):
-        compare_models_at_site(
-            site,
-            model_1_site_error,
-            model_gen_names,
-            scratch_dir,
-            model_dirs,
-            model_tasks,
-            model_types,
-            input_data_names,
-            'base_best'
+    args = get_args()
+    if args.num_sites_per_criterion < 1:
+        raise ValueError("--num_sites_per_criterion must be >= 1")
+    model_configs = []
+    if args.model_roots is None and args.ensemble_model_roots is None:
+        model_configs.extend(default_model_configs())
+    if args.model_roots is not None:
+        if args.model_names is None:
+            model_names = [os.path.basename(root.rstrip("/")) for root in args.model_roots]
+        else:
+            model_names = args.model_names
+        if args.model_input_data_names is None:
+            model_input_data_names = model_names
+        else:
+            model_input_data_names = args.model_input_data_names
+        if len(model_names) != len(args.model_roots):
+            raise ValueError("--model_names must match --model_roots length")
+        if len(model_input_data_names) != len(args.model_roots):
+            raise ValueError("--model_input_data_names must match --model_roots length")
+        for name, root, input_data_name in zip(model_names, args.model_roots, model_input_data_names):
+            model_configs.append(
+                {
+                    "name": name,
+                    "outputs_root": root,
+                    "input_data_name": input_data_name,
+                    "model_type": "standard",
+                    "model_num_tasks": 3,
+                }
+            )
+    if args.ensemble_model_roots is not None:
+        if args.ensemble_model_names is None:
+            ensemble_model_names = [
+                os.path.basename(root.rstrip("/")) for root in args.ensemble_model_roots
+            ]
+        else:
+            ensemble_model_names = args.ensemble_model_names
+        if args.ensemble_input_data_names is None:
+            ensemble_input_data_names = ensemble_model_names
+        else:
+            ensemble_input_data_names = args.ensemble_input_data_names
+        if len(ensemble_model_names) != len(args.ensemble_model_roots):
+            raise ValueError("--ensemble_model_names must match --ensemble_model_roots length")
+        if len(ensemble_input_data_names) != len(args.ensemble_model_roots):
+            raise ValueError("--ensemble_input_data_names must match --ensemble_model_roots length")
+        for name, root, input_data_name in zip(
+            ensemble_model_names,
+            args.ensemble_model_roots,
+            ensemble_input_data_names,
+        ):
+            model_configs.append(
+                {
+                    "name": name,
+                    "outputs_root": root,
+                    "input_data_name": input_data_name,
+                    "model_type": "standard",
+                    "model_num_tasks": 3,
+                    "is_ensemble": True,
+                }
+            )
+    if len(model_configs) == 0:
+        raise ValueError("No model configurations were provided")
+    model_entries = build_model_entries(model_configs, model_df_index=args.model_df_index)
+    site_sets = [set(entry["site_error"].keys()) for entry in model_entries]
+    common_sites = set.intersection(*site_sets)
+    if len(common_sites) == 0:
+        raise ValueError("No overlapping sites across selected models")
+    print(f"Common sites across all models: {len(common_sites)}")
+    os.makedirs(args.plot_dir, exist_ok=True)
+    vhvv_entry = find_vhvv_entry(model_entries)
+    if vhvv_entry is not None and (args.plot_vv or args.plot_vh):
+        print(f"Using VV/VH overlay model: {vhvv_entry['name']}")
+    else:
+        print("No VV/VH model found in selected model list; plotting LFMC only.")
+    vhvv_fold_cache = {}
+    inference_cache = {}
+    tensor_cache = {}
+    runtime_cache = {}
+    criteria_order = ["good", "average", "poor"]
+    total_plots = 0
+    for anchor_entry in model_entries:
+        site_df = build_site_df(anchor_entry["site_error"], common_sites)
+        selected = select_sites_for_anchor(
+            site_df,
+            args.num_sites_per_criterion,
+            args.min_measurements,
         )
-    # get the 5 sites where multitask is far better than base
-    best_sites_2 = rmse_diffs_1_2.nsmallest(5).index.tolist()
-    for s,site in enumerate(best_sites_2):
-        compare_models_at_site(
-            site,
-            model_2_site_error,
-            model_gen_names,
-            scratch_dir,
-            model_dirs,
-            model_tasks,
-            model_types,
-            input_data_names,
-            'multitask_best'
-        )
-    # get 5 sites where base and multitask are similar
-    similar_sites_1_2 = rmse_diffs_1_2.abs().nsmallest(5).index.tolist()
-    for s,site in enumerate(similar_sites_1_2):
-        compare_models_at_site(
-            site,
-            model_1_site_error,
-            model_gen_names,
-            scratch_dir,
-            model_dirs,
-            model_tasks,
-            model_types,
-            input_data_names,
-            'base_multitask_similar'
-        )
-    # get 5 sites where base_nll is far better than multitask_nll
-    model_3_4_comparison_df = model_3_4_comparison_df[model_3_4_comparison_df['num_measurements'] > 10]
-    rmse_diffs_3_4 = model_3_4_comparison_df['rmse_diff']
-    best_sites_3 = rmse_diffs_3_4.nlargest(5).index.tolist()
-    for s,site in enumerate(best_sites_3):
-        compare_models_at_site(
-            site,
-            model_3_site_error,
-            model_gen_names,
-            scratch_dir,
-            model_dirs,
-            model_tasks,
-            model_types,
-            input_data_names,
-            'base_nll_best'
-        )
-    # get 5 sites where multitask_nll is far better than base_nll
-    best_sites_4 = rmse_diffs_3_4.nsmallest(5).index.tolist()
-    for s,site in enumerate(best_sites_4):
-        compare_models_at_site(
-            site,
-            model_4_site_error,
-            model_gen_names,
-            scratch_dir,
-            model_dirs,
-            model_tasks,
-            model_types,
-            input_data_names,
-            'multitask_nll_best'
-        )
-    # get 5 sites where multitask_nll and base_nll are similar
-    similar_sites_3_4 = rmse_diffs_3_4.abs().nsmallest(5).index.tolist()
-    for s,site in enumerate(similar_sites_3_4):
-        compare_models_at_site(
-            site,
-            model_3_site_error,
-            model_gen_names,
-            scratch_dir,
-            model_dirs,
-            model_tasks,
-            model_types,
-            input_data_names,
-            'base_nll_multitask_nll_similar'
-        )
+        print(f"\nAnchor model: {anchor_entry['name']}")
+        for criterion in criteria_order:
+            print(f"  {criterion}: {len(selected[criterion])} sites")
+            for rank_idx, site in enumerate(selected[criterion], start=1):
+                plot_site_comparison(
+                    site=site,
+                    criterion=criterion,
+                    rank_idx=rank_idx,
+                    anchor_entry=anchor_entry,
+                    model_entries=model_entries,
+                    plot_dir=args.plot_dir,
+                    inputs_root=args.inputs_root,
+                    inference_cache=inference_cache,
+                    vhvv_entry=vhvv_entry,
+                    vhvv_fold_cache=vhvv_fold_cache,
+                    padding_days=args.padding_days,
+                    max_years=args.max_years,
+                    plot_vv=args.plot_vv,
+                    plot_vh=args.plot_vh,
+                    tensor_cache=tensor_cache,
+                    runtime_cache=runtime_cache,
+                )
+                total_plots += 1
+    print(f"\nFinished. Wrote {total_plots} plots to: {args.plot_dir}")
+
 
 if __name__ == "__main__":
     main()

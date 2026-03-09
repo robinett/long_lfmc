@@ -11,17 +11,17 @@ import torch
 
 TASK_SPECS = {
     "lfmc": {
-        "source_legible": "nfmd",
+        "source_legible": ["nfmd"],
         "pred_key": "lfmc_preds",
         "true_key": "lfmc_true",
     },
     "vv": {
-        "source_legible": "vv",
+        "source_legible": ["vv"],
         "pred_key": "vv_preds",
         "true_key": "vv_true",
     },
     "vh": {
-        "source_legible": "vh_backscatter",
+        "source_legible": ["vh", "vh_backscatter"],
         "pred_key": "vh_preds",
         "true_key": "vh_true",
     },
@@ -41,6 +41,23 @@ def _expand_member_dirs(member_dirs: List[str], member_globs: List[str]) -> List
     if not out:
         raise ValueError("No ensemble member directories found")
     return out
+
+
+def _member_is_complete(member_dir: str) -> bool:
+    return os.path.isdir(os.path.join(member_dir, "fold_9998"))
+
+
+def _filter_completed_members(member_dirs: List[str], skip_incomplete: bool) -> Tuple[List[str], List[str]]:
+    if not skip_incomplete:
+        return member_dirs, []
+    completed = []
+    skipped = []
+    for member_dir in member_dirs:
+        if _member_is_complete(member_dir):
+            completed.append(member_dir)
+        else:
+            skipped.append(member_dir)
+    return completed, skipped
 
 
 def _list_folds(member_dir: str, include_final_fold: bool) -> List[int]:
@@ -86,7 +103,8 @@ def _load_fold_task_frame(member_dir: str, fold: int, split: str, task: str) -> 
     info_path = os.path.join(member_dir, f"fold_{fold}", f"{split}_info.csv")
     out = torch.load(out_path, weights_only=False)
     info = pd.read_csv(info_path)
-    info_task = info[info["source_legible"] == spec["source_legible"]].copy().reset_index(drop=True)
+    source_labels = spec["source_legible"]
+    info_task = info[info["source_legible"].isin(source_labels)].copy().reset_index(drop=True)
 
     preds = _safe_array(out[spec["pred_key"]])
     truth = _safe_array(out[spec["true_key"]])
@@ -200,9 +218,29 @@ def main():
     parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
     parser.add_argument("--tasks", nargs="+", default=["lfmc", "vh"], choices=list(TASK_SPECS.keys()))
     parser.add_argument("--include-final-fold", action="store_true", help="Include fold_9998 (all-data fit) if present")
+    parser.add_argument(
+        "--skip-incomplete-members",
+        action="store_true",
+        help="Skip ensemble member directories that do not yet contain fold_9998",
+    )
     args = parser.parse_args()
 
-    member_dirs = _expand_member_dirs(args.member_dir, args.member_glob)
+    candidate_member_dirs = _expand_member_dirs(args.member_dir, args.member_glob)
+    member_dirs, skipped_member_dirs = _filter_completed_members(
+        candidate_member_dirs,
+        skip_incomplete=args.skip_incomplete_members,
+    )
+    print(
+        f"Found {len(candidate_member_dirs)} candidate member directories, "
+        f"using {len(member_dirs)} complete members"
+    )
+    if skipped_member_dirs:
+        print(f"Skipping {len(skipped_member_dirs)} incomplete members:")
+        for member_dir in skipped_member_dirs:
+            print(f"  {member_dir}")
+    if not member_dirs:
+        raise ValueError("No completed ensemble member directories found")
+
     folds = _list_folds(member_dirs[0], include_final_fold=args.include_final_fold)
     if not folds:
         raise ValueError(f"No fold_* directories found in {member_dirs[0]}")
@@ -214,14 +252,22 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     summary = {
         "split": args.split,
+        "candidate_member_dirs": candidate_member_dirs,
         "member_dirs": member_dirs,
+        "skipped_member_dirs": skipped_member_dirs,
         "n_members": len(member_dirs),
         "folds": folds,
         "tasks": {},
     }
 
     for task in args.tasks:
-        agg = _aggregate_task(member_dirs, split=args.split, task=task, folds=folds)
+        try:
+            agg = _aggregate_task(member_dirs, split=args.split, task=task, folds=folds)
+        except ValueError as exc:
+            if task == "lfmc":
+                raise
+            print(f"Skipping task={task}: {exc}")
+            continue
         if agg.empty:
             print(f"Skipping task={task}: no rows found")
             continue
@@ -262,4 +308,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
