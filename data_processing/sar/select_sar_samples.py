@@ -1,3 +1,5 @@
+import argparse
+import os
 import numpy as np
 import xarray as xr
 import pandas as pd
@@ -20,6 +22,98 @@ def _ts():
 
 def _log(msg):
     print(f"[{_ts()}] {msg}")
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="Select SAR supervision samples for multitask LFMC training."
+    )
+    parser.add_argument(
+        "--sample-at-sites",
+        dest="sample_at_sites",
+        action="store_true",
+        help="Write SAR samples at LFMC sites.",
+    )
+    parser.add_argument(
+        "--no-sample-at-sites",
+        dest="sample_at_sites",
+        action="store_false",
+        help="Disable SAR sampling at LFMC sites.",
+    )
+    parser.set_defaults(sample_at_sites=False)
+    parser.add_argument(
+        "--sample-at-random",
+        dest="sample_at_random",
+        action="store_true",
+        help="Write SAR samples at randomly selected sites.",
+    )
+    parser.add_argument(
+        "--no-sample-at-random",
+        dest="sample_at_random",
+        action="store_false",
+        help="Disable SAR sampling at random sites.",
+    )
+    parser.set_defaults(sample_at_random=True)
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=42,
+        help="Random seed for site/location selection.",
+    )
+    parser.add_argument(
+        "--target-num-observations",
+        type=int,
+        default=55_000,
+        help="Approximate target number of observations per SAR variable.",
+    )
+    parser.add_argument(
+        "--random-count-batch-points",
+        type=int,
+        default=2_000,
+        help="Number of random spatial locations to score per batch.",
+    )
+    parser.add_argument(
+        "--min-dominant-landcover-fraction",
+        type=float,
+        default=0.5,
+        help="Minimum dominant land-cover fraction required for random samples.",
+    )
+    parser.add_argument(
+        "--strict-target",
+        action="store_true",
+        help="Raise if the requested target observation count cannot be met.",
+    )
+    parser.add_argument(
+        "--hide-within-batch-progress",
+        action="store_true",
+        help="Disable tqdm progress for points within each random-location batch.",
+    )
+    parser.add_argument(
+        "--vars-to-sample",
+        nargs="+",
+        default=["vv", "vh", "vv_minus_vh", "vv_over_vh"],
+        help="SAR variables to sample.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="/scratch/users/trobinet/long_lfmc/final_lfmc/sar",
+        help="Directory where CSV outputs should be written.",
+    )
+    parser.add_argument(
+        "--output-tag",
+        type=str,
+        default="",
+        help="Optional suffix appended to each output CSV basename.",
+    )
+    return parser.parse_args()
+
+
+def _tagged_csv_path(output_dir, base_name, output_tag):
+    stem, ext = os.path.splitext(base_name)
+    if output_tag:
+        base_name = f"{stem}_{output_tag}{ext}"
+    return os.path.join(output_dir, base_name)
 
 def _get_sar_var_da(sar_ds, var_name):
     if var_name in sar_ds.data_vars:
@@ -83,15 +177,20 @@ def _select_prefix_whole_sites(
     return ordered_flat_idxs[: stop_idx + 1], obs_over
 
 def main():
+    args = _parse_args()
     # which sampling should we do
-    sample_at_sites = False
-    sample_at_random = True
-    random_seed = 42
-    target_num_observations = 55_000
-    random_count_batch_points = 2_000
-    show_within_batch_progress = True
-    min_dominant_landcover_fraction = 0.5
-    strict_target = False
+    sample_at_sites = bool(args.sample_at_sites)
+    sample_at_random = bool(args.sample_at_random)
+    random_seed = int(args.random_seed)
+    target_num_observations = int(args.target_num_observations)
+    random_count_batch_points = int(args.random_count_batch_points)
+    show_within_batch_progress = not bool(args.hide_within_batch_progress)
+    min_dominant_landcover_fraction = float(args.min_dominant_landcover_fraction)
+    strict_target = bool(args.strict_target)
+    vars_to_sample = list(args.vars_to_sample)
+    output_dir = str(args.output_dir)
+    output_tag = str(args.output_tag).strip()
+    os.makedirs(output_dir, exist_ok=True)
     _log("Starting SAR sample selection script.")
     _log(
         f"Settings: sample_at_sites={sample_at_sites}, sample_at_random={sample_at_random}, "
@@ -99,7 +198,8 @@ def main():
         f"random_count_batch_points={random_count_batch_points}, "
         f"show_within_batch_progress={show_within_batch_progress}, "
         f"min_dominant_landcover_fraction={min_dominant_landcover_fraction}, "
-        f"strict_target={strict_target}"
+        f"strict_target={strict_target}, vars_to_sample={vars_to_sample}, "
+        f"output_dir={output_dir}, output_tag={output_tag!r}"
     )
     # glob pattern to pick up everything
     _log("Opening SAR zarr dataset...")
@@ -115,7 +215,6 @@ def main():
     lfmc_df = pd.read_csv(
         "/scratch/users/trobinet/long_lfmc/final_lfmc/nfmd/nfmd_processed.csv"
     )
-    vars_to_sample = ['vv', 'vh', 'vv_minus_vh', 'vv_over_vh']
     _log(f"Variables to sample: {vars_to_sample}")
     trns = Transformer.from_crs('EPSG:4326','EPSG:5070',always_xy=True)
     trns_back = Transformer.from_crs('EPSG:5070','EPSG:4326',always_xy=True)
@@ -228,7 +327,11 @@ def main():
                 f"estimated_obs={selected_obs_total}, written_obs={len(sampled_sar_at_sites)}."
             )
             var_fmt = var.lower()
-            out_path = f"/scratch/users/trobinet/long_lfmc/final_lfmc/sar/{var_fmt}_samples_at_sites_matching.csv"
+            out_path = _tagged_csv_path(
+                output_dir,
+                f"{var_fmt}_samples_at_sites_matching.csv",
+                output_tag,
+            )
             sampled_sar_at_sites.to_csv(out_path)
             _log(f"{var}: wrote site samples to {out_path}")
 
@@ -441,7 +544,11 @@ def main():
                 f"estimated_obs={selected_obs_by_var[var]}, written_obs={len(out_df)}, "
                 f"unique_locations={unique_locations}."
             )
-            out_path = f"/scratch/users/trobinet/long_lfmc/final_lfmc/sar/{var_fmt}_samples_random_matching.csv"
+            out_path = _tagged_csv_path(
+                output_dir,
+                f"{var_fmt}_samples_random_matching.csv",
+                output_tag,
+            )
             out_df.to_csv(out_path, index=False)
             _log(f"{var}: wrote random samples to {out_path}")
 
