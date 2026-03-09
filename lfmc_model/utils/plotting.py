@@ -13,6 +13,34 @@ from typing import Sequence, Optional
 import textwrap
 import pandas as pd
 
+
+def _style_legend(legend):
+    if legend is None:
+        return
+    frame = legend.get_frame()
+    frame.set_alpha(0.9)
+    frame.set_facecolor("white")
+    frame.set_edgecolor("0.4")
+
+
+def _stats_text_box(ax, stats_text, fontsize=None, loc=(0.03, 0.97)):
+    if stats_text is None:
+        return
+    ax.text(
+        loc[0],
+        loc[1],
+        stats_text,
+        transform=ax.transAxes,
+        verticalalignment="top",
+        bbox={
+            "boxstyle": "round",
+            "facecolor": "white",
+            "alpha": 0.88,
+            "edgecolor": "0.4",
+        },
+        fontsize=fontsize,
+    )
+
 def kde_plot(
     data, data_names, save_name, title=None,
     xlabel=None, ylabel=None, ylimit=None
@@ -76,6 +104,223 @@ def plot_multiple_timeseries(
     plt.close(fig)
 
 
+def plot_lfmc_with_vv_vh(
+    lfmc_dates,
+    lfmc_vals,
+    lfmc_labels,
+    lfmc_linestyles,
+    lfmc_markers,
+    lfmc_colors,
+    save_path,
+    lfmc_lower_vals=None,
+    lfmc_upper_vals=None,
+    vv_obs_dates=None,
+    vv_obs=None,
+    vv_train_pred_dates=None,
+    vv_train_pred=None,
+    vv_pred_dates=None,
+    vv_pred=None,
+    vv_pred_std=None,
+    vh_obs_dates=None,
+    vh_obs=None,
+    vh_train_pred_dates=None,
+    vh_train_pred=None,
+    vh_pred_dates=None,
+    vh_pred=None,
+    vh_pred_std=None,
+    vv_dates=None,
+    vh_dates=None,
+):
+    fig, ax_l = plt.subplots(figsize=(11, 4.5))
+    ax_r = ax_l.twinx()
+    # Ensure VV/VH (right axis) is drawn behind LFMC (left axis)
+    ax_l.set_zorder(2)
+    ax_r.set_zorder(1)
+    ax_l.patch.set_visible(False)
+    if lfmc_colors is None:
+        lfmc_colors = [None] * len(lfmc_dates)
+    if lfmc_lower_vals is None:
+        lfmc_lower_vals = [None] * len(lfmc_dates)
+    if lfmc_upper_vals is None:
+        lfmc_upper_vals = [None] * len(lfmc_dates)
+    for d, v, lab, ls, mk, col, lower, upper in zip(
+        lfmc_dates,
+        lfmc_vals,
+        lfmc_labels,
+        lfmc_linestyles,
+        lfmc_markers,
+        lfmc_colors,
+        lfmc_lower_vals,
+        lfmc_upper_vals,
+    ):
+        if (
+            lower is not None and upper is not None and
+            len(lower) == len(v) and len(upper) == len(v) and len(v) > 0
+        ):
+            fill_color = col if col is not None else "0.6"
+            ax_l.fill_between(
+                d,
+                lower,
+                upper,
+                color=fill_color,
+                alpha=0.18,
+                linewidth=0,
+                zorder=2,
+            )
+        plot_kwargs = {
+            "label": lab,
+            "linestyle": ls,
+            "marker": mk,
+        }
+        if lab == "lfmc_true":
+            plot_kwargs["markersize"] = 10
+            plot_kwargs["alpha"] = 0.9
+        elif str(lab).endswith("_infer"):
+            plot_kwargs["linewidth"] = 2.8
+            plot_kwargs["alpha"] = 0.95
+        elif "train_pred" in str(lab):
+            plot_kwargs["markersize"] = 3
+            plot_kwargs["alpha"] = 0.85
+        if col is not None:
+            plot_kwargs["color"] = col
+        plot_kwargs["zorder"] = 4
+        ax_l.plot(
+            d,
+            v,
+            **plot_kwargs
+        )
+    ax_l.set_xlabel("Date")
+    ax_l.set_ylabel("LFMC (%)")
+    h_left, l_left = ax_l.get_legend_handles_labels()
+    has_right = False
+    # Backward compatibility: older callers used vv_dates/vh_dates for both obs and pred.
+    if vv_obs_dates is None:
+        vv_obs_dates = vv_dates
+    if vv_pred_dates is None:
+        vv_pred_dates = vv_dates
+    if vh_obs_dates is None:
+        vh_obs_dates = vh_dates
+    if vh_pred_dates is None:
+        vh_pred_dates = vh_dates
+    if vv_train_pred_dates is None:
+        vv_train_pred_dates = vv_dates
+    if vh_train_pred_dates is None:
+        vh_train_pred_dates = vh_dates
+    if vv_obs_dates is not None and vv_obs is not None and len(vv_obs) > 0:
+        ax_r.plot(
+            vv_obs_dates,
+            vv_obs,
+            linestyle="",
+            marker="s",
+            markersize=4,
+            alpha=0.6,
+            color="red",
+            label="vv_obs",
+            zorder=1,
+        )
+        has_right = True
+    if vv_train_pred_dates is not None and vv_train_pred is not None and len(vv_train_pred) > 0:
+        ax_r.plot(
+            vv_train_pred_dates,
+            vv_train_pred,
+            linestyle="",
+            marker=".",
+            markersize=4,
+            alpha=0.6,
+            color="red",
+            label="vv_train_pred",
+            zorder=1,
+        )
+        has_right = True
+    if vv_pred_dates is not None and vv_pred is not None and len(vv_pred) > 0:
+        if vv_pred_std is not None and len(vv_pred_std) == len(vv_pred):
+            ax_r.fill_between(
+                vv_pred_dates,
+                np.asarray(vv_pred) - np.asarray(vv_pred_std),
+                np.asarray(vv_pred) + np.asarray(vv_pred_std),
+                color="red",
+                alpha=0.12,
+                linewidth=0,
+                zorder=0,
+            )
+        ax_r.plot(
+            vv_pred_dates,
+            vv_pred,
+            linestyle="-",
+            linewidth=1.0,
+            alpha=0.6,
+            color="red",
+            label="vv_infer",
+            zorder=1,
+        )
+        has_right = True
+    if vh_obs_dates is not None and vh_obs is not None and len(vh_obs) > 0:
+        ax_r.plot(
+            vh_obs_dates,
+            vh_obs,
+            linestyle="",
+            marker="D",
+            markersize=4,
+            alpha=0.6,
+            color="orange",
+            label="vh_obs",
+            zorder=1,
+        )
+        has_right = True
+    if vh_train_pred_dates is not None and vh_train_pred is not None and len(vh_train_pred) > 0:
+        ax_r.plot(
+            vh_train_pred_dates,
+            vh_train_pred,
+            linestyle="",
+            marker=".",
+            markersize=4,
+            alpha=0.6,
+            color="orange",
+            label="vh_train_pred",
+            zorder=1,
+        )
+        has_right = True
+    if vh_pred_dates is not None and vh_pred is not None and len(vh_pred) > 0:
+        if vh_pred_std is not None and len(vh_pred_std) == len(vh_pred):
+            ax_r.fill_between(
+                vh_pred_dates,
+                np.asarray(vh_pred) - np.asarray(vh_pred_std),
+                np.asarray(vh_pred) + np.asarray(vh_pred_std),
+                color="orange",
+                alpha=0.12,
+                linewidth=0,
+                zorder=0,
+            )
+        ax_r.plot(
+            vh_pred_dates,
+            vh_pred,
+            linestyle="-",
+            linewidth=1.0,
+            alpha=0.6,
+            color="orange",
+            label="vh_infer",
+            zorder=1,
+        )
+        has_right = True
+    if has_right:
+        ax_r.set_ylabel("VV / VH (dB)")
+    else:
+        ax_r.set_ylabel("")
+        ax_r.set_yticks([])
+        ax_r.tick_params(right=False, labelright=False)
+        ax_r.spines["right"].set_visible(False)
+    h_right, l_right = ax_r.get_legend_handles_labels()
+    all_handles = h_left + h_right
+    all_labels = l_left + l_right
+    if len(all_handles) > 0:
+        ax_l.legend(all_handles, all_labels, loc="best")
+    fig.autofmt_xdate()
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=300)
+    plt.close(fig)
+
+
 def plot_multiple_timeseries_from_df(
     df,
     date_col,
@@ -119,11 +364,11 @@ def pred_obs_scatter(
     plt.ylim(min_val, max_val)
     plt.legend()
     if mae is not None:
-        plt.text(0.05, 0.95, f'MAE: {mae:.3f}', transform=plt.gca().transAxes, verticalalignment='top')
+        plt.text(0.05, 0.95, f'MAE: {mae:.2f}', transform=plt.gca().transAxes, verticalalignment='top')
     if rmse is not None:
-        plt.text(0.05, 0.90, f'RMSE: {rmse:.3f}', transform=plt.gca().transAxes, verticalalignment='top')
+        plt.text(0.05, 0.90, f'RMSE: {rmse:.2f}', transform=plt.gca().transAxes, verticalalignment='top')
     if r2 is not None:
-        plt.text(0.05, 0.85, f'R²: {r2:.3f}', transform=plt.gca().transAxes, verticalalignment='top')
+        plt.text(0.05, 0.85, f'R²: {r2:.2f}', transform=plt.gca().transAxes, verticalalignment='top')
     if n is not None:
         plt.text(0.05, 0.80, f'N: {n}', transform=plt.gca().transAxes, verticalalignment='top')
     plt.savefig(plot_path, bbox_inches='tight', dpi=300)
@@ -138,6 +383,8 @@ def bar_plot(
     label_with_n: bool = False,
     sample_counts: Optional[Sequence[float]] = None,
     subcategory_labels: Optional[Sequence[str]] = None,
+    subcategory_colors: Optional[Sequence[str]] = None,
+    errors: Optional[Sequence[float]] = None,
 ):
     """
     Flexible bar plot: handles 1D and 2D values.
@@ -153,6 +400,7 @@ def bar_plot(
     """
     categories = [str(c) for c in categories]
     values_arr = np.asarray(values, dtype=float)
+    errors_arr = None if errors is None else np.asarray(errors, dtype=float)
 
     # ---- Shape handling ----
     if values_arr.ndim == 1:
@@ -168,8 +416,15 @@ def bar_plot(
         else:
             subcategory_labels = [str(s) for s in subcategory_labels]
             assert len(subcategory_labels) == n_sub
+        if subcategory_colors is not None:
+            subcategory_colors = [str(c) for c in subcategory_colors]
+            assert len(subcategory_colors) == n_sub
+        if errors_arr is not None:
+            assert errors_arr.shape == values_arr.shape
     else:
         raise ValueError("values must be 1D or 2D for bar_plot.")
+    if (not is_grouped) and errors_arr is not None:
+        assert errors_arr.shape[0] == values_arr.shape[0]
 
     # ---- sample_counts handling ----
     if label_with_n and sample_counts is not None:
@@ -194,8 +449,36 @@ def bar_plot(
         if not np.isfinite(v):
             return ""
         if label_with_n and cnt is not None:
-            return f"{v:g}\n(n={int(cnt)})"
-        return f"{v:g}"
+            return f"{v:.2f}\n(n={int(cnt)})"
+        return f"{v:.2f}"
+
+    def _compute_axis_limits(vals, errs=None, orientation="vertical"):
+        vals_arr = np.asarray(vals, dtype=float)
+        finite_vals = vals_arr[np.isfinite(vals_arr)]
+        if finite_vals.size > 0:
+            lower = float(finite_vals.min())
+            upper = float(finite_vals.max())
+        else:
+            lower = 0.0
+            upper = 1.0
+        if errs is not None:
+            errs_arr = np.asarray(errs, dtype=float)
+            lower_vals = vals_arr - errs_arr
+            upper_vals = vals_arr + errs_arr
+            finite_lower = lower_vals[np.isfinite(lower_vals)]
+            finite_upper = upper_vals[np.isfinite(upper_vals)]
+            if finite_lower.size > 0:
+                lower = min(lower, float(finite_lower.min()))
+            if finite_upper.size > 0:
+                upper = max(upper, float(finite_upper.max()))
+        span = upper - lower
+        if orientation == "horizontal":
+            pad = max(0.08 * max(abs(upper), abs(lower), 1.0), 2.0 if span < 20 else 0.5)
+        else:
+            pad = max(0.08 * max(abs(upper), abs(lower), 1.0), 0.5 if span < 10 else 0.0)
+        if span <= 0:
+            pad = max(pad, 1.0)
+        return lower - pad, upper + pad
 
     # ==================================================
     # 2D GROUPED BAR PLOT (always vertical)
@@ -215,9 +498,8 @@ def bar_plot(
         x = np.arange(n_cat)
         bar_width = 0.8 / n_sub
 
-        all_vals_flat = values_arr[np.isfinite(values_arr)]
-        ymax = float(all_vals_flat.max()) if all_vals_flat.size > 0 else 1.0
-        ax.set_ylim(0, ymax * 1.10 + (0.5 if ymax < 10 else 0))
+        y_min, y_max = _compute_axis_limits(values_arr, errors_arr, orientation="vertical")
+        ax.set_ylim(y_min, y_max)
 
         bars_by_sub = []
         for j in range(n_sub):
@@ -228,6 +510,10 @@ def bar_plot(
                 sub_vals,
                 bar_width,
                 label=subcategory_labels[j],
+                color=(subcategory_colors[j] if subcategory_colors is not None else None),
+                yerr=(errors_arr[:, j] if errors_arr is not None else None),
+                capsize=(3 if errors_arr is not None else 0),
+                ecolor="0.25",
             )
             bars_by_sub.append(bars)
 
@@ -285,7 +571,14 @@ def bar_plot(
                                constrained_layout=False)
 
         y_pos = np.arange(n)
-        bars = ax.barh(y_pos, values_1d, color="skyblue")
+        bars = ax.barh(
+            y_pos,
+            values_1d,
+            color="skyblue",
+            xerr=errors_arr if errors_arr is not None else None,
+            capsize=(3 if errors_arr is not None else 0),
+            ecolor="0.25",
+        )
 
         ax.set_yticks(y_pos, ylabels)
         ax.tick_params(axis="y", labelsize=9, pad=6)
@@ -293,8 +586,8 @@ def bar_plot(
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
 
-        vmax = max(values_1d) if values_1d else 1.0
-        ax.set_xlim(0, vmax * 1.12 + (2 if vmax < 20 else 0))
+        x_min, x_max = _compute_axis_limits(values_1d, errors_arr, orientation="horizontal")
+        ax.set_xlim(x_min, x_max)
 
         if counts_arr is not None:
             counts_1d = counts_arr
@@ -328,15 +621,22 @@ def bar_plot(
         fig, ax = plt.subplots(figsize=(width, height),
                                constrained_layout=False)
         x = np.arange(n)
-        bars = ax.bar(x, values_1d, color="skyblue")
+        bars = ax.bar(
+            x,
+            values_1d,
+            color="skyblue",
+            yerr=errors_arr if errors_arr is not None else None,
+            capsize=(3 if errors_arr is not None else 0),
+            ecolor="0.25",
+        )
 
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
         ax.set_xticks(x, xlabels)
         ax.tick_params(axis="x", labelsize=9, pad=6)
 
-        ymax = max(values_1d) if values_1d else 1.0
-        ax.set_ylim(0, ymax * 1.10 + (0.5 if ymax < 10 else 0))
+        y_min, y_max = _compute_axis_limits(values_1d, errors_arr, orientation="vertical")
+        ax.set_ylim(y_min, y_max)
 
         if counts_arr is not None:
             counts_1d = counts_arr
@@ -542,6 +842,7 @@ def map_points(
     cmap="PiYG",           # default diverging colormap
     colorbar_label="Value",
     cbar_lim=None,         # None, scalar, or (vmin, vmax)
+    stats_text=None,
 ):
     """
     Plot lon/lat points with sizes scaled by counts_per_point,
@@ -819,6 +1120,86 @@ def map_points(
         bbox_to_anchor=(0.01, 0.01),
     )
     leg.get_frame().set_alpha(0.9)
+    leg.get_frame().set_facecolor("white")
+    leg.get_frame().set_edgecolor("0.4")
+
+    _stats_text_box(ax, stats_text, fontsize=12, loc=(0.03, 0.97))
+
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def annotated_bar_plot(
+    categories,
+    values,
+    xlabel,
+    ylabel,
+    save_path,
+    annotations=None,
+    fontsize=None,
+    bar_color="#440154",
+    stats_text=None,
+    errors=None,
+):
+    categories = [str(c) for c in categories]
+    values = np.asarray(values, dtype=float)
+    errors = None if errors is None else np.asarray(errors, dtype=float)
+    if len(categories) != len(values):
+        raise ValueError("categories and values must have the same length")
+    if errors is not None and len(errors) != len(values):
+        raise ValueError("errors and values must have the same length")
+    x = np.arange(len(categories))
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    bars = ax.bar(
+        x,
+        values,
+        color=bar_color,
+        width=0.75,
+        yerr=errors,
+        capsize=(3 if errors is not None else 0),
+        ecolor="0.25",
+    )
+    ax.set_xlabel(xlabel, fontsize=fontsize)
+    ax.set_ylabel(ylabel, fontsize=fontsize)
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories, fontsize=fontsize)
+    if fontsize is not None:
+        ax.tick_params(axis="y", labelsize=fontsize)
+
+    finite_vals = values[np.isfinite(values)]
+    if finite_vals.size > 0:
+        ymin = float(min(0.0, finite_vals.min()))
+        ymax = float(max(0.0, finite_vals.max()))
+        if errors is not None:
+            finite_errs = errors[np.isfinite(errors)]
+            ymax += float(finite_errs.max()) if finite_errs.size > 0 else 0.0
+        yrange = ymax - ymin
+        if yrange <= 0:
+            yrange = 1.0
+        pad = 0.14 * yrange
+        ax.set_ylim(ymin - 0.05 * yrange, ymax + pad)
+
+    if annotations is not None:
+        if len(annotations) != len(values):
+            raise ValueError("annotations and values must have the same length")
+        for bar, value, annotation in zip(bars, values, annotations):
+            if not np.isfinite(value) or annotation in [None, ""]:
+                continue
+            y = bar.get_height()
+            y_text = y + 0.02 * max(abs(y), 1.0)
+            va = "bottom" if y >= 0 else "top"
+            if y < 0:
+                y_text = y - 0.02 * max(abs(y), 1.0)
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                y_text,
+                annotation,
+                ha="center",
+                va=va,
+                fontsize=max(8, fontsize - 2) if fontsize is not None else 9,
+            )
+
+    _stats_text_box(ax, stats_text, fontsize=fontsize, loc=(0.03, 0.97))
 
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -837,7 +1218,10 @@ def generic_hexbin(
     cbarlim=None,
     fontsize=None,
     line_to_plot=None,
-    corrclip=[-np.inf, np.inf]
+    corrclip=[-np.inf, np.inf],
+    title=None,
+    stats_text=None,
+    stats_loc=(0.03, 0.97),
 ):
     plt.figure(figsize=(6, 6))
     if cbarlim:
@@ -856,9 +1240,14 @@ def generic_hexbin(
         vmin=vmin,
         vmax=vmax
     )
-    plt.colorbar(hb, label=cbar_label)
+    cbar = plt.colorbar(hb)
+    cbar.set_label(cbar_label, fontsize=fontsize)
+    if fontsize is not None:
+        cbar.ax.tick_params(labelsize=fontsize)
     plt.xlabel(xlabel if xlabel else "X", fontsize=fontsize)
     plt.ylabel(ylabel if ylabel else "Y", fontsize=fontsize)
+    if title is not None:
+        plt.title(title, fontsize=fontsize)
 
     if fontsize is not None:
         plt.tick_params(axis='both', labelsize=fontsize)
@@ -885,7 +1274,8 @@ def generic_hexbin(
             color="orange",
             label=f"Best Fit Line (r={corr_coef:.2f})",
         )
-        plt.legend()
+        legend = plt.legend(fontsize=fontsize)
+        _style_legend(legend)
 
     if line_to_plot == 'one_to_one':
         x_min = min(x)
@@ -898,8 +1288,12 @@ def generic_hexbin(
             [min_min, max_max],
             [min_min, max_max],
             color="orange",
-            label="One-to-One Line",
+            label="1:1 line",
         )
+        legend = plt.legend(fontsize=fontsize)
+        _style_legend(legend)
+
+    _stats_text_box(plt.gca(), stats_text, fontsize=fontsize, loc=stats_loc)
 
     plt.savefig(plot_path, bbox_inches="tight", dpi=300)
     plt.close()
@@ -914,7 +1308,9 @@ def generic_scatter(
     ylim=None,
     mae=None,
     rmse=None,
+    rmse_std=None,
     r2=None,
+    r2_std=None,
     n=None,
     corrclip=None,
     color_array=None,
@@ -924,7 +1320,9 @@ def generic_scatter(
     s=20,
     cbar_range=None,
     fontsize=None,
-    line_to_plot=None
+    line_to_plot=None,
+    marker_color=None,
+    stats_text=None,
 ):
     # mask nans for x, y (and color_array if provided)
     mask = ~np.isnan(x) & ~np.isnan(y)
@@ -942,7 +1340,7 @@ def generic_scatter(
     sc = ax.scatter(
         x, y,
         alpha=alpha,
-        c=c,
+        c=c if color_array is not None else marker_color,
         cmap=cmap if color_array is not None else None,
         s=s,
         vmin=cbar_range[0] if cbar_range else None,
@@ -993,7 +1391,8 @@ def generic_scatter(
             color="orange",
             label=f"Best Fit Line (r={corr_coef:.2f})",
         )
-        ax.legend()
+        legend = ax.legend(fontsize=fontsize)
+        _style_legend(legend)
 
     elif line_to_plot == 'one_to_one':
         x_min = min(x)
@@ -1006,24 +1405,29 @@ def generic_scatter(
             [min_min, max_max],
             [min_min, max_max],
             color="orange",
-            label="One-to-One Line",
+            label="1:1 line",
         )
-    # legend fontsize
-    #ax.legend(fontsize=fontsize)
+        legend = ax.legend(fontsize=fontsize)
+        _style_legend(legend)
 
-    # stats text
-    text_kwargs = dict(transform=ax.transAxes, va="top")
-    if fontsize is not None:
-        text_kwargs["fontsize"] = fontsize
-
-    if mae is not None:
-        ax.text(0.05, 0.95, f"MAE: {mae:.3f}", **text_kwargs)
-    if rmse is not None:
-        ax.text(0.05, 0.90, f"RMSE: {rmse:.3f}", **text_kwargs)
-    if r2 is not None:
-        ax.text(0.05, 0.85, f"R²: {r2:.3f}", **text_kwargs)
-    if n is not None:
-        ax.text(0.05, 0.80, f"N: {n}", **text_kwargs)
+    if stats_text is None:
+        stats_lines = []
+        if r2 is not None:
+            if r2_std is not None and np.isfinite(r2_std):
+                stats_lines.append(f"R² = {r2:.2f} +/- {r2_std:.2f}")
+            else:
+                stats_lines.append(f"R² = {r2:.2f}")
+        if rmse is not None:
+            if rmse_std is not None and np.isfinite(rmse_std):
+                stats_lines.append(f"RMSE = {rmse:.2f} +/- {rmse_std:.2f}")
+            else:
+                stats_lines.append(f"RMSE = {rmse:.2f}")
+        if n is not None:
+            stats_lines.append(f"N = {n}")
+        if mae is not None and len(stats_lines) == 0:
+            stats_lines.append(f"MAE = {mae:.2f}")
+        stats_text = "\n".join(stats_lines) if len(stats_lines) > 0 else None
+    _stats_text_box(ax, stats_text, fontsize=fontsize, loc=(0.03, 0.97))
 
     plt.savefig(plot_path, bbox_inches="tight", dpi=300)
     plt.close()
