@@ -285,7 +285,15 @@ def build_tensors(
                 continue
             this_ds_name = var_to_ds[s_var]
             if this_ds_name == 'modis':
-                this_vals = modis_data['data'].sel(variable=s_var)
+                if 'data' in modis_data:
+                    this_vals = modis_data['data'].sel(variable=s_var)
+                else:
+                    if s_var not in modis_data.data_vars:
+                        raise KeyError(
+                            f"MODIS variable '{s_var}' not found. "
+                            f"Available variables: {list(modis_data.data_vars)}"
+                        )
+                    this_vals = modis_data[s_var]
                 # we now need to fill in for all days and lags at this site
                 for d,date in enumerate(date_range):
                     vals_to_add = this_vals.sel(
@@ -502,7 +510,13 @@ def run_model_forward(
         dataloader,
         desc='Running model batches'
     )
-    preds_i = np.zeros(short_tensor.shape[0])
+    n_obs = short_tensor.shape[0]
+    preds_i = np.zeros(n_obs, dtype=np.float64)
+    preds_vv = np.full(n_obs, np.nan, dtype=np.float64)
+    preds_vh = np.full(n_obs, np.nan, dtype=np.float64)
+    preds_i_std = np.full(n_obs, np.nan, dtype=np.float64)
+    preds_vv_std = np.full(n_obs, np.nan, dtype=np.float64)
+    preds_vh_std = np.full(n_obs, np.nan, dtype=np.float64)
     batch_counter = 0
     with torch.no_grad():
         for Xsh_b, Xl_b, Xst_b in pbar:
@@ -510,30 +524,100 @@ def run_model_forward(
             Xl_b = Xl_b.to(device=device, dtype=torch.float32)
             Xst_b = Xst_b.to(device=device, dtype=torch.float32)
             output = model(Xsh_b, Xl_b, Xst_b)
-            preds_i_b = output['mu_insitu']
+            preds_i_b = np.asarray(
+                output['mu_insitu'].detach().cpu().numpy()
+            ).reshape(-1)
+            preds_vv_b = np.asarray(
+                output['mu_vv'].detach().cpu().numpy()
+            ).reshape(-1)
+            preds_vh_b = np.asarray(
+                output['mu_vh'].detach().cpu().numpy()
+            ).reshape(-1)
+            if 'log_var_insitu' in output:
+                preds_i_std_b = np.sqrt(
+                    np.exp(
+                        np.asarray(
+                            output['log_var_insitu'].detach().cpu().numpy()
+                        ).reshape(-1)
+                    )
+                )
+            else:
+                preds_i_std_b = np.full_like(preds_i_b, np.nan)
+            if 'log_var_vv' in output:
+                preds_vv_std_b = np.sqrt(
+                    np.exp(
+                        np.asarray(
+                            output['log_var_vv'].detach().cpu().numpy()
+                        ).reshape(-1)
+                    )
+                )
+            else:
+                preds_vv_std_b = np.full_like(preds_vv_b, np.nan)
+            if 'log_var_vh' in output:
+                preds_vh_std_b = np.sqrt(
+                    np.exp(
+                        np.asarray(
+                            output['log_var_vh'].detach().cpu().numpy()
+                        ).reshape(-1)
+                    )
+                )
+            else:
+                preds_vh_std_b = np.full_like(preds_vh_b, np.nan)
             start_idx = batch_counter * batch_size
             end_idx = start_idx + Xsh_b.shape[0]
-            preds_i[start_idx:end_idx] = preds_i_b.cpu().numpy()
+            preds_i[start_idx:end_idx] = preds_i_b
+            preds_vv[start_idx:end_idx] = preds_vv_b
+            preds_vh[start_idx:end_idx] = preds_vh_b
+            preds_i_std[start_idx:end_idx] = preds_i_std_b
+            preds_vv_std[start_idx:end_idx] = preds_vv_std_b
+            preds_vh_std[start_idx:end_idx] = preds_vh_std_b
             batch_counter += 1
-    # renormalize
-    preds_i = preds_i * norm_params['lfmc_std'] + norm_params['lfmc_mean']
+    lfmc_mean = norm_params.get('lfmc_mean', np.nan)
+    lfmc_std = norm_params.get('lfmc_std', np.nan)
+    vv_mean = norm_params.get('vv_mean', np.nan)
+    vv_std = norm_params.get('vv_std', np.nan)
+    vh_mean = norm_params.get('vh_mean', np.nan)
+    vh_std = norm_params.get('vh_std', np.nan)
+    if np.isfinite(lfmc_mean) and np.isfinite(lfmc_std) and lfmc_std != 0:
+        preds_i = preds_i * lfmc_std + lfmc_mean
+        preds_i_std = preds_i_std * lfmc_std
+    else:
+        preds_i[:] = np.nan
+        preds_i_std[:] = np.nan
+    if np.isfinite(vv_mean) and np.isfinite(vv_std) and vv_std != 0:
+        preds_vv = preds_vv * vv_std + vv_mean
+        preds_vv_std = preds_vv_std * vv_std
+    else:
+        preds_vv[:] = np.nan
+        preds_vv_std[:] = np.nan
+    if np.isfinite(vh_mean) and np.isfinite(vh_std) and vh_std != 0:
+        preds_vh = preds_vh * vh_std + vh_mean
+        preds_vh_std = preds_vh_std * vh_std
+    else:
+        preds_vh[:] = np.nan
+        preds_vh_std[:] = np.nan
     info_df['lfmc_pred'] = preds_i
-    #print(info_df)
+    info_df['lfmc_pred_std'] = preds_i_std
+    info_df['vv_pred'] = preds_vv
+    info_df['vv_pred_std'] = preds_vv_std
+    info_df['vh_pred'] = preds_vh
+    info_df['vh_pred_std'] = preds_vh_std
     return info_df
 
 
 
 def main():
-    scratch_dir = '/scratch/users/trobinet/long_lfmc/trent_datasets/lfmc_model/data/'
+    scratch_root = '/scratch/users/trobinet/long_lfmc/final_lfmc'
+    scratch_model_dir = os.path.join(scratch_root, 'lfmc_model')
     oak_dir = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/'
     # where to save the outputs of the model
-    out_dir = os.path.join(oak_dir,'lfmc_model','data','infer','for_mitch_20260124')
-    plots_dir = os.path.join(scratch_dir,'inference','plots')
+    out_dir = os.path.join(scratch_model_dir, 'inference', 'for_mitch_20260124')
+    plots_dir = os.path.join(scratch_model_dir, 'inference', 'plots')
     os.makedirs(out_dir, exist_ok=True)
     # information about the sites to run
     site_info = pd.read_csv(
         os.path.join(
-            scratch_dir,
+            scratch_model_dir,
             'inference/site_info',
             'valid_locations_wus.csv'
         )
@@ -548,12 +632,12 @@ def main():
     # information that we load from the model
     model_name = 'news1_multitask_5_1'
     var_names_path = os.path.join(
-        scratch_dir,'inputs','news1_multitask','var_names.json'
+        scratch_model_dir, 'inputs', 'news1_multitask', 'var_names.json'
     )
     with open(var_names_path) as f:
         var_names = json.load(f)
     model_dir = os.path.join(
-        scratch_dir,
+        scratch_model_dir,
         'outputs', model_name,
         'transformer_dm32_nh1_nl2_df64_do0.15_bs128_lr0.0005_warmup2458_wd0.0001_iobs30638_vvobs0_vhobs119237_dmlong64_nhlong2_nllong3_dflong128_outlong32_basic',
         'fold_9998'
@@ -574,13 +658,13 @@ def main():
             'prcp','srad','swe','tmax','vp'
         ],
         'modis':[
-            'Nadir_Reflectance_Band1_filled',
-            'Nadir_Reflectance_Band2_filled',
-            'Nadir_Reflectance_Band3_filled',
-            'Nadir_Reflectance_Band4_filled',
-            'Nadir_Reflectance_Band5_filled',
-            'Nadir_Reflectance_Band6_filled',
-            'Nadir_Reflectance_Band7_filled'
+            'Nadir_Reflectance_Band1_interp',
+            'Nadir_Reflectance_Band2_interp',
+            'Nadir_Reflectance_Band3_interp',
+            'Nadir_Reflectance_Band4_interp',
+            'Nadir_Reflectance_Band5_interp',
+            'Nadir_Reflectance_Band6_interp',
+            'Nadir_Reflectance_Band7_interp'
         ],
         'static':[
             'slope',
@@ -618,13 +702,15 @@ def main():
     print('opening datasets...')
     dss = {
         'daymet': xr.open_zarr(
-            os.path.join(oak_dir, 'daymet/daymet_all_vars.zarr'),
+            os.path.join(scratch_root, 'daymet', 'daymet_all_vars.zarr'),
             consolidated=False
         ),
         'modis': xr.open_zarr(
             os.path.join(
-                oak_dir,
-                'modis/modis_regridded_gapfilled/quality_1/interpolated/modis_all_vars.zarr'
+                scratch_root,
+                'modis',
+                'modis_regrid_interpolated',
+                'modis_interp_5d.zarr'
             )
         ),
         'static': xr.open_dataset(
@@ -634,7 +720,7 @@ def main():
             os.path.join(oak_dir, 'climate_zones', 'climate_zone_per_pixel_westUS.nc4')
         ),
         'landcover_frac': xr.open_zarr(
-            os.path.join(oak_dir, 'nlcd', 'nlcd_target_grid_2003_2023.zarr')
+            os.path.join(scratch_root, 'nlcd', 'nlcd_target_grid_2000_2024.zarr')
         ),
     }
     short_lag_days = [
