@@ -256,7 +256,7 @@ def default_short_lag_days() -> List[int]:
 
 
 def default_long_lag_days() -> List[int]:
-    return list(range(181))
+    return list(range(365))
 
 
 def default_var_locs() -> Dict[str, List[str]]:

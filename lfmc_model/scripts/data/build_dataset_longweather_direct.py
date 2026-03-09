@@ -5,6 +5,11 @@ import glob
 import json
 import os
 import shutil
+from typing import Dict
+
+import numpy as np
+import pandas as pd
+import torch
 
 from longweather_direct_pipeline import (
     build_direct_tensors_from_sample_index,
@@ -31,6 +36,113 @@ def _expand_inputs(inputs):
         else:
             paths.append(item)
     return paths
+
+
+def _normalize_key_col(df: pd.DataFrame, col: str) -> pd.Series:
+    if col == "date":
+        dt = pd.to_datetime(df[col], errors="coerce", utc=True)
+        return dt.dt.tz_convert(None).dt.strftime("%Y-%m-%d %H:%M:%S").fillna("__NA__")
+    if col in {"latitude", "longitude", "target_value"}:
+        num = pd.to_numeric(df[col], errors="coerce")
+        return num.round(8).map(lambda x: "__NA__" if pd.isna(x) else f"{x:.8f}")
+    return df[col].astype(str).replace({"nan": "__NA__", "None": "__NA__"})
+
+
+def _source_code_from_table(df: pd.DataFrame) -> np.ndarray:
+    source_map = {
+        "nfmd": 0,
+        "vv": 1,
+        "vv_minus_vh": 1,
+        "vv_over_vh": 1,
+        "vh": 2,
+    }
+    n = len(df)
+    out = np.full(n, np.nan, dtype=np.float64)
+    if "source_code" in df.columns:
+        out = pd.to_numeric(df["source_code"], errors="coerce").to_numpy(dtype=np.float64)
+    valid = np.isin(out, [0.0, 1.0, 2.0])
+    if not valid.all():
+        for fallback_col in ["source_legible", "source"]:
+            if fallback_col in df.columns:
+                mapped = (
+                    df[fallback_col]
+                    .astype(str)
+                    .str.strip()
+                    .str.lower()
+                    .map(source_map)
+                    .to_numpy(dtype=np.float64)
+                )
+                fill_mask = (~valid) & np.isfinite(mapped)
+                out[fill_mask] = mapped[fill_mask]
+                valid = np.isin(out, [0.0, 1.0, 2.0])
+                if valid.all():
+                    break
+    bad_n = int((~np.isin(out, [0.0, 1.0, 2.0])).sum())
+    if bad_n > 0:
+        raise ValueError(
+            f"Could not infer valid source codes (0/1/2) for {bad_n:,} row(s) in sample index."
+        )
+    return out.astype(np.int64)
+
+
+def _rebuild_source_tensor_only(sample_df: pd.DataFrame, info_df: pd.DataFrame) -> torch.Tensor:
+    key_candidates = [
+        "sample_id",
+        "site_id",
+        "date",
+        "latitude",
+        "longitude",
+        "target_name",
+        "target_value",
+    ]
+    key_cols = [c for c in key_candidates if c in sample_df.columns and c in info_df.columns]
+    if not key_cols:
+        raise ValueError("No shared key columns between sample index and info for source-only rebuild.")
+
+    sample_work = sample_df.copy()
+    info_work = info_df.copy()
+    for c in key_cols:
+        sample_work[f"_k_{c}"] = _normalize_key_col(sample_work, c)
+        info_work[f"_k_{c}"] = _normalize_key_col(info_work, c)
+
+    key_norm_cols = [f"_k_{c}" for c in key_cols]
+    sample_work["_join_key"] = list(zip(*[sample_work[c] for c in key_norm_cols]))
+    info_work["_join_key"] = list(zip(*[info_work[c] for c in key_norm_cols]))
+    sample_work["_occ"] = sample_work.groupby("_join_key").cumcount()
+    info_work["_occ"] = info_work.groupby("_join_key").cumcount()
+
+    sample_codes = _source_code_from_table(sample_work)
+    lookup: Dict[tuple, int] = {}
+    for k, o, code in zip(sample_work["_join_key"], sample_work["_occ"], sample_codes):
+        lookup[(k, int(o))] = int(code)
+
+    out_codes = np.full(len(info_work), np.nan, dtype=np.float64)
+    for i, (k, o) in enumerate(zip(info_work["_join_key"], info_work["_occ"])):
+        code = lookup.get((k, int(o)))
+        if code is not None:
+            out_codes[i] = float(code)
+
+    unmatched = int(np.isnan(out_codes).sum())
+    if unmatched > 0:
+        print(
+            f"[source_only] Warning: {unmatched:,} row(s) unmatched on key join; "
+            "falling back to info source labels."
+        )
+        info_fallback = _source_code_from_table(info_work)
+        miss_mask = np.isnan(out_codes)
+        out_codes[miss_mask] = info_fallback[miss_mask].astype(np.float64)
+
+    unresolved = int(np.isnan(out_codes).sum())
+    if unresolved > 0:
+        raise ValueError(f"Failed to assign source code for {unresolved:,} output row(s).")
+
+    out_int = out_codes.astype(np.int64)
+    uniq, cnt = np.unique(out_int, return_counts=True)
+    print(
+        "[source_only] source code counts: "
+        + ", ".join([f"{int(u)} -> {int(c):,}" for u, c in zip(uniq.tolist(), cnt.tolist())])
+    )
+    return torch.from_numpy(out_int)
 
 
 def main():
@@ -62,6 +174,14 @@ def main():
         "--overwrite",
         action="store_true",
         help="If set, remove save_dir before writing outputs.",
+    )
+    parser.add_argument(
+        "--source-only",
+        action="store_true",
+        help=(
+            "Only rewrite source.pt using sample index + existing info.* in save_dir. "
+            "Skips all feature extraction/tensor rebuild."
+        ),
     )
     args = parser.parse_args()
     if args.sample_index_path is None:
@@ -200,7 +320,7 @@ def main():
     ]
 
     short_lag_days = list(range(7))
-    long_lag_days = list(range(181))
+    long_lag_days = list(range(365))
 
     var_locs = {
         "modis": [
@@ -276,6 +396,7 @@ def main():
         "sample_index_path": sample_index_path,
         "save_dir": save_dir,
         "overwrite": bool(args.overwrite),
+        "source_only": bool(args.source_only),
         "dataset_paths": dataset_paths,
         "grid_source": grid_source,
         "var_locs": var_locs,
@@ -316,6 +437,29 @@ def main():
     print("[build_dataset] Loading sample index...")
     sample_df = load_sample_index(sample_paths)
     print(f"[build_dataset] Loaded sample index rows: {len(sample_df):,}")
+
+    if args.source_only:
+        print("[build_dataset] source-only mode enabled; skipping tensor rebuild.")
+        info_parquet = os.path.join(save_dir, "info.parquet")
+        info_csv = os.path.join(save_dir, "info.csv")
+        if os.path.exists(info_parquet):
+            info_df = pd.read_parquet(info_parquet)
+            print(f"[build_dataset] Loaded existing info.parquet rows: {len(info_df):,}")
+        elif os.path.exists(info_csv):
+            info_df = pd.read_csv(info_csv)
+            print(f"[build_dataset] Loaded existing info.csv rows: {len(info_df):,}")
+        else:
+            raise FileNotFoundError(
+                f"source-only requested but no info.parquet/info.csv found in {save_dir}"
+            )
+        source_tensor = _rebuild_source_tensor_only(sample_df, info_df)
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save(source_tensor, os.path.join(save_dir, "source.pt"))
+        print(f"[build_dataset] Wrote source.pt to {save_dir}")
+        with open(os.path.join(save_dir, "build_config.json"), "w") as f:
+            json.dump(build_cfg, f, indent=2, sort_keys=True)
+        print(f"[build_dataset] Updated build config at {os.path.join(save_dir, 'build_config.json')}")
+        return
 
     print("[build_dataset] Opening source datasets...")
     dss = open_source_datasets(dataset_paths=dataset_paths)
