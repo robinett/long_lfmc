@@ -153,7 +153,7 @@ def compute_site_month_y2y_metrics(test_info_insitu, preds_insitu, true_insitu):
 
 def main():
     # perform analysis across all models in a dir, since these are now batched out
-    base_dir = '/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv'
+    base_dir = '/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365'
     load_only = True
     model_dirs = [
         os.path.join(base_dir, d)

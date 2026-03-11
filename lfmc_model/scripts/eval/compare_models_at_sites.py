@@ -2,6 +2,7 @@
 import os
 import json
 import sys
+import time
 import pandas as pd
 import torch
 import numpy as np
@@ -606,13 +607,18 @@ def plot_landcover_analysis(
 
 def get_site_error(
     model_dir,
-    site_errors=None
+    site_errors=None,
+    progress_label=None,
 ):
+    start_time = time.time()
+    model_name = os.path.basename(os.path.normpath(model_dir))
+    progress_prefix = f"[site_error] {progress_label}" if progress_label else f"[site_error] {model_name}"
+    print(f"{progress_prefix}: loading fold outputs from {model_name}")
     with open(os.path.join(model_dir,'fold_info.json')) as f:
         fold_info = json.load(f)
     folds = list(fold_info.keys())
     for f,fold in enumerate(folds):
-        print(f'Evaluating fold {f+1}/{len(folds)}')
+        print(f"{progress_prefix}: fold {f+1}/{len(folds)} ({fold})")
         test_info_path = os.path.join(model_dir, f'fold_{fold}', 'test_info.csv')
         test_info = pd.read_csv(test_info_path)
         test_data_path = os.path.join(model_dir, f'fold_{fold}', 'test_outputs.pth')
@@ -670,6 +676,11 @@ def get_site_error(
                 'var': site_var,
                 'fold': fold
             }
+    elapsed_s = time.time() - start_time
+    print(
+        f"{progress_prefix}: complete with {len(site_errors)} sites "
+        f"in {elapsed_s:.1f}s"
+    )
     return site_errors
 
 def site_analysis(

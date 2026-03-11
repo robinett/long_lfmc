@@ -484,8 +484,90 @@ def plot_target_hexbin(
     return metrics
 
 
+def compute_correlation_metrics(x, y):
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]
+    y = y[mask]
+    metrics = {"n": int(len(x)), "corr": np.nan}
+    if len(x) < 2:
+        return metrics
+    metrics["corr"] = float(np.corrcoef(x, y)[0, 1])
+    return metrics
+
+
+def build_cross_target_pairs(eval_df, left_target, right_target):
+    left_df = eval_df[eval_df["target"] == left_target].copy()
+    right_df = eval_df[eval_df["target"] == right_target].copy()
+    if len(left_df) == 0 or len(right_df) == 0:
+        return pd.DataFrame()
+    pair_cols = [
+        col for col in [
+            "fold", "date", "latitude", "longitude",
+            "site_id", "site_name", "fuel_type", "fuel",
+        ]
+        if col in left_df.columns and col in right_df.columns
+    ]
+    if len(pair_cols) == 0:
+        print(
+            f"Skipping {left_target}-{right_target} pairing: "
+            "no shared metadata columns found."
+        )
+        return pd.DataFrame()
+    left_df = left_df[pair_cols + ["obs"]].rename(columns={"obs": f"{left_target}_obs"})
+    right_df = right_df[pair_cols + ["obs"]].rename(columns={"obs": f"{right_target}_obs"})
+    pair_df = left_df.merge(right_df, on=pair_cols, how="inner")
+    if len(pair_df) == 0:
+        return pd.DataFrame()
+    pair_df = pair_df.drop_duplicates().reset_index(drop=True)
+    return pair_df
+
+
+def plot_multitask_lfmc_vs_sar_hexbin(eval_df, plot_dir, gridsize, fontsize):
+    label_lookup = {
+        "vv": "VV (dB)",
+        "vh": "VH (dB)",
+    }
+    metrics_out = {}
+    for sar_target in ["vv", "vh"]:
+        pair_df = build_cross_target_pairs(eval_df, "lfmc", sar_target)
+        if len(pair_df) == 0:
+            print(f"No paired LFMC/{sar_target.upper()} rows found; skipping.")
+            continue
+        lfmc_obs = pair_df["lfmc_obs"].to_numpy(dtype=float)
+        sar_obs = pair_df[f"{sar_target}_obs"].to_numpy(dtype=float)
+        finite_mask = np.isfinite(lfmc_obs) & np.isfinite(sar_obs)
+        lfmc_obs = lfmc_obs[finite_mask]
+        sar_obs = sar_obs[finite_mask]
+        if len(lfmc_obs) == 0:
+            print(f"No finite paired LFMC/{sar_target.upper()} rows found; skipping.")
+            continue
+        metrics = compute_correlation_metrics(lfmc_obs, sar_obs)
+        save_path = os.path.join(plot_dir, f"lfmc_vs_{sar_target}_hexbin.png")
+        generic_hexbin(
+            lfmc_obs,
+            sar_obs,
+            save_path,
+            gridsize=gridsize,
+            xlabel="Observed LFMC (%)",
+            ylabel=f"Observed {label_lookup[sar_target]}",
+            cbar_label="Count",
+            fontsize=fontsize,
+            line_to_plot="correlation",
+            stats_text=(
+                f"r = {_format_metric_with_std(metrics['corr'], np.nan, fmt='{:.2f}')}\n"
+                f"N = {metrics['n']}"
+            ),
+        )
+        print(f"Wrote multitask LFMC-vs-{sar_target.upper()} plot: {save_path}")
+        metrics["plot_path"] = save_path
+        metrics_out[f"lfmc_vs_{sar_target}"] = metrics
+    return metrics_out
+
+
 def build_lfmc_space_time_tables(lfmc_df):
-    required_cols = ["latitude", "longitude", "obs", "pred"]
+    required_cols = ["latitude", "longitude", "obs", "pred", "date"]
     missing_cols = [col for col in required_cols if col not in lfmc_df.columns]
     if len(missing_cols) > 0:
         raise KeyError(
@@ -496,9 +578,11 @@ def build_lfmc_space_time_tables(lfmc_df):
     work_df["longitude"] = pd.to_numeric(work_df["longitude"], errors="coerce")
     work_df["obs"] = pd.to_numeric(work_df["obs"], errors="coerce")
     work_df["pred"] = pd.to_numeric(work_df["pred"], errors="coerce")
-    work_df = work_df.dropna(subset=["latitude", "longitude", "obs", "pred"]).copy()
+    work_df["date"] = pd.to_datetime(work_df["date"], errors="coerce")
+    work_df = work_df.dropna(subset=["latitude", "longitude", "obs", "pred", "date"]).copy()
     if len(work_df) == 0:
         return pd.DataFrame(), pd.DataFrame()
+    work_df["obs_year"] = work_df["date"].dt.year
     site_cols = ["latitude", "longitude"]
     site_summary_df = (
         work_df.groupby(site_cols, dropna=False)
@@ -506,9 +590,11 @@ def build_lfmc_space_time_tables(lfmc_df):
             obs_mean=("obs", "mean"),
             pred_mean=("pred", "mean"),
             n_obs=("obs", "size"),
+            n_years=("obs_year", "nunique"),
         )
         .reset_index()
     )
+    site_summary_df["obs_per_year"] = site_summary_df["n_obs"] / site_summary_df["n_years"]
     work_df = work_df.merge(
         site_summary_df[site_cols + ["obs_mean", "pred_mean"]],
         on=site_cols,
@@ -584,6 +670,8 @@ def plot_scatter_from_arrays(
     ylabel,
     fontsize,
     metric_std=None,
+    color_array=None,
+    cbar_label="Color Value",
 ):
     metrics = compute_basic_metrics(obs, pred)
     if metrics["n"] == 0:
@@ -591,8 +679,12 @@ def plot_scatter_from_arrays(
     obs = np.asarray(obs, dtype=float)
     pred = np.asarray(pred, dtype=float)
     mask = np.isfinite(obs) & np.isfinite(pred)
+    if color_array is not None:
+        color_array = np.asarray(color_array, dtype=float)
+        mask = mask & np.isfinite(color_array)
     obs = obs[mask]
     pred = pred[mask]
+    color_vals = color_array[mask] if color_array is not None else None
     data_min = float(min(np.min(obs), np.min(pred)))
     data_max = float(max(np.max(obs), np.max(pred)))
     generic_scatter(
@@ -612,7 +704,9 @@ def plot_scatter_from_arrays(
         s=28,
         fontsize=fontsize,
         line_to_plot="one_to_one",
-        marker_color="#440154",
+        marker_color="#440154" if color_vals is None else None,
+        color_array=color_vals,
+        cbar_label=cbar_label,
     )
     metrics["r2_std_across_members"] = metric_std.get("r2") if metric_std else np.nan
     metrics["rmse_std_across_members"] = metric_std.get("rmse") if metric_std else np.nan
@@ -677,6 +771,8 @@ def run_lfmc_space_time_analysis(eval_df, plot_dir, gridsize, fontsize, member_e
         ylabel="Predicted LFMC site mean (%)",
         fontsize=fontsize,
         metric_std=space_metric_std,
+        color_array=site_summary_df["obs_per_year"].values,
+        cbar_label="Obs / year",
     )
     time_metrics = plot_hexbin_from_arrays(
         obs=anomaly_df["obs_anom"].values,
@@ -1822,6 +1918,15 @@ def main():
         )
         if target_metrics is not None:
             metrics_out[target_name] = target_metrics
+    if any(target in set(eval_df["target"].astype(str)) for target in ["vv", "vh"]):
+        metrics_out.update(
+            plot_multitask_lfmc_vs_sar_hexbin(
+                eval_df=eval_df,
+                plot_dir=plot_dir,
+                gridsize=args.hexbin_gridsize,
+                fontsize=args.fontsize,
+            )
+        )
     metrics_out.update(
         run_lfmc_space_time_analysis(
             eval_df=eval_df,

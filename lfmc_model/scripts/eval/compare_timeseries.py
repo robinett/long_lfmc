@@ -338,7 +338,13 @@ def build_model_entries(model_configs, model_df_index=None):
             member_site_error_list = []
             for member_idx, member_dir in enumerate(member_dirs, start=1):
                 print(f"  member {member_idx}/{len(member_dirs)}: {member_dir}")
-                this_site_error = get_site_error(member_dir)
+                this_site_error = get_site_error(
+                    member_dir,
+                    progress_label=(
+                        f"{config['name']} member {member_idx}/{len(member_dirs)} "
+                        f"({os.path.basename(member_dir)})"
+                    ),
+                )
                 member_site_errors[member_dir] = this_site_error
                 member_site_error_list.append(this_site_error)
             site_error = aggregate_site_errors(member_site_error_list)
@@ -359,7 +365,10 @@ def build_model_entries(model_configs, model_df_index=None):
         else:
             model_dir = select_model_dir(config["outputs_root"], model_df_index=model_df_index)
             print(f"Using model for {config['name']}: {model_dir}")
-            site_error = get_site_error(model_dir)
+            site_error = get_site_error(
+                model_dir,
+                progress_label=f"{config['name']} single-model ({os.path.basename(model_dir)})",
+            )
             entries.append(
                 {
                     "name": config["name"],
