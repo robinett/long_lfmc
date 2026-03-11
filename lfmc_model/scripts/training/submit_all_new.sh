@@ -9,10 +9,10 @@ trap 'echo "Caught Ctrl-C, exiting..."; exit 130' INT
 ########################
 
 input_data_dir="/scratch/users/trobinet/long_lfmc/\
-final_lfmc/lfmc_model/inputs/lfmc_nolatlon"
+final_lfmc/lfmc_model/inputs/lfmc_vh_vv_365"
 
 save_root="/scratch/users/trobinet/long_lfmc/\
-final_lfmc/lfmc_model/outputs/lfmc_nolatlon"
+final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365"
 
 ########################
 # Job throttling via lock files
@@ -32,9 +32,9 @@ skip_completed=true
 # Hyperparameter grids
 ########################
 
-num_tasks=1
+num_tasks=3
 weighting_type='manual'
-first_task_weights=(1.0)
+first_task_weights=(3.0)
 
 batch_sizes=(128)
 lrs=(5e-4 1e-4)
@@ -61,18 +61,44 @@ for first_task_weight in "${first_task_weights[@]}"; do
       for val_split in "${val_splits[@]}"; do
         for adam_wd in "${adam_wds[@]}"; do
           for dropout in "${dropouts[@]}"; do
+            #for d_idx in "${!d_models[@]}"; do
+            #  d_model=${d_models[$d_idx]}
+            #  nhead=$(( d_model / 32 ))
+            #  num_layers=$(( 2 + d_idx ))
+            #  dim_feedforward=$(( d_model * 2 ))
+
+            #  for long_d_idx in "${!long_d_models[@]}"; do
+            #    long_d_model=${long_d_models[$long_d_idx]}
+            #    long_nhead=$(( long_d_model / 32 ))
+            #    long_nhead=$(( long_nhead < 1 ? 1 : long_nhead ))
+            #    if [ "$long_d_model" -le 32 ]; then
+            #      long_num_layers=2
+            #    else
+            #      long_num_layers=3
+            #    fi
+            #    long_dim_feedforward=$(( long_d_model * 2 ))
             for d_idx in "${!d_models[@]}"; do
               d_model=${d_models[$d_idx]}
               nhead=$(( d_model / 32 ))
-              num_layers=$(( 2 + d_idx ))
+              nhead=$(( nhead < 1 ? 1 : nhead ))
+              if [ "$d_model" -le 32 ]; then
+                num_layers=2
+              else
+                num_layers=3
+              fi
               dim_feedforward=$(( d_model * 2 ))
 
               for long_d_idx in "${!long_d_models[@]}"; do
                 long_d_model=${long_d_models[$long_d_idx]}
                 long_nhead=$(( long_d_model / 32 ))
-                long_num_layers=$(( 2 + long_d_idx ))
+                long_nhead=$(( long_nhead < 1 ? 1 : long_nhead ))
+                if [ "$long_d_model" -le 32 ]; then
+                  long_num_layers=2
+                else
+                  long_num_layers=3
+                fi
                 long_dim_feedforward=$(( long_d_model * 2 ))
-
+                
                 for long_out_dim in "${long_out_dims[@]}"; do
                   if [ "${long_out_dim}" -ge "${long_d_model}" ]; then
                     echo "Skipping combo: long_out_dim=${long_out_dim} must be < long_d_model=${long_d_model}"

@@ -12,8 +12,8 @@ mkdir -p logs
 # Constant directories
 ########################
 
-input_data_dir="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc_vh_vv"
-save_root="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_ens"
+input_data_dir="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc_365"
+save_root="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_365_ens"
 
 ########################
 # Ensemble settings
@@ -36,26 +36,26 @@ mkdir -p "${lock_dir}"
 # Edit these values after selecting the winning config from submit_all_new.sh
 ########################
 
-num_tasks=3
+num_tasks=1
 weighting_type='manual'
-task_weights=(3.0 1.0 1.0)
+task_weights=(1.0 1.0 1.0)
 
 batch_size=128
-lr=5e-4
+lr=1e-4
 val_split=0.15
 adam_wd=1e-4
 dropout=0.15
 
-d_model=32
-nhead=1
-num_layers=2
-dim_feedforward=64
+d_model=64
+nhead=2
+num_layers=3
+dim_feedforward=128
 
-long_d_model=64
-long_nhead=2
+long_d_model=128
+long_nhead=4
 long_num_layers=3
-long_dim_feedforward=128
-long_out_dim=16
+long_dim_feedforward=256
+long_out_dim=64
 
 ########################
 # Submission loop (seeds)

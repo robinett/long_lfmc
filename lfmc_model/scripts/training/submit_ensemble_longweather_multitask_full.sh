@@ -14,10 +14,10 @@ mkdir -p logs
 ########################
 
 scratch_root="/scratch/users/trobinet/long_lfmc/final_lfmc"
-sar_root="${scratch_root}/sar/ensemble/lfmc_vh_vv_ens_fullrandom"
-sample_index_root="${scratch_root}/lfmc_model/indexes/ensemble/lfmc_vh_vv_ens_fullrandom"
-input_root="${scratch_root}/lfmc_model/inputs/ensemble/lfmc_vh_vv_ens_fullrandom"
-save_root="${scratch_root}/lfmc_model/outputs/lfmc_vh_vv_ens_fullrandom"
+sar_root="${scratch_root}/sar/ensemble/lfmc_vh_vv_365_ens"
+sample_index_root="${scratch_root}/lfmc_model/indexes/ensemble/lfmc_vh_vv_365_ens"
+input_root="${scratch_root}/lfmc_model/inputs/ensemble/lfmc_vh_vv_365_ens"
+save_root="${scratch_root}/lfmc_model/outputs/lfmc_vh_vv_365_ens"
 fold_info_path="${save_root}/canonical_fold_info.json"
 
 mkdir -p "${sar_root}" "${sample_index_root}" "${input_root}" "${save_root}"
@@ -50,21 +50,21 @@ weighting_type='manual'
 task_weights=(3.0 1.0 1.0)
 
 batch_size=128
-lr=5e-4
+lr=1e-4
 val_split=0.15
 adam_wd=1e-4
 dropout=0.15
 
-d_model=32
-nhead=1
-num_layers=2
-dim_feedforward=64
+d_model=128
+nhead=4
+num_layers=3
+dim_feedforward=256
 
-long_d_model=64
-long_nhead=2
+long_d_model=256
+long_nhead=8
 long_num_layers=3
-long_dim_feedforward=128
-long_out_dim=16
+long_dim_feedforward=512
+long_out_dim=64
 
 ########################
 # Submission loop
