@@ -1,5 +1,7 @@
 import seaborn as sns
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import matplotlib.ticker as mticker
 import sys
 import numpy as np
 import matplotlib.dates as mdates
@@ -130,6 +132,8 @@ def plot_lfmc_with_vv_vh(
     vh_pred_std=None,
     vv_dates=None,
     vh_dates=None,
+    annotation_text=None,
+    title_text=None,
 ):
     fig, ax_l = plt.subplots(figsize=(11, 4.5))
     ax_r = ax_l.twinx()
@@ -314,6 +318,22 @@ def plot_lfmc_with_vv_vh(
     all_labels = l_left + l_right
     if len(all_handles) > 0:
         ax_l.legend(all_handles, all_labels, loc="best")
+    if title_text is not None and str(title_text).strip() != "":
+        ax_l.set_title(str(title_text))
+    if annotation_text is not None and str(annotation_text).strip() != "":
+        ax_l.text(
+            0.02,
+            0.98,
+            annotation_text,
+            transform=ax_l.transAxes,
+            verticalalignment="top",
+            bbox={
+                "boxstyle": "round",
+                "facecolor": "white",
+                "alpha": 0.88,
+                "edgecolor": "0.4",
+            },
+        )
     fig.autofmt_xdate()
     plt.tight_layout()
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -843,6 +863,7 @@ def map_points(
     colorbar_label="Value",
     cbar_lim=None,         # None, scalar, or (vmin, vmax)
     stats_text=None,
+    show_size_legend=True,
 ):
     """
     Plot lon/lat points with sizes scaled by counts_per_point,
@@ -1065,63 +1086,64 @@ def map_points(
     # -----------------------
     # Size legend
     # -----------------------
-    if vmax_counts <= vmin_counts:
-        legend_vals = [float(np.nanmean(counts))]
-    else:
-        levels = np.linspace(vmin_counts, vmax_counts, 4)
-        rng = vmax_counts - vmin_counts
-        step = 10 ** np.floor(np.log10(rng / 3.0))
-        legend_vals = sorted(
-            {
-                float(
-                    np.maximum(
-                        0.0,
-                        np.round(v / step) * step,
-                    )
-                )
-                for v in levels
-            }
-        )
-
-    def size_for(v):
+    if show_size_legend:
         if vmax_counts <= vmin_counts:
-            return (s_min + s_max) / 2.0
-        vclip = np.clip(v, vmin_counts, vmax_counts)
-        return (
-            s_min
-            + (vclip - vmin_counts)
-            / (vmax_counts - vmin_counts)
-            * (s_max - s_min)
-        )
+            legend_vals = [float(np.nanmean(counts))]
+        else:
+            levels = np.linspace(vmin_counts, vmax_counts, 4)
+            rng = vmax_counts - vmin_counts
+            step = 10 ** np.floor(np.log10(rng / 3.0))
+            legend_vals = sorted(
+                {
+                    float(
+                        np.maximum(
+                            0.0,
+                            np.round(v / step) * step,
+                        )
+                    )
+                    for v in levels
+                }
+            )
 
-    proxies = [
-        plt.scatter(
-            [],
-            [],
-            s=size_for(v),
-            color="#2b83ba",
-            alpha=0.7,
-            edgecolor="k",
-            linewidth=0.2,
-        )
-        for v in legend_vals
-    ]
-    labels = [f"{v:g}" for v in legend_vals]
+        def size_for(v):
+            if vmax_counts <= vmin_counts:
+                return (s_min + s_max) / 2.0
+            vclip = np.clip(v, vmin_counts, vmax_counts)
+            return (
+                s_min
+                + (vclip - vmin_counts)
+                / (vmax_counts - vmin_counts)
+                * (s_max - s_min)
+            )
 
-    leg = ax.legend(
-        proxies,
-        labels,
-        title="Count",
-        scatterpoints=1,
-        frameon=True,
-        fontsize=9,
-        title_fontsize=10,
-        loc="lower left",
-        bbox_to_anchor=(0.01, 0.01),
-    )
-    leg.get_frame().set_alpha(0.9)
-    leg.get_frame().set_facecolor("white")
-    leg.get_frame().set_edgecolor("0.4")
+        proxies = [
+            plt.scatter(
+                [],
+                [],
+                s=size_for(v),
+                color="#2b83ba",
+                alpha=0.7,
+                edgecolor="k",
+                linewidth=0.2,
+            )
+            for v in legend_vals
+        ]
+        labels = [f"{v:g}" for v in legend_vals]
+
+        leg = ax.legend(
+            proxies,
+            labels,
+            title="Count",
+            scatterpoints=1,
+            frameon=True,
+            fontsize=9,
+            title_fontsize=10,
+            loc="lower left",
+            bbox_to_anchor=(0.01, 0.01),
+        )
+        leg.get_frame().set_alpha(0.9)
+        leg.get_frame().set_facecolor("white")
+        leg.get_frame().set_edgecolor("0.4")
 
     _stats_text_box(ax, stats_text, fontsize=12, loc=(0.03, 0.97))
 
@@ -1140,6 +1162,7 @@ def annotated_bar_plot(
     bar_color="#440154",
     stats_text=None,
     errors=None,
+    xtick_rotation=0,
 ):
     categories = [str(c) for c in categories]
     values = np.asarray(values, dtype=float)
@@ -1162,11 +1185,17 @@ def annotated_bar_plot(
     ax.set_xlabel(xlabel, fontsize=fontsize)
     ax.set_ylabel(ylabel, fontsize=fontsize)
     ax.set_xticks(x)
-    ax.set_xticklabels(categories, fontsize=fontsize)
+    ax.set_xticklabels(
+        categories,
+        fontsize=fontsize,
+        rotation=xtick_rotation,
+        ha=("right" if xtick_rotation else "center"),
+    )
     if fontsize is not None:
         ax.tick_params(axis="y", labelsize=fontsize)
 
     finite_vals = values[np.isfinite(values)]
+    yrange = 1.0
     if finite_vals.size > 0:
         ymin = float(min(0.0, finite_vals.min()))
         ymax = float(max(0.0, finite_vals.max()))
@@ -1182,14 +1211,21 @@ def annotated_bar_plot(
     if annotations is not None:
         if len(annotations) != len(values):
             raise ValueError("annotations and values must have the same length")
-        for bar, value, annotation in zip(bars, values, annotations):
+        err_vals = np.zeros(len(values), dtype=float)
+        if errors is not None:
+            err_vals = np.asarray(errors, dtype=float)
+            err_vals = np.where(np.isfinite(err_vals), err_vals, 0.0)
+        for idx, (bar, value, annotation) in enumerate(zip(bars, values, annotations)):
             if not np.isfinite(value) or annotation in [None, ""]:
                 continue
-            y = bar.get_height()
-            y_text = y + 0.02 * max(abs(y), 1.0)
-            va = "bottom" if y >= 0 else "top"
-            if y < 0:
-                y_text = y - 0.02 * max(abs(y), 1.0)
+            err_here = float(err_vals[idx]) if idx < len(err_vals) else 0.0
+            offset = 0.02 * yrange
+            if value >= 0:
+                y_text = value + max(err_here, 0.0) + offset
+                va = "bottom"
+            else:
+                y_text = value - max(err_here, 0.0) - offset
+                va = "top"
             ax.text(
                 bar.get_x() + bar.get_width() / 2.0,
                 y_text,
@@ -1319,6 +1355,7 @@ def generic_scatter(
     alpha=0.5,
     s=20,
     cbar_range=None,
+    cbar_scale="linear",
     fontsize=None,
     line_to_plot=None,
     marker_color=None,
@@ -1335,6 +1372,18 @@ def generic_scatter(
 
     plt.figure(figsize=(6, 6))
     ax = plt.gca()
+    norm = None
+    if color_array is not None and cbar_scale == "log":
+        positive_c = c[c > 0]
+        if len(positive_c) > 0:
+            if cbar_range is not None:
+                vmin = max(float(cbar_range[0]), float(np.min(positive_c)))
+                vmax = float(cbar_range[1])
+            else:
+                vmin = float(np.min(positive_c))
+                vmax = float(np.max(positive_c))
+            if np.isfinite(vmin) and np.isfinite(vmax) and vmax > vmin > 0:
+                norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
 
     # scatter
     sc = ax.scatter(
@@ -1343,14 +1392,24 @@ def generic_scatter(
         c=c if color_array is not None else marker_color,
         cmap=cmap if color_array is not None else None,
         s=s,
-        vmin=cbar_range[0] if cbar_range else None,
-        vmax=cbar_range[1] if cbar_range else None,
+        norm=norm,
+        vmin=(cbar_range[0] if cbar_range and norm is None else None),
+        vmax=(cbar_range[1] if cbar_range and norm is None else None),
     )
 
     # colorbar
     if color_array is not None:
         cbar = plt.colorbar(sc)
         cbar.set_label(cbar_label, fontsize=fontsize)
+        if cbar_scale == "log" and norm is not None:
+            cbar.locator = mticker.LogLocator(base=10, subs=(1.0, 2.0, 5.0))
+            cbar.formatter = mticker.FuncFormatter(
+                lambda value, pos: np.format_float_positional(
+                    value,
+                    trim="-",
+                )
+            )
+            cbar.update_ticks()
 
         if fontsize is not None:
             cbar.ax.tick_params(labelsize=fontsize)
