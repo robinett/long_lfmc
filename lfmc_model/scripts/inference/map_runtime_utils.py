@@ -1,12 +1,17 @@
 import calendar
+import copy
+import datetime as dt
 import glob
+import hashlib
 import json
 import os
 import sys
+import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import torch
 import xarray as xr
 import zarr
 from pyproj import Transformer
@@ -27,7 +32,10 @@ from compare_timeseries import (
     VAR_LOCS,
     _clamp_inference_window,
     _convert_tensor_payload_norm,
+    _effective_static_norm_arrays,
+    _input_norm_signature,
     _load_model_runtime,
+    _renormalize_tensor,
     _runtimes_share_feature_layout,
     aggregate_site_errors,
     get_inference_datasets,
@@ -59,6 +67,24 @@ OUTPUT_MEAN_NAME = "lfmc_ens_mean"
 OUTPUT_STD_NAME = "lfmc_ens_std"
 DEFAULT_FALLBACK_NUM_TASKS = 3
 DEFAULT_MODEL_TYPE = "standard"
+DEFAULT_LANDCOVER_MASK_CACHE_DIR = os.path.join(
+    DEFAULT_SCRATCH_ROOT,
+    "lfmc_model",
+    "inference",
+    "cache",
+    "landcover_masks",
+)
+ALLOWED_DOMINANT_LANDCOVER = (
+    "deciduous_forest",
+    "evergreen_forest",
+    "mixed_forest",
+    "shrub",
+    "grass",
+)
+
+
+def timestamped_message(message: str) -> str:
+    return f"[{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
 
 
 def _var_to_source(var_locs: Dict[str, Sequence[str]]) -> Dict[str, str]:
@@ -75,7 +101,13 @@ def _nearest_index(coords: np.ndarray, value: float) -> int:
         raise ValueError("Expected a 1D coordinate array")
     if coords.size == 1:
         return 0
-    idx = int(np.searchsorted(coords, value))
+    coord_diffs = np.diff(coords)
+    if np.all(coord_diffs > 0):
+        idx = int(np.searchsorted(coords, value))
+    elif np.all(coord_diffs < 0):
+        idx = int(coords.size - np.searchsorted(coords[::-1], value))
+    else:
+        raise ValueError("Coordinate array must be monotonic")
     if idx <= 0:
         return 0
     if idx >= coords.size:
@@ -225,7 +257,8 @@ def month_blocks(
         month = ((month - 1) % 12) + 1
         last_day = calendar.monthrange(year, month)[1]
         block_end = pd.Timestamp(year, month, last_day)
-        block_end = min(block_end.normalize(), end_date)
+        year_end = pd.Timestamp(block_start.year, 12, 31)
+        block_end = min(block_end.normalize(), year_end, end_date)
         out.append((block_start, block_end))
         current = block_end + pd.Timedelta(days=1)
     return out
@@ -237,12 +270,116 @@ def open_model_grid(grid_path: str = DEFAULT_MODEL_GRID_PATH) -> xr.Dataset:
     return xr.open_dataset(grid_path)
 
 
-def build_tile_payloads(model_grid: xr.Dataset, tile_size: int) -> Dict[str, Dict[str, np.ndarray]]:
+def build_landcover_allowed_mask_for_year(
+    landcover_ds: xr.Dataset,
+    year: int,
+    allowed_classes: Sequence[str] = ALLOWED_DOMINANT_LANDCOVER,
+) -> xr.DataArray:
+    landcover_vars = list(landcover_ds.data_vars)
+    missing_classes = [name for name in allowed_classes if name not in landcover_vars]
+    if len(missing_classes) > 0:
+        raise KeyError(
+            f"Missing allowed landcover class(es) in landcover dataset: {missing_classes}"
+        )
+    year_key = pd.Timestamp(year, 1, 1)
+    year_ds = landcover_ds.sel(year=year_key)
+    lc_array = year_ds.to_array(dim="landcover")
+    lc_filled = lc_array.fillna(-np.inf)
+    dominant_idx = lc_filled.argmax(dim="landcover")
+    any_valid = lc_array.notnull().any(dim="landcover")
+    allowed_indices = [landcover_vars.index(name) for name in allowed_classes]
+    allowed_mask = xr.zeros_like(any_valid, dtype=bool)
+    for idx in allowed_indices:
+        allowed_mask = allowed_mask | (dominant_idx == idx)
+    return any_valid & allowed_mask
+
+
+def _mask_cache_signature(
+    model_grid: xr.Dataset,
+    landcover_ds: xr.Dataset,
+    grid_path: str,
+    allowed_classes: Sequence[str],
+) -> str:
+    landcover_var = next(iter(landcover_ds.data_vars.values()))
+    payload = {
+        "grid_path": grid_path,
+        "grid_shape": {k: int(v) for k, v in model_grid.sizes.items()},
+        "grid_x_bounds": [
+            float(model_grid["x"].values[0]),
+            float(model_grid["x"].values[-1]),
+        ],
+        "grid_y_bounds": [
+            float(model_grid["y"].values[0]),
+            float(model_grid["y"].values[-1]),
+        ],
+        "landcover_source": str(landcover_var.encoding.get("source", "")),
+        "landcover_shape": {k: int(v) for k, v in landcover_ds.sizes.items()},
+        "landcover_vars": sorted(landcover_ds.data_vars),
+        "allowed_classes": list(allowed_classes),
+    }
+    raw = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+
+def load_or_build_prediction_mask_for_year(
+    model_grid: xr.Dataset,
+    landcover_ds: xr.Dataset,
+    year: int,
+    grid_path: str = DEFAULT_MODEL_GRID_PATH,
+    allowed_classes: Sequence[str] = ALLOWED_DOMINANT_LANDCOVER,
+    cache_root: str = DEFAULT_LANDCOVER_MASK_CACHE_DIR,
+) -> xr.DataArray:
+    cache_sig = _mask_cache_signature(
+        model_grid=model_grid,
+        landcover_ds=landcover_ds,
+        grid_path=grid_path,
+        allowed_classes=allowed_classes,
+    )
+    cache_dir = os.path.join(cache_root, cache_sig)
+    cache_path = os.path.join(cache_dir, f"prediction_mask_{year}.npz")
+    if os.path.exists(cache_path):
+        with np.load(cache_path, allow_pickle=False) as npz:
+            mask = np.asarray(npz["mask"], dtype=bool)
+            y_vals = np.asarray(npz["y"])
+            x_vals = np.asarray(npz["x"])
+        print(f"[landcover_mask] year={year} cache hit: {cache_path}")
+        return xr.DataArray(mask, coords={"y": y_vals, "x": x_vals}, dims=("y", "x"))
+
+    landcover_mask = build_landcover_allowed_mask_for_year(
+        landcover_ds=landcover_ds,
+        year=year,
+        allowed_classes=allowed_classes,
+    )
+    model_random_mask = model_grid["random_vals"].notnull()
+    prediction_mask = (model_random_mask & landcover_mask).transpose(*model_random_mask.dims)
+    mask = np.asarray(prediction_mask.values, dtype=bool)
+    y_vals = np.asarray(model_grid["y"].values)
+    x_vals = np.asarray(model_grid["x"].values)
+    os.makedirs(cache_dir, exist_ok=True)
+    np.savez_compressed(
+        cache_path,
+        mask=mask,
+        y=y_vals,
+        x=x_vals,
+    )
+    print(f"[landcover_mask] year={year} wrote cache: {cache_path}")
+    return xr.DataArray(mask, coords={"y": y_vals, "x": x_vals}, dims=("y", "x"))
+
+
+def build_tile_payloads(
+    model_grid: xr.Dataset,
+    tile_size: int,
+    valid_mask: Optional[xr.DataArray] = None,
+) -> Dict[str, Dict[str, np.ndarray]]:
     vals = model_grid["random_vals"]
     lats = model_grid["lat"].values
     lons = model_grid["lon"].values
     mask = vals.notnull()
-    iy_all, ix_all = np.where(mask.data)
+    if valid_mask is not None:
+        aligned_mask = valid_mask.transpose(*mask.dims)
+        mask = mask & aligned_mask
+    mask_data = np.asarray(mask.values, dtype=bool)
+    iy_all, ix_all = np.where(mask_data)
     height, width = mask.shape
     tile_df = pd.DataFrame(
         {
@@ -278,11 +415,18 @@ def build_tile_payloads(model_grid: xr.Dataset, tile_size: int) -> Dict[str, Dic
     return tile_payloads
 
 
-def write_tile_payloads(tile_payloads: Dict[str, Dict[str, np.ndarray]], out_dir: str) -> Dict[str, str]:
+def write_tile_payloads(
+    tile_payloads: Dict[str, Dict[str, np.ndarray]],
+    out_dir: str,
+    file_prefix: Optional[str] = None,
+) -> Dict[str, str]:
     os.makedirs(out_dir, exist_ok=True)
     tile_meta_paths = {}
     for tile_name, payload in tile_payloads.items():
-        tile_path = os.path.join(out_dir, f"tile_{tile_name}.npz")
+        filename = f"tile_{tile_name}.npz"
+        if file_prefix is not None and file_prefix != "":
+            filename = f"{file_prefix}_{filename}"
+        tile_path = os.path.join(out_dir, filename)
         np.savez_compressed(tile_path, **payload)
         tile_meta_paths[tile_name] = tile_path
     return tile_meta_paths
@@ -293,25 +437,603 @@ def load_tile_payload(tile_meta_path: str) -> Dict[str, np.ndarray]:
         return {key: npz[key] for key in npz.files}
 
 
-def build_reference_tensor_payload(
+def save_prepared_tensor_payload(prepared_path: str, tensor_payload: Dict[str, object]) -> None:
+    os.makedirs(os.path.dirname(prepared_path), exist_ok=True)
+    info_df = tensor_payload["info_df"].copy().reset_index(drop=True)
+    payload_to_save = {
+        "safe_start": str(pd.Timestamp(tensor_payload["safe_start"]).date()),
+        "safe_end": str(pd.Timestamp(tensor_payload["safe_end"]).date()),
+        "short_tensor": tensor_payload["short_tensor"].detach().cpu(),
+        "long_tensor": tensor_payload["long_tensor"].detach().cpu(),
+        "static_tensor": tensor_payload["static_tensor"].detach().cpu(),
+        "lat": info_df["lat"].to_numpy(dtype=np.float64),
+        "lon": info_df["lon"].to_numpy(dtype=np.float64),
+        "date": pd.to_datetime(info_df["date"]).to_numpy(dtype="datetime64[ns]"),
+    }
+    torch.save(payload_to_save, prepared_path)
+
+
+def load_prepared_tensor_payload(prepared_path: str) -> Dict[str, object]:
+    raw = torch.load(prepared_path, map_location="cpu")
+    info_df = pd.DataFrame(
+        {
+            "lat": np.asarray(raw["lat"], dtype=np.float64),
+            "lon": np.asarray(raw["lon"], dtype=np.float64),
+            "date": pd.to_datetime(np.asarray(raw["date"])),
+        }
+    )
+    return {
+        "empty": False,
+        "safe_start": pd.Timestamp(raw["safe_start"]).normalize(),
+        "safe_end": pd.Timestamp(raw["safe_end"]).normalize(),
+        "short_tensor": raw["short_tensor"],
+        "long_tensor": raw["long_tensor"],
+        "static_tensor": raw["static_tensor"],
+        "info_df": info_df,
+    }
+
+
+def runtimes_share_short_long_layout(
+    reference_runtime: Dict[str, object],
+    runtime: Dict[str, object],
+) -> bool:
+    return (
+        list(reference_runtime["var_names"]["short_vars"]) == list(runtime["var_names"]["short_vars"])
+        and list(reference_runtime["var_names"]["long_vars"]) == list(runtime["var_names"]["long_vars"])
+        and list(reference_runtime["short_lag_days"]) == list(runtime["short_lag_days"])
+        and list(reference_runtime["long_lag_days"]) == list(runtime["long_lag_days"])
+    )
+
+
+def build_static_superset_runtime(
+    reference_runtime: Dict[str, object],
+    runtimes: Sequence[Dict[str, object]],
+) -> Dict[str, object]:
+    superset_static_vars: List[str] = []
+    for runtime in runtimes:
+        for var_name in runtime["var_names"]["static_vars"]:
+            if var_name not in superset_static_vars:
+                superset_static_vars.append(var_name)
+
+    out = copy.deepcopy(reference_runtime)
+    out["var_names"]["static_vars"] = superset_static_vars
+
+    ref_static_vars = list(reference_runtime["var_names"]["static_vars"])
+    ref_static_mean, ref_static_std = _effective_static_norm_arrays(
+        ref_static_vars,
+        reference_runtime["norm_params"],
+    )
+    ref_idx_lookup = {var_name: idx for idx, var_name in enumerate(ref_static_vars)}
+    sup_mean = np.empty(len(superset_static_vars), dtype=np.float32)
+    sup_std = np.empty(len(superset_static_vars), dtype=np.float32)
+    for idx, var_name in enumerate(superset_static_vars):
+        if var_name in ref_idx_lookup:
+            ref_idx = ref_idx_lookup[var_name]
+            sup_mean[idx] = ref_static_mean[ref_idx]
+            sup_std[idx] = ref_static_std[ref_idx]
+        elif var_name.startswith("climate_zone_") or _static_var_is_landcover(var_name):
+            sup_mean[idx] = 0.0
+            sup_std[idx] = 1.0
+        else:
+            raise ValueError(
+                f"Cannot synthesize superset static normalization for normalized feature {var_name}"
+            )
+    out["norm_params"]["train_static_mean"] = sup_mean.tolist()
+    out["norm_params"]["train_static_std"] = sup_std.tolist()
+    return out
+
+
+def convert_tensor_payload_to_runtime(
+    reference_payload: Dict[str, object],
+    reference_runtime: Dict[str, object],
+    runtime: Dict[str, object],
+    tensor_cache: Dict[Tuple[str, ...], Dict[str, object]],
+    site: str,
+) -> Dict[str, object]:
+    if _runtimes_share_feature_layout(reference_runtime, runtime):
+        return _convert_tensor_payload_norm(
+            reference_payload,
+            reference_runtime,
+            runtime,
+            tensor_cache,
+            site,
+        )
+    if not runtimes_share_short_long_layout(reference_runtime, runtime):
+        raise ValueError("Short/long feature layout differs; full tensor rebuild required")
+
+    cache_key = (
+        "static_project_renorm",
+        site,
+        str(reference_payload["safe_start"].date()),
+        str(reference_payload["safe_end"].date()),
+        reference_runtime["input_data_dir"],
+        runtime["input_data_dir"],
+        _input_norm_signature(reference_runtime["norm_params"]),
+        _input_norm_signature(runtime["norm_params"]),
+        "|".join(reference_runtime["var_names"]["static_vars"]),
+        "|".join(runtime["var_names"]["static_vars"]),
+    )
+    if cache_key in tensor_cache:
+        return tensor_cache[cache_key]
+
+    short_ref_mean = np.asarray(reference_runtime["norm_params"]["train_short_mean"], dtype=np.float32)
+    short_ref_std = np.asarray(reference_runtime["norm_params"]["train_short_std"], dtype=np.float32)
+    short_new_mean = np.asarray(runtime["norm_params"]["train_short_mean"], dtype=np.float32)
+    short_new_std = np.asarray(runtime["norm_params"]["train_short_std"], dtype=np.float32)
+    long_ref_mean = np.asarray(reference_runtime["norm_params"]["train_long_mean"], dtype=np.float32)
+    long_ref_std = np.asarray(reference_runtime["norm_params"]["train_long_std"], dtype=np.float32)
+    long_new_mean = np.asarray(runtime["norm_params"]["train_long_mean"], dtype=np.float32)
+    long_new_std = np.asarray(runtime["norm_params"]["train_long_std"], dtype=np.float32)
+
+    ref_static_vars = list(reference_runtime["var_names"]["static_vars"])
+    new_static_vars = list(runtime["var_names"]["static_vars"])
+    ref_static_idx = {var_name: idx for idx, var_name in enumerate(ref_static_vars)}
+    missing_static = [var_name for var_name in new_static_vars if var_name not in ref_static_idx]
+    if len(missing_static) > 0:
+        raise ValueError(
+            f"Reference static superset is missing runtime static vars: {missing_static}"
+        )
+    static_indices = torch.tensor(
+        [ref_static_idx[var_name] for var_name in new_static_vars],
+        dtype=torch.long,
+    )
+    selected_static = reference_payload["static_tensor"].index_select(2, static_indices)
+    static_ref_mean, static_ref_std = _effective_static_norm_arrays(
+        ref_static_vars,
+        reference_runtime["norm_params"],
+    )
+    static_new_mean, static_new_std = _effective_static_norm_arrays(
+        new_static_vars,
+        runtime["norm_params"],
+    )
+    static_ref_mean = static_ref_mean[static_indices.numpy()]
+    static_ref_std = static_ref_std[static_indices.numpy()]
+
+    out = {
+        "empty": False,
+        "safe_start": reference_payload["safe_start"],
+        "safe_end": reference_payload["safe_end"],
+        "short_tensor": _renormalize_tensor(
+            reference_payload["short_tensor"],
+            short_ref_mean,
+            short_ref_std,
+            short_new_mean,
+            short_new_std,
+        ),
+        "long_tensor": _renormalize_tensor(
+            reference_payload["long_tensor"],
+            long_ref_mean,
+            long_ref_std,
+            long_new_mean,
+            long_new_std,
+        ),
+        "static_tensor": _renormalize_tensor(
+            selected_static,
+            static_ref_mean,
+            static_ref_std,
+            static_new_mean,
+            static_new_std,
+        ),
+        "info_df": reference_payload["info_df"].copy(),
+    }
+    tensor_cache[cache_key] = out
+    return out
+
+
+def _model_grid_coords_for_tile(
+    tile_payload: Dict[str, np.ndarray],
+    dss: Dict[str, xr.Dataset],
+) -> Tuple[np.ndarray, np.ndarray]:
+    ix = tile_payload["ix"].astype(np.int64)
+    iy = tile_payload["iy"].astype(np.int64)
+    x_coords = np.asarray(dss["modis"]["x"].values, dtype=np.float64)[ix]
+    # Full-grid inference datasets use the reverse y ordering of the model grid.
+    y_model_order = np.asarray(dss["modis"]["y"].values, dtype=np.float64)[::-1]
+    y_coords = y_model_order[iy]
+    return x_coords, y_coords
+
+
+def _map_coords_to_source_indices(
+    source_coords: np.ndarray,
+    target_coords: np.ndarray,
+    coord_name: str,
+    source_name: str,
+    atol: float = 1e-6,
+) -> np.ndarray:
+    mapped = np.empty(len(target_coords), dtype=np.int64)
+    unique_targets = np.unique(target_coords)
+    lookup: Dict[float, int] = {}
+    source_coords = np.asarray(source_coords, dtype=np.float64)
+    for coord_val in unique_targets:
+        idx = _nearest_index(source_coords, float(coord_val))
+        if not np.isclose(source_coords[idx], coord_val, atol=atol, rtol=0.0):
+            raise ValueError(
+                f"{source_name} {coord_name}-coordinate mismatch for tile-native inference: "
+                f"requested {coord_val}, matched {source_coords[idx]}"
+            )
+        lookup[float(coord_val)] = int(idx)
+    for i, coord_val in enumerate(target_coords):
+        mapped[i] = lookup[float(coord_val)]
+    return mapped
+
+
+def _resolve_tile_source_indices(
+    tile_payload: Dict[str, np.ndarray],
+    source_ds: xr.Dataset,
+    source_name: str,
+    dss: Dict[str, xr.Dataset],
+) -> Dict[str, np.ndarray]:
+    model_x_coords, model_y_coords = _model_grid_coords_for_tile(tile_payload, dss)
+    source_x = np.asarray(source_ds["x"].values, dtype=np.float64)
+    source_y = np.asarray(source_ds["y"].values, dtype=np.float64)
+    source_ix = _map_coords_to_source_indices(source_x, model_x_coords, "x", source_name)
+    source_iy = _map_coords_to_source_indices(source_y, model_y_coords, "y", source_name)
+    x_min = int(source_ix.min())
+    x_max = int(source_ix.max())
+    y_min = int(source_iy.min())
+    y_max = int(source_iy.max())
+    return {
+        "source_ix": source_ix,
+        "source_iy": source_iy,
+        "x_min": np.asarray(x_min, dtype=np.int64),
+        "x_max": np.asarray(x_max, dtype=np.int64),
+        "y_min": np.asarray(y_min, dtype=np.int64),
+        "y_max": np.asarray(y_max, dtype=np.int64),
+        "local_ix": source_ix - x_min,
+        "local_iy": source_iy - y_min,
+    }
+
+
+def _stack_source_vars(
+    ds: xr.Dataset,
+    var_names: Sequence[str],
+    time_slice: Optional[slice],
+    x_slice: slice,
+    y_slice: slice,
+    source_name: str,
+) -> xr.DataArray:
+    base = ds.isel(x=x_slice, y=y_slice)
+    if time_slice is not None:
+        base = base.sel(time=time_slice)
+    if source_name == "daymet":
+        out = base["data"].sel(variable=list(var_names)).transpose("time", "variable", "y", "x")
+    elif source_name == "modis" and "data" in base:
+        out = base["data"].sel(variable=list(var_names)).transpose("time", "variable", "y", "x")
+    else:
+        missing = [var_name for var_name in var_names if var_name not in base.data_vars]
+        if len(missing) > 0:
+            raise KeyError(
+                f"{source_name} is missing variables required for tile-native inference: {missing}"
+            )
+        out = (
+            base[list(var_names)]
+            .to_array(dim="variable")
+            .transpose("time", "variable", "y", "x")
+        )
+    return out.compute()
+
+
+def _validate_daily_time_axis(time_vals: np.ndarray, source_name: str) -> pd.DatetimeIndex:
+    time_index = pd.to_datetime(time_vals)
+    expected = pd.date_range(time_index.min(), time_index.max(), freq="D")
+    if len(time_index) != len(expected) or not np.array_equal(time_index.values, expected.values):
+        raise ValueError(
+            f"{source_name} time axis is not complete daily coverage for tile-native inference"
+        )
+    return time_index
+
+
+def _build_lag_fraction_values(lag_days: Sequence[int], mean: float, std: float) -> np.ndarray:
+    lag_days = np.asarray(lag_days, dtype=np.float32)
+    max_lag = float(np.max(lag_days)) if len(lag_days) > 0 else 0.0
+    if max_lag <= 0:
+        raw = np.ones_like(lag_days, dtype=np.float32)
+    else:
+        raw = lag_days / max_lag
+    safe_std = std if abs(std) > 0 else 1.0
+    return ((raw - mean) / safe_std).astype(np.float32)
+
+
+def _static_var_is_landcover(var_name: str) -> bool:
+    return any(
+        token in var_name
+        for token in (
+            "barren",
+            "crops",
+            "forest",
+            "developed",
+            "grass",
+            "other",
+            "shrub",
+            "water",
+            "wetlands",
+        )
+    )
+
+
+def _tile_native_tensor_payload(
     tile_payload: Dict[str, np.ndarray],
     runtime: Dict[str, object],
     dss: Dict[str, xr.Dataset],
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
+    pixel_batch_size: int = 2048,
+    day_batch_size: int = 31,
 ) -> Dict[str, object]:
-    locs = np.column_stack((tile_payload["lon"], tile_payload["lat"])).tolist()
-    short_tensor, long_tensor, static_tensor, info_df = build_tensors(
-        locs=locs,
-        start_dates=[start_date for _ in locs],
-        end_dates=[end_date for _ in locs],
-        var_names=runtime["var_names"],
-        var_locs=VAR_LOCS,
-        dss=dss,
-        short_lag_days=runtime["short_lag_days"],
-        long_lag_days=runtime["long_lag_days"],
-        norm_params=runtime["norm_params"],
-        all_nearby=True,
+    t0 = time.perf_counter()
+    start_date = pd.Timestamp(start_date).normalize()
+    end_date = pd.Timestamp(end_date).normalize()
+    pred_dates = pd.date_range(start_date, end_date, freq="D")
+    n_days = len(pred_dates)
+    n_pixels = int(len(tile_payload["iy"]))
+    if n_pixels <= 0 or n_days <= 0:
+        raise ValueError("Tile-native tensor payload requires at least one pixel and one day")
+
+    short_vars = list(runtime["var_names"]["short_vars"])
+    long_vars = list(runtime["var_names"]["long_vars"])
+    static_vars = list(runtime["var_names"]["static_vars"])
+    short_lag_days = np.asarray(runtime["short_lag_days"], dtype=np.int64)
+    long_lag_days = np.asarray(runtime["long_lag_days"], dtype=np.int64)
+    norm_params = runtime["norm_params"]
+    var_to_source = _var_to_source(VAR_LOCS)
+
+    short_input = np.full(
+        (n_pixels, n_days, len(short_lag_days), len(short_vars)),
+        np.nan,
+        dtype=np.float32,
+    )
+    long_input = np.full(
+        (n_pixels, n_days, len(long_lag_days), len(long_vars)),
+        np.nan,
+        dtype=np.float32,
+    )
+    static_input = np.full((n_pixels, n_days, 1, len(static_vars)), np.nan, dtype=np.float32)
+
+    full_grid_sources = {
+        "modis": dss["modis"],
+        "daymet": dss["daymet"],
+        "landcover_frac": dss["landcover_frac"],
+    }
+    subset_sources = {
+        "static": dss["static"],
+        "climate_zone": dss["climate_zone"],
+    }
+    source_indexers = {
+        source_name: _resolve_tile_source_indices(tile_payload, ds, source_name, dss)
+        for source_name, ds in {**full_grid_sources, **subset_sources}.items()
+    }
+
+    short_source_vars = [var_name for var_name in short_vars if var_name != "lfrac"]
+    long_source_vars = [var_name for var_name in long_vars if var_name != "lfrac"]
+    static_source_vars = [
+        var_name
+        for var_name in static_vars
+        if var_name not in {"latitude", "longitude"}
+        and not var_name.startswith("climate_zone_")
+        and not _static_var_is_landcover(var_name)
+    ]
+    landcover_vars = [var_name for var_name in static_vars if _static_var_is_landcover(var_name)]
+
+    short_max_lag = int(short_lag_days.max()) if len(short_lag_days) > 0 else 0
+    long_max_lag = int(long_lag_days.max()) if len(long_lag_days) > 0 else 0
+    short_time_start = start_date - pd.Timedelta(days=short_max_lag)
+    long_time_start = start_date - pd.Timedelta(days=long_max_lag)
+
+    modis_idx = source_indexers["modis"]
+    daymet_idx = source_indexers["daymet"]
+    landcover_idx = source_indexers["landcover_frac"]
+    static_idx = source_indexers["static"]
+    climate_idx = source_indexers["climate_zone"]
+
+    modis_cube = _stack_source_vars(
+        dss["modis"],
+        short_source_vars,
+        slice(short_time_start, end_date),
+        slice(int(modis_idx["x_min"]), int(modis_idx["x_max"]) + 1),
+        slice(int(modis_idx["y_min"]), int(modis_idx["y_max"]) + 1),
+        "modis",
+    ) if len(short_source_vars) > 0 else None
+    daymet_cube = _stack_source_vars(
+        dss["daymet"],
+        long_source_vars,
+        slice(long_time_start, end_date),
+        slice(int(daymet_idx["x_min"]), int(daymet_idx["x_max"]) + 1),
+        slice(int(daymet_idx["y_min"]), int(daymet_idx["y_max"]) + 1),
+        "daymet",
+    ) if len(long_source_vars) > 0 else None
+    static_cube = (
+        dss["static"]
+        .isel(
+            x=slice(int(static_idx["x_min"]), int(static_idx["x_max"]) + 1),
+            y=slice(int(static_idx["y_min"]), int(static_idx["y_max"]) + 1),
+        )[static_source_vars]
+        .to_array(dim="variable")
+        .transpose("variable", "y", "x")
+        .compute()
+        if len(static_source_vars) > 0
+        else None
+    )
+    climate_cube = (
+        dss["climate_zone"]["climate_zone"]
+        .isel(
+            x=slice(int(climate_idx["x_min"]), int(climate_idx["x_max"]) + 1),
+            y=slice(int(climate_idx["y_min"]), int(climate_idx["y_max"]) + 1),
+        )
+        .compute()
+    )
+    if "band" in climate_cube.dims:
+        climate_cube = climate_cube.isel(band=0)
+    landcover_cube = (
+        dss["landcover_frac"]
+        .isel(
+            x=slice(int(landcover_idx["x_min"]), int(landcover_idx["x_max"]) + 1),
+            y=slice(int(landcover_idx["y_min"]), int(landcover_idx["y_max"]) + 1),
+        )[landcover_vars]
+        .to_array(dim="variable")
+        .transpose("year", "variable", "y", "x")
+        .load()
+        if len(landcover_vars) > 0
+        else None
+    )
+
+    if modis_cube is not None:
+        modis_time_index = _validate_daily_time_axis(modis_cube["time"].values, "modis")
+        if modis_time_index[0] != short_time_start or modis_time_index[-1] != end_date:
+            raise ValueError("MODIS time window does not match expected tile-native lag coverage")
+        modis_arr = np.asarray(modis_cube.values, dtype=np.float32)
+    else:
+        modis_arr = None
+    if daymet_cube is not None:
+        daymet_time_index = _validate_daily_time_axis(daymet_cube["time"].values, "daymet")
+        if daymet_time_index[0] != long_time_start or daymet_time_index[-1] != end_date:
+            raise ValueError("daymet time window does not match expected tile-native lag coverage")
+        daymet_arr = np.asarray(daymet_cube.values, dtype=np.float32)
+    else:
+        daymet_arr = None
+    static_arr = np.asarray(static_cube.values, dtype=np.float32) if static_cube is not None else None
+    climate_arr = np.asarray(climate_cube.values)
+    landcover_arr = np.asarray(landcover_cube.values, dtype=np.float32) if landcover_cube is not None else None
+    landcover_years = (
+        pd.to_datetime(landcover_cube["year"].values).year.astype(int)
+        if landcover_cube is not None
+        else np.asarray([], dtype=np.int64)
+    )
+    landcover_year_lookup = {int(year): idx for idx, year in enumerate(landcover_years)}
+
+    pred_years = pred_dates.year.to_numpy(dtype=np.int64)
+    for year in np.unique(pred_years):
+        if len(landcover_vars) > 0 and int(year) not in landcover_year_lookup:
+            raise KeyError(f"Missing landcover year {year} for tile-native inference")
+
+    short_pred_offsets = np.arange(short_max_lag, short_max_lag + n_days, dtype=np.int64)
+    long_pred_offsets = np.arange(long_max_lag, long_max_lag + n_days, dtype=np.int64)
+
+    modis_var_lookup = {var_name: idx for idx, var_name in enumerate(short_source_vars)}
+    daymet_var_lookup = {var_name: idx for idx, var_name in enumerate(long_source_vars)}
+    static_var_lookup = {var_name: idx for idx, var_name in enumerate(static_source_vars)}
+    landcover_var_lookup = {var_name: idx for idx, var_name in enumerate(landcover_vars)}
+
+    lat_vals = tile_payload["lat"].astype(np.float32)
+    lon_vals = tile_payload["lon"].astype(np.float32)
+    climate_codes = climate_arr[
+        climate_idx["local_iy"].astype(np.int64),
+        climate_idx["local_ix"].astype(np.int64),
+    ].astype(np.int64)
+
+    for pix_start in range(0, n_pixels, pixel_batch_size):
+        pix_end = min(pix_start + pixel_batch_size, n_pixels)
+        pix_slice = slice(pix_start, pix_end)
+        modis_y_local = modis_idx["local_iy"][pix_slice].astype(np.int64)
+        modis_x_local = modis_idx["local_ix"][pix_slice].astype(np.int64)
+        daymet_y_local = daymet_idx["local_iy"][pix_slice].astype(np.int64)
+        daymet_x_local = daymet_idx["local_ix"][pix_slice].astype(np.int64)
+        static_y_local = static_idx["local_iy"][pix_slice].astype(np.int64)
+        static_x_local = static_idx["local_ix"][pix_slice].astype(np.int64)
+        landcover_y_local = landcover_idx["local_iy"][pix_slice].astype(np.int64)
+        landcover_x_local = landcover_idx["local_ix"][pix_slice].astype(np.int64)
+        batch_lat = lat_vals[pix_slice]
+        batch_lon = lon_vals[pix_slice]
+        batch_climate_codes = climate_codes[pix_slice]
+
+        modis_series = (
+            modis_arr[:, :, modis_y_local, modis_x_local]
+            if modis_arr is not None
+            else None
+        )
+        daymet_series = (
+            daymet_arr[:, :, daymet_y_local, daymet_x_local]
+            if daymet_arr is not None
+            else None
+        )
+        static_series = (
+            static_arr[:, static_y_local, static_x_local]
+            if static_arr is not None
+            else None
+        )
+        landcover_series = (
+            landcover_arr[:, :, landcover_y_local, landcover_x_local]
+            if landcover_arr is not None
+            else None
+        )
+
+        for day_start in range(0, n_days, day_batch_size):
+            day_end = min(day_start + day_batch_size, n_days)
+            day_slice = slice(day_start, day_end)
+            day_years = pred_years[day_slice]
+
+            for s_idx, s_var in enumerate(short_vars):
+                this_norm_mean = float(norm_params["train_short_mean"][s_idx])
+                this_norm_std = float(norm_params["train_short_std"][s_idx])
+                safe_std = this_norm_std if abs(this_norm_std) > 0 else 1.0
+                if s_var == "lfrac":
+                    lag_vals = _build_lag_fraction_values(short_lag_days, this_norm_mean, safe_std)
+                    short_input[pix_slice, day_slice, :, s_idx] = lag_vals.reshape(1, 1, -1)
+                    continue
+                if var_to_source[s_var] != "modis":
+                    raise NotImplementedError(f"Short variable source not implemented: {s_var}")
+                var_idx = modis_var_lookup[s_var]
+                gather_idx = short_pred_offsets[day_slice][:, None] - short_lag_days[None, :]
+                vals = modis_series[gather_idx, var_idx, :].transpose(2, 0, 1)
+                short_input[pix_slice, day_slice, :, s_idx] = (vals - this_norm_mean) / safe_std
+
+            for l_idx, l_var in enumerate(long_vars):
+                this_norm_mean = float(norm_params["train_long_mean"][l_idx])
+                this_norm_std = float(norm_params["train_long_std"][l_idx])
+                safe_std = this_norm_std if abs(this_norm_std) > 0 else 1.0
+                if l_var == "lfrac":
+                    lag_vals = _build_lag_fraction_values(long_lag_days, this_norm_mean, safe_std)
+                    long_input[pix_slice, day_slice, :, l_idx] = lag_vals.reshape(1, 1, -1)
+                    continue
+                if var_to_source[l_var] != "daymet":
+                    raise NotImplementedError(f"Long variable source not implemented: {l_var}")
+                var_idx = daymet_var_lookup[l_var]
+                gather_idx = long_pred_offsets[day_slice][:, None] - long_lag_days[None, :]
+                vals = daymet_series[gather_idx, var_idx, :].transpose(2, 0, 1)
+                long_input[pix_slice, day_slice, :, l_idx] = (vals - this_norm_mean) / safe_std
+
+            for st_idx, st_var in enumerate(static_vars):
+                this_norm_mean = float(norm_params["train_static_mean"][st_idx])
+                this_norm_std = float(norm_params["train_static_std"][st_idx])
+                safe_std = this_norm_std if abs(this_norm_std) > 0 else 1.0
+                if st_var == "latitude":
+                    vals = ((batch_lat - this_norm_mean) / safe_std).reshape(-1, 1)
+                elif st_var == "longitude":
+                    vals = ((batch_lon - this_norm_mean) / safe_std).reshape(-1, 1)
+                elif st_var.startswith("climate_zone_"):
+                    climate_zone_checking = int(st_var.split("_")[-1])
+                    vals = (batch_climate_codes == climate_zone_checking).astype(np.float32).reshape(-1, 1)
+                elif _static_var_is_landcover(st_var):
+                    var_idx = landcover_var_lookup[st_var]
+                    out = np.empty((pix_end - pix_start, day_end - day_start), dtype=np.float32)
+                    for offset, year in enumerate(day_years):
+                        year_idx = landcover_year_lookup[int(year)]
+                        out[:, offset] = landcover_series[year_idx, var_idx, :]
+                    vals = out
+                else:
+                    var_idx = static_var_lookup[st_var]
+                    vals = ((static_series[var_idx, :] - this_norm_mean) / safe_std).reshape(-1, 1)
+                static_input[pix_slice, day_slice, 0, st_idx] = vals
+
+    short_tensor = torch.tensor(
+        short_input.reshape(n_pixels * n_days, len(short_lag_days), len(short_vars))
+    )
+    long_tensor = torch.tensor(
+        long_input.reshape(n_pixels * n_days, len(long_lag_days), len(long_vars))
+    )
+    static_tensor = torch.tensor(
+        static_input.reshape(n_pixels * n_days, 1, len(static_vars))
+    )
+    info_df = pd.DataFrame(
+        {
+            "lat": np.repeat(tile_payload["lat"].astype(np.float64), n_days),
+            "lon": np.repeat(tile_payload["lon"].astype(np.float64), n_days),
+            "date": np.tile(pred_dates.values, n_pixels),
+        }
+    )
+    elapsed = time.perf_counter() - t0
+    print(
+        f"[tile_tensor] built tile-native tensors for {n_pixels:,} pixels x {n_days} days "
+        f"in {elapsed:.1f}s"
     )
     return {
         "empty": False,
@@ -324,10 +1046,27 @@ def build_reference_tensor_payload(
     }
 
 
+def build_reference_tensor_payload(
+    tile_payload: Dict[str, np.ndarray],
+    runtime: Dict[str, object],
+    dss: Dict[str, xr.Dataset],
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> Dict[str, object]:
+    return _tile_native_tensor_payload(
+        tile_payload=tile_payload,
+        runtime=runtime,
+        dss=dss,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
 def run_runtime_forward(
     runtime: Dict[str, object],
     tensor_payload: Dict[str, object],
     model_type: str = DEFAULT_MODEL_TYPE,
+    batch_size: int = 512,
 ) -> pd.DataFrame:
     preds_df = run_model_forward(
         tensor_payload["short_tensor"],
@@ -336,6 +1075,7 @@ def run_runtime_forward(
         tensor_payload["info_df"].copy(),
         runtime["checkpoint_path"],
         runtime["norm_params"],
+        batch_size=batch_size,
         model_task_weights=runtime["model_num_tasks"],
         model_type=model_type,
     )
@@ -472,27 +1212,34 @@ def initialize_output_store(
         chunks=(time_chunk, y_chunk, x_chunk),
         dtype="f4",
         fill_value=np.nan,
+        dimension_names=("time", "y", "x"),
         overwrite=True,
     )
     root[OUTPUT_MEAN_NAME].attrs["_ARRAY_DIMENSIONS"] = ["time", "y", "x"]
+    root[OUTPUT_MEAN_NAME].attrs["dimension_names"] = ["time", "y", "x"]
     root.create_dataset(
         OUTPUT_STD_NAME,
         shape=(len(time_index), y_size, x_size),
         chunks=(time_chunk, y_chunk, x_chunk),
         dtype="f4",
         fill_value=np.nan,
+        dimension_names=("time", "y", "x"),
         overwrite=True,
     )
     root[OUTPUT_STD_NAME].attrs["_ARRAY_DIMENSIONS"] = ["time", "y", "x"]
+    root[OUTPUT_STD_NAME].attrs["dimension_names"] = ["time", "y", "x"]
     time_vals = np.asarray(time_index.values, dtype="datetime64[ns]").astype("int64")
     root.create_dataset(
         "time",
         data=time_vals,
+        shape=time_vals.shape,
         chunks=(time_chunk,),
         dtype="i8",
+        dimension_names=("time",),
         overwrite=True,
     )
     root["time"].attrs["_ARRAY_DIMENSIONS"] = ["time"]
+    root["time"].attrs["dimension_names"] = ["time"]
     root["time"].attrs["units"] = "nanoseconds since 1970-01-01 00:00:00"
     root["time"].attrs["calendar"] = "proleptic_gregorian"
     for coord_name in ["y", "x"]:
@@ -500,11 +1247,14 @@ def initialize_output_store(
         root.create_dataset(
             coord_name,
             data=vals,
+            shape=vals.shape,
             chunks=(min(len(vals), y_chunk if coord_name == "y" else x_chunk),),
             dtype=str(vals.dtype),
+            dimension_names=(coord_name,),
             overwrite=True,
         )
         root[coord_name].attrs["_ARRAY_DIMENSIONS"] = [coord_name]
+        root[coord_name].attrs["dimension_names"] = [coord_name]
     for coord_name in ["lat", "lon", "random_vals"]:
         if coord_name not in model_grid:
             continue
@@ -512,11 +1262,14 @@ def initialize_output_store(
         root.create_dataset(
             coord_name,
             data=vals,
+            shape=vals.shape,
             chunks=(y_chunk, x_chunk),
             dtype=str(vals.dtype),
+            dimension_names=("y", "x"),
             overwrite=True,
         )
         root[coord_name].attrs["_ARRAY_DIMENSIONS"] = ["y", "x"]
+        root[coord_name].attrs["dimension_names"] = ["y", "x"]
 
 
 def merge_shard_into_store(
@@ -547,9 +1300,23 @@ def select_measurement_rich_month(
     ensemble_root: str,
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
+    fold: Optional[int] = None,
+    split: str = "test",
 ) -> Tuple[pd.Timestamp, pd.Timestamp, Dict[str, object]]:
     member_dirs = select_ensemble_member_dirs(ensemble_root)
-    member_site_errors = [get_site_error(member_dir) for member_dir in member_dirs]
+    member_site_errors = []
+    for member_idx, member_dir in enumerate(member_dirs, start=1):
+        member_site_errors.append(
+            get_site_error(
+                member_dir,
+                progress_label=(
+                    f"validation-month member {member_idx}/{len(member_dirs)} "
+                    f"({os.path.basename(member_dir)})"
+                ),
+                fold=fold,
+                split=split,
+            )
+        )
     site_error = aggregate_site_errors(member_site_errors)
     month_counts: Dict[pd.Timestamp, int] = {}
     for site_key, site_data in site_error.items():
@@ -573,6 +1340,20 @@ def select_measurement_rich_month(
     return best_month.normalize(), month_end, site_error
 
 
+def validation_month_window_with_previous(
+    best_month_start: pd.Timestamp,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    best_month_start = pd.Timestamp(best_month_start).normalize()
+    start_date = pd.Timestamp(start_date).normalize()
+    end_date = pd.Timestamp(end_date).normalize()
+    prev_month_start = (best_month_start - pd.offsets.MonthBegin(1)).normalize()
+    window_start = max(prev_month_start, start_date)
+    window_end = min((best_month_start + pd.offsets.MonthEnd(0)).normalize(), end_date)
+    return window_start, window_end
+
+
 def select_validation_sites_for_month(
     site_error: Dict[str, Dict[str, object]],
     month_start: pd.Timestamp,
@@ -588,6 +1369,9 @@ def select_validation_sites_for_month(
         dates_here = dates[keep]
         true_here = np.asarray(site_data["true_values"], dtype=float)[keep]
         pred_here = np.asarray(site_data["predictions"], dtype=float)[keep]
+        pred_std_here = None
+        if "prediction_std" in site_data:
+            pred_std_here = np.asarray(site_data["prediction_std"], dtype=float)[keep]
         candidates.append(
             {
                 "site_key": site_key,
@@ -596,6 +1380,7 @@ def select_validation_sites_for_month(
                 "dates": dates_here,
                 "true_values": true_here,
                 "predictions": pred_here,
+                "prediction_std": pred_std_here,
             }
         )
     candidates = sorted(
@@ -603,6 +1388,30 @@ def select_validation_sites_for_month(
         key=lambda x: (-x["num_measurements_month"], x["site_key"]),
     )
     return candidates[:n_sites]
+
+
+def filter_site_records_to_valid_tiles(
+    model_grid: xr.Dataset,
+    site_records: Sequence[Dict[str, object]],
+    tile_size: int,
+    valid_tile_names: Sequence[str],
+) -> List[Dict[str, object]]:
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
+    x_coords = np.asarray(model_grid["x"].values, dtype=np.float64)
+    y_coords = np.asarray(model_grid["y"].values, dtype=np.float64)
+    valid_tile_name_set = set(valid_tile_names)
+    filtered_records = []
+    for site_record in site_records:
+        lat_str, lon_str = site_record["site_key"].split("_")
+        lat = float(lat_str)
+        lon = float(lon_str)
+        site_x, site_y = transformer.transform(lon, lat)
+        x_idx = _nearest_index(x_coords, site_x)
+        y_idx = _nearest_index(y_coords, site_y)
+        tile_name = f"{x_idx // tile_size}_{y_idx // tile_size}"
+        if tile_name in valid_tile_name_set:
+            filtered_records.append(site_record)
+    return filtered_records
 
 
 def locate_sites_to_tiles(

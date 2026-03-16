@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -8,6 +9,7 @@ import sys
 import numpy as np
 import pandas as pd
 import xarray as xr
+import zarr
 
 here = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.join(here, "..", "..", "..")
@@ -18,10 +20,20 @@ from map_runtime_utils import (
     DEFAULT_MODEL_GRID_PATH,
     OUTPUT_MEAN_NAME,
     OUTPUT_STD_NAME,
+    _nearest_index,
     open_model_grid,
     select_measurement_rich_month,
     select_validation_sites_for_month,
 )
+
+shared_plotting_path = os.path.join(project_root, "data_processing", "shared", "plotting.py")
+shared_plotting_spec = importlib.util.spec_from_file_location(
+    "shared_plotting",
+    shared_plotting_path,
+)
+shared_plotting = importlib.util.module_from_spec(shared_plotting_spec)
+assert shared_plotting_spec.loader is not None
+shared_plotting_spec.loader.exec_module(shared_plotting)
 
 
 def get_args():
@@ -29,23 +41,10 @@ def get_args():
         description="Validate merged ensemble map outputs with map and timeseries plots."
     )
     parser.add_argument("--run_root", type=str, required=True)
-    parser.add_argument("--grid_path", type=str, default=DEFAULT_MODEL_GRID_PATH)
+    parser.add_argument("--grid_path", type=str, default=None)
     parser.add_argument("--n_map_sites", type=int, default=3)
     parser.add_argument("--n_validation_sites", type=int, default=3)
     return parser.parse_args()
-
-
-def _nearest_index(coords: np.ndarray, value: float) -> int:
-    coords = np.asarray(coords)
-    idx = int(np.searchsorted(coords, value))
-    if idx <= 0:
-        return 0
-    if idx >= coords.size:
-        return coords.size - 1
-    left = coords[idx - 1]
-    right = coords[idx]
-    return idx - 1 if abs(value - left) <= abs(right - value) else idx
-
 
 def _site_key_to_lat_lon(site_key: str):
     lat_str, lon_str = site_key.split("_")
@@ -89,11 +88,84 @@ def _extract_point_series(
     return out
 
 
+def _write_prediction_timeseries_plot(
+    infer_df: pd.DataFrame,
+    save_path: str,
+    measurement_dates=None,
+    measurement_vals=None,
+    train_pred_dates=None,
+    train_pred_vals=None,
+    train_pred_std=None,
+):
+    infer_dates = pd.to_datetime(infer_df["date"]).values
+    infer_vals = infer_df[OUTPUT_MEAN_NAME].to_numpy(dtype=float)
+    infer_std = infer_df[OUTPUT_STD_NAME].to_numpy(dtype=float)
+    infer_lower = infer_vals - infer_std
+    infer_upper = infer_vals + infer_std
+
+    lfmc_dates = [infer_dates]
+    lfmc_vals = [infer_vals]
+    lfmc_labels = ["lfmc_infer"]
+    lfmc_linestyles = ["-"]
+    lfmc_markers = [None]
+    lfmc_colors = ["tab:blue"]
+    lfmc_lower_vals = [infer_lower]
+    lfmc_upper_vals = [infer_upper]
+
+    if train_pred_dates is not None and train_pred_vals is not None and len(train_pred_vals) > 0:
+        train_pred_dates = pd.to_datetime(train_pred_dates).values
+        lfmc_dates.append(train_pred_dates)
+        lfmc_vals.append(np.asarray(train_pred_vals, dtype=float))
+        lfmc_labels.append("lfmc_train_pred")
+        lfmc_linestyles.append("")
+        lfmc_markers.append(".")
+        lfmc_colors.append("tab:orange")
+        if train_pred_std is not None and len(train_pred_std) == len(train_pred_vals):
+            train_pred_std = np.asarray(train_pred_std, dtype=float)
+            train_pred_vals = np.asarray(train_pred_vals, dtype=float)
+            lfmc_lower_vals.append(train_pred_vals - train_pred_std)
+            lfmc_upper_vals.append(train_pred_vals + train_pred_std)
+        else:
+            lfmc_lower_vals.append(None)
+            lfmc_upper_vals.append(None)
+
+    if measurement_dates is not None and measurement_vals is not None and len(measurement_vals) > 0:
+        lfmc_dates.append(pd.to_datetime(measurement_dates).values)
+        lfmc_vals.append(np.asarray(measurement_vals, dtype=float))
+        lfmc_labels.append("lfmc_true")
+        lfmc_linestyles.append("")
+        lfmc_markers.append("o")
+        lfmc_colors.append("black")
+        lfmc_lower_vals.append(None)
+        lfmc_upper_vals.append(None)
+
+    plotting.plot_lfmc_with_vv_vh(
+        lfmc_dates=lfmc_dates,
+        lfmc_vals=lfmc_vals,
+        lfmc_labels=lfmc_labels,
+        lfmc_linestyles=lfmc_linestyles,
+        lfmc_markers=lfmc_markers,
+        lfmc_colors=lfmc_colors,
+        save_path=save_path,
+        lfmc_lower_vals=lfmc_lower_vals,
+        lfmc_upper_vals=lfmc_upper_vals,
+    )
+
+
 def _load_site_error_for_validation(run_config, safe_start, safe_end):
+    validation_split = str(
+        run_config.get("validation_prediction_split") or "val"
+    ).strip().lower()
+    if validation_split not in {"val", "test"}:
+        raise ValueError(
+            "run_config validation_prediction_split must be either 'val' or 'test'"
+        )
     month_start, month_end, site_error = select_measurement_rich_month(
         run_config["ensemble_root"],
         safe_start,
         safe_end,
+        fold=int(run_config.get("fold", 9998)),
+        split=validation_split,
     )
     if run_config.get("validation_month") is not None:
         month_start = pd.Timestamp(run_config["validation_month"]["start_date"]).normalize()
@@ -109,14 +181,47 @@ def _write_validation_site_plots(
     month_end: pd.Timestamp,
     out_dir: str,
     n_sites: int,
+    selected_site_keys=None,
 ):
     os.makedirs(out_dir, exist_ok=True)
-    selected_sites = select_validation_sites_for_month(
-        site_error,
-        month_start,
-        month_end,
-        n_sites=n_sites,
-    )
+    if selected_site_keys is not None and len(selected_site_keys) > 0:
+        selected_sites = []
+        missing_site_keys = []
+        for site_key in selected_site_keys:
+            if site_key not in site_error:
+                missing_site_keys.append(site_key)
+                continue
+            site_data = site_error[site_key]
+            dates = pd.to_datetime(site_data["dates"])
+            keep = (dates >= month_start) & (dates <= month_end)
+            if not np.any(keep):
+                continue
+            pred_std_here = None
+            if "prediction_std" in site_data:
+                pred_std_here = np.asarray(site_data["prediction_std"], dtype=float)[keep]
+            selected_sites.append(
+                {
+                    "site_key": site_key,
+                    "fold": str(site_data["fold"]),
+                    "num_measurements_month": int(np.sum(keep)),
+                    "dates": dates[keep],
+                    "true_values": np.asarray(site_data["true_values"], dtype=float)[keep],
+                    "predictions": np.asarray(site_data["predictions"], dtype=float)[keep],
+                    "prediction_std": pred_std_here,
+                }
+            )
+        if len(missing_site_keys) > 0:
+            print(
+                f"[validate_map_outputs] warning: {len(missing_site_keys)} stored validation "
+                f"sites were not found in the current site-error payload"
+            )
+    else:
+        selected_sites = select_validation_sites_for_month(
+            site_error,
+            month_start,
+            month_end,
+            n_sites=n_sites,
+        )
     x_coords = np.asarray(model_grid["x"].values, dtype=np.float64)
     y_coords = np.asarray(model_grid["y"].values, dtype=np.float64)
     from pyproj import Transformer
@@ -136,32 +241,23 @@ def _write_validation_site_plots(
         )
         infer_dates = pd.to_datetime(infer_df.loc[infer_mask, "date"]).values
         infer_vals = infer_df.loc[infer_mask, OUTPUT_MEAN_NAME].to_numpy(dtype=float)
+        infer_std = infer_df.loc[infer_mask, OUTPUT_STD_NAME].to_numpy(dtype=float)
         measure_dates = np.asarray(site_rec["dates"])
         measure_vals = np.asarray(site_rec["true_values"], dtype=float)
         train_pred_vals = np.asarray(site_rec["predictions"], dtype=float)
+        train_pred_std = site_rec.get("prediction_std")
         save_path = os.path.join(
             out_dir,
             f"site_compare_{lat:.4f}_{lon:.4f}.png",
         )
-        plotting.plot_multiple_timeseries(
-            dates=[
-                measure_dates,
-                measure_dates,
-                infer_dates,
-            ],
-            vals=[
-                measure_vals,
-                train_pred_vals,
-                infer_vals,
-            ],
-            labels=[
-                "measurement",
-                "saved_test_prediction",
-                "inference_prediction",
-            ],
-            linestyles=["", "-", "-"],
-            markers=["o", ".", None],
+        _write_prediction_timeseries_plot(
+            infer_df=infer_df.loc[infer_mask].reset_index(drop=True),
             save_path=save_path,
+            measurement_dates=measure_dates,
+            measurement_vals=measure_vals,
+            train_pred_dates=measure_dates,
+            train_pred_vals=train_pred_vals,
+            train_pred_std=train_pred_std,
         )
         infer_on_obs = []
         obs_dates_ts = pd.to_datetime(measure_dates)
@@ -186,14 +282,43 @@ def _write_validation_site_plots(
     print(f"[validate_map_outputs] wrote measured-site summary to {summary_path}")
 
 
+def _open_merged_dataset(out_zarr_path: str) -> xr.Dataset:
+    try:
+        return xr.open_zarr(out_zarr_path, consolidated=False)
+    except KeyError as exc:
+        if "dimension_names" not in str(exc):
+            raise
+        print(
+            "[validate_map_outputs] xarray.open_zarr could not infer dimensions; "
+            "falling back to direct zarr reads"
+        )
+        root = zarr.open_group(out_zarr_path, mode="r")
+        time_vals = np.asarray(root["time"][:], dtype=np.int64).astype("datetime64[ns]")
+        y_vals = np.asarray(root["y"][:])
+        x_vals = np.asarray(root["x"][:])
+        ds = xr.Dataset(
+            data_vars={
+                OUTPUT_MEAN_NAME: (("time", "y", "x"), root[OUTPUT_MEAN_NAME]),
+                OUTPUT_STD_NAME: (("time", "y", "x"), root[OUTPUT_STD_NAME]),
+            },
+            coords={
+                "time": pd.to_datetime(time_vals),
+                "y": y_vals,
+                "x": x_vals,
+            },
+        )
+        return ds
+
+
 def main():
     args = get_args()
     run_config_path = os.path.join(args.run_root, "run_config.json")
     with open(run_config_path, "r") as f:
         run_config = json.load(f)
     out_zarr_path = run_config["out_zarr_path"]
-    ds = xr.open_zarr(out_zarr_path, consolidated=False)
-    model_grid = open_model_grid(args.grid_path)
+    ds = _open_merged_dataset(out_zarr_path)
+    grid_path = args.grid_path if args.grid_path is not None else run_config.get("grid_path", DEFAULT_MODEL_GRID_PATH)
+    model_grid = open_model_grid(grid_path)
 
     safe_start = pd.Timestamp(run_config["safe_start_date"]).normalize()
     safe_end = pd.Timestamp(run_config["safe_end_date"]).normalize()
@@ -202,46 +327,52 @@ def main():
         safe_start,
         safe_end,
     )
+    selected_site_keys = [
+        rec["site_key"]
+        for rec in run_config.get("validation_sites", [])
+        if "site_key" in rec
+    ]
     print(
         f"[validate_map_outputs] validation window {month_start.date()} to {month_end.date()}"
     )
 
-    plots_root = os.path.join(run_config["validation_dir"], "plots")
+    plots_root = run_config.get("plots_dir", os.path.join(run_config["validation_dir"], "plots"))
     os.makedirs(plots_root, exist_ok=True)
 
     map_day = _pick_map_day(ds, month_start, month_end)
-    day_field = ds[OUTPUT_MEAN_NAME].sel(time=map_day).values
+    day_da = ds[OUTPUT_MEAN_NAME].sel(time=map_day)
+    day_field = day_da.values
     valid_mask = np.isfinite(day_field)
     lons = model_grid["lon"].values[valid_mask]
     lats = model_grid["lat"].values[valid_mask]
     vals = day_field[valid_mask]
     map_path = os.path.join(plots_root, f"map_{map_day.date().isoformat()}.png")
-    plotting.map_points(
-        lons=lons,
-        lats=lats,
-        counts_per_point=np.ones(len(vals), dtype=float),
-        colors=vals,
+    shared_plotting.plot_from_xarray(
+        load_type="da",
+        type_obj=day_da,
+        var=OUTPUT_MEAN_NAME,
+        proj_in="EPSG:5070",
+        proj_out="EPSG:4326",
+        fname=map_path,
         cmap="viridis",
-        colorbar_label=f"{OUTPUT_MEAN_NAME} (%)",
-        save_path=map_path,
-        cbar_lim=(float(np.nanpercentile(vals, 2)), float(np.nanpercentile(vals, 98))),
-        stats_text=f"date={map_day.date()} n={len(vals):,}",
+        title=f"{OUTPUT_MEAN_NAME} on {map_day.date()}",
     )
     print(f"[validate_map_outputs] wrote map plot to {map_path}")
 
     sample_idx = _pick_sample_pixels(day_field.reshape(-1), n_sites=int(args.n_map_sites))
     y_idx, x_idx = np.unravel_index(sample_idx, day_field.shape)
-    sample_frames = []
-    for yi, xi in zip(y_idx.tolist(), x_idx.tolist()):
-        sample_frames.append(_extract_point_series(ds, y_idx=yi, x_idx=xi, model_grid=model_grid))
-    sample_df = pd.concat(sample_frames, ignore_index=True)
     sample_ts_dir = os.path.join(plots_root, "sample_locations")
-    plotting.plot_timeseries_by_site(
-        sample_df,
-        sample_ts_dir,
-        OUTPUT_MEAN_NAME,
-        "LFMC Ensemble Mean (%)",
-    )
+    os.makedirs(sample_ts_dir, exist_ok=True)
+    for site_idx, (yi, xi) in enumerate(zip(y_idx.tolist(), x_idx.tolist()), start=1):
+        infer_df = _extract_point_series(ds, y_idx=yi, x_idx=xi, model_grid=model_grid)
+        save_path = os.path.join(
+            sample_ts_dir,
+            f"sample_location_{site_idx:02d}_{float(infer_df['lat'].iloc[0]):.4f}_{float(infer_df['lon'].iloc[0]):.4f}.png",
+        )
+        _write_prediction_timeseries_plot(
+            infer_df=infer_df,
+            save_path=save_path,
+        )
     print(f"[validate_map_outputs] wrote sample-location timeseries to {sample_ts_dir}")
 
     measured_site_dir = os.path.join(plots_root, "measured_sites")
@@ -253,6 +384,7 @@ def main():
         month_end=month_end,
         out_dir=measured_site_dir,
         n_sites=int(args.n_validation_sites),
+        selected_site_keys=selected_site_keys,
     )
 
 

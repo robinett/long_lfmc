@@ -3,6 +3,7 @@ import xarray as xr
 import sys
 import pandas as pd
 import json
+import warnings
 from tqdm import tqdm
 from pyproj import Transformer
 import numpy as np
@@ -137,9 +138,15 @@ def build_tensors(
         modis_ds = dss['modis']
         modis_x = modis_ds['x'].values
         modis_y = modis_ds['y'].values
-        modis_data = modis_ds['data']
-        x_chunk = _get_chunk_size(modis_data, 'x', fallback=64)
-        y_chunk = _get_chunk_size(modis_data, 'y', fallback=64)
+        if 'data' in modis_ds:
+            modis_chunk_ref = modis_ds['data']
+        else:
+            modis_data_vars = list(modis_ds.data_vars)
+            if len(modis_data_vars) == 0:
+                raise KeyError("MODIS dataset has no data variables available for chunking")
+            modis_chunk_ref = modis_ds[modis_data_vars[0]]
+        x_chunk = _get_chunk_size(modis_chunk_ref, 'x', fallback=64)
+        y_chunk = _get_chunk_size(modis_chunk_ref, 'y', fallback=64)
         chunk_groups = {}
         loc_chunk_keys = []
         for i, (this_x, this_y) in enumerate(loc_xys):
@@ -455,46 +462,55 @@ def run_model_forward(
     long_input_dim = long_tensor.shape[-1]
     static_input_dim = static_tensor.shape[-1]
     model_params = parse_model_path(model_path)
-    if model_type == 'standard':
-        model = LFMCTransformer(
-            short_input_dim = short_input_dim,
-            long_input_dim = long_input_dim,
-            static_input_dim = static_input_dim,
-            d_model = model_params['d_model'],
-            nhead = model_params['nhead'],
-            num_layers = model_params['num_layers'],
-            dim_feedforward = model_params['dim_feedforward'],
-            dropout = model_params['dropout'],
-            num_queries = model_num_queries,
-            long_d_model = model_params['long_d_model'],
-            long_nhead = model_params['long_nhead'],
-            long_num_layers = model_params['long_num_layers'],
-            long_dim_feedforward = model_params['long_dim_feedforward'],
-            long_out_dim = model_params['long_out_dim'],
-            num_task_weights = model_task_weights
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=(
+                "enable_nested_tensor is True, but self.use_nested_tensor is False "
+                "because encoder_layer.self_attn.num_heads is odd"
+            ),
+            category=UserWarning,
         )
-    elif model_type == 'uncertainty':
-        model = LFMCTransformerUncertainty(
-            short_input_dim = short_input_dim,
-            long_input_dim = long_input_dim,
-            static_input_dim = static_input_dim,
-            d_model = model_params['d_model'],
-            nhead = model_params['nhead'],
-            num_layers = model_params['num_layers'],
-            dim_feedforward = model_params['dim_feedforward'],
-            dropout = model_params['dropout'],
-            num_queries = model_num_queries,
-            long_d_model = model_params['long_d_model'],
-            long_nhead = model_params['long_nhead'],
-            long_num_layers = model_params['long_num_layers'],
-            long_dim_feedforward = model_params['long_dim_feedforward'],
-            long_out_dim = model_params['long_out_dim'],
-            num_task_weights = model_task_weights
-        )
-    else:
-        raise notImplementedError(
-            f"Model choice '{model_choice}' is not implemented"
-        )
+        if model_type == 'standard':
+            model = LFMCTransformer(
+                short_input_dim = short_input_dim,
+                long_input_dim = long_input_dim,
+                static_input_dim = static_input_dim,
+                d_model = model_params['d_model'],
+                nhead = model_params['nhead'],
+                num_layers = model_params['num_layers'],
+                dim_feedforward = model_params['dim_feedforward'],
+                dropout = model_params['dropout'],
+                num_queries = model_num_queries,
+                long_d_model = model_params['long_d_model'],
+                long_nhead = model_params['long_nhead'],
+                long_num_layers = model_params['long_num_layers'],
+                long_dim_feedforward = model_params['long_dim_feedforward'],
+                long_out_dim = model_params['long_out_dim'],
+                num_task_weights = model_task_weights
+            )
+        elif model_type == 'uncertainty':
+            model = LFMCTransformerUncertainty(
+                short_input_dim = short_input_dim,
+                long_input_dim = long_input_dim,
+                static_input_dim = static_input_dim,
+                d_model = model_params['d_model'],
+                nhead = model_params['nhead'],
+                num_layers = model_params['num_layers'],
+                dim_feedforward = model_params['dim_feedforward'],
+                dropout = model_params['dropout'],
+                num_queries = model_num_queries,
+                long_d_model = model_params['long_d_model'],
+                long_nhead = model_params['long_nhead'],
+                long_num_layers = model_params['long_num_layers'],
+                long_dim_feedforward = model_params['long_dim_feedforward'],
+                long_out_dim = model_params['long_out_dim'],
+                num_task_weights = model_task_weights
+            )
+        else:
+            raise notImplementedError(
+                f"Model choice '{model_choice}' is not implemented"
+            )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     #model.load_state_dict(torch.load(model_path, map_location=device))
@@ -506,10 +522,6 @@ def run_model_forward(
     #sys.exit()
     model.eval()
     # run the model
-    pbar = tqdm(
-        dataloader,
-        desc='Running model batches'
-    )
     n_obs = short_tensor.shape[0]
     preds_i = np.zeros(n_obs, dtype=np.float64)
     preds_vv = np.full(n_obs, np.nan, dtype=np.float64)
@@ -519,7 +531,7 @@ def run_model_forward(
     preds_vh_std = np.full(n_obs, np.nan, dtype=np.float64)
     batch_counter = 0
     with torch.no_grad():
-        for Xsh_b, Xl_b, Xst_b in pbar:
+        for Xsh_b, Xl_b, Xst_b in dataloader:
             Xsh_b = Xsh_b.to(device=device, dtype=torch.float32)
             Xl_b = Xl_b.to(device=device, dtype=torch.float32)
             Xst_b = Xst_b.to(device=device, dtype=torch.float32)
