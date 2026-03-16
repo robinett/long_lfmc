@@ -3,7 +3,7 @@
 # Example run for eval_deep.py using an ensemble root.
 # Edit the settings here for quick local runs.
 
-ensemble_root="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_ens_fullrandom"
+ensemble_root="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_ens"
 plot_dir=""
 hexbin_gridsize=60
 fontsize=16

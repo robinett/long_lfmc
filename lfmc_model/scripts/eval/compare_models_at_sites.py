@@ -2,7 +2,6 @@
 import os
 import json
 import sys
-import time
 import pandas as pd
 import torch
 import numpy as np
@@ -609,19 +608,28 @@ def get_site_error(
     model_dir,
     site_errors=None,
     progress_label=None,
+    fold=None,
+    split="test",
 ):
-    start_time = time.time()
     model_name = os.path.basename(os.path.normpath(model_dir))
     progress_prefix = f"[site_error] {progress_label}" if progress_label else f"[site_error] {model_name}"
-    print(f"{progress_prefix}: loading fold outputs from {model_name}")
+    print(progress_prefix)
+    if split not in {"test", "val"}:
+        raise ValueError(f"Unsupported split '{split}'. Expected 'test' or 'val'.")
     with open(os.path.join(model_dir,'fold_info.json')) as f:
         fold_info = json.load(f)
-    folds = list(fold_info.keys())
+    if fold is None:
+        folds = list(fold_info.keys())
+    else:
+        fold = str(fold)
+        fold_dir = os.path.join(model_dir, f'fold_{fold}')
+        if fold not in fold_info and not os.path.isdir(fold_dir):
+            raise KeyError(f"Fold {fold} not found in {model_dir}")
+        folds = [fold]
     for f,fold in enumerate(folds):
-        print(f"{progress_prefix}: fold {f+1}/{len(folds)} ({fold})")
-        test_info_path = os.path.join(model_dir, f'fold_{fold}', 'test_info.csv')
+        test_info_path = os.path.join(model_dir, f'fold_{fold}', f'{split}_info.csv')
         test_info = pd.read_csv(test_info_path)
-        test_data_path = os.path.join(model_dir, f'fold_{fold}', 'test_outputs.pth')
+        test_data_path = os.path.join(model_dir, f'fold_{fold}', f'{split}_outputs.pth')
         test_data = torch.load(test_data_path, weights_only=False)
         test_preds_insitu = test_data['lfmc_preds']
         test_preds_insitu_std = test_data['lfmc_std']
@@ -670,17 +678,13 @@ def get_site_error(
                 'num_measurements': site_num_measurements,
                 'true_values': site_true.tolist(),
                 'predictions': site_preds.tolist(),
+                'prediction_std': test_preds_insitu_std[site_indices].tolist(),
                 'dates': site_dates.tolist(),
                 'rmse': site_rmse,
                 'r2': site_r2,
                 'var': site_var,
                 'fold': fold
             }
-    elapsed_s = time.time() - start_time
-    print(
-        f"{progress_prefix}: complete with {len(site_errors)} sites "
-        f"in {elapsed_s:.1f}s"
-    )
     return site_errors
 
 def site_analysis(

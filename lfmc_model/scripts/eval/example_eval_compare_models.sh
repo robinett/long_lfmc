@@ -2,10 +2,10 @@
 
 # Example run for comparing two ensemble/model outputs with eval_compare_models.py.
 
-model_a_name="lfmc_ens"
-model_a_ensemble_root="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_ens"
-model_b_name="lfmc_vh_vv_ens_fullrandom"
-model_b_ensemble_root="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_ens_fullrandom"
+model_a_name="lfmc_365_ens"
+model_a_ensemble_root="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_365_ens"
+model_b_name="lfmc_vh_vv_365_ens"
+model_b_ensemble_root="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_ens"
 plot_dir=""
 fontsize=16
 

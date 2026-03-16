@@ -1,14 +1,17 @@
 import argparse
+import datetime as dt
 import glob
 import json
 import os
 import re
 import sys
+import time
 
 import numpy as np
 import pandas as pd
 import torch
 import xarray as xr
+from pyproj import Transformer
 from tqdm import tqdm
 
 from compare_models_at_sites import get_site_error
@@ -72,6 +75,7 @@ VAR_LOCS = {
     ],
 }
 _INFERENCE_DSS = None
+_MODEL_GRID = None
 _MODEL_LAG_DAYS = {}
 _LANDCOVER_STATIC_TOKENS = (
     "barren",
@@ -84,6 +88,38 @@ _LANDCOVER_STATIC_TOKENS = (
     "water",
     "wetlands",
 )
+_LANDCOVER_LABELS = {
+    "barren": "Barren",
+    "crops": "Crops",
+    "deciduous_forest": "Deciduous forest",
+    "developed": "Developed",
+    "evergreen_forest": "Evergreen forest",
+    "grass": "Grass",
+    "mixed_forest": "Mixed forest",
+    "other": "Other",
+    "shrub": "Shrub",
+    "water": "Water",
+    "wetlands": "Wetlands",
+}
+_WGS84_TO_5070 = Transformer.from_crs("epsg:4326", "epsg:5070", always_xy=True)
+_SITE_LANDCOVER_ANNOTATIONS = {}
+_SITE_STATE_ANNOTATIONS = {}
+_STATE_SHAPES = None
+
+
+def timestamped_message(message: str) -> str:
+    return f"[{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+
+
+def _format_seconds(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes > 0:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
 
 
 def get_args():
@@ -152,6 +188,12 @@ def get_args():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Whether to plot VH observations/inference on the right axis.",
+    )
+    parser.add_argument(
+        "--forward_batch_size",
+        type=int,
+        default=4096,
+        help="Batch size for model forward passes during timeseries inference.",
     )
     parser.add_argument(
         "--model_roots",
@@ -244,7 +286,7 @@ def get_inference_datasets():
     for path in required_paths:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Missing required inference dataset: {path}")
-    print("Opening inference datasets...")
+    print(timestamped_message("Opening inference datasets..."))
     _INFERENCE_DSS = {
         "daymet": xr.open_zarr(DAYMET_ZARR_PATH, consolidated=False),
         "modis": xr.open_zarr(MODIS_ZARR_PATH),
@@ -253,6 +295,14 @@ def get_inference_datasets():
         "landcover_frac": xr.open_zarr(NLCD_ZARR_PATH),
     }
     return _INFERENCE_DSS
+
+
+def get_model_grid():
+    global _MODEL_GRID
+    if _MODEL_GRID is None:
+        from map_runtime_utils import DEFAULT_MODEL_GRID_PATH, open_model_grid
+        _MODEL_GRID = open_model_grid(DEFAULT_MODEL_GRID_PATH)
+    return _MODEL_GRID
 
 
 def is_complete_model_dir(model_dir):
@@ -333,11 +383,11 @@ def build_model_entries(model_configs, model_df_index=None):
     for config in model_configs:
         if config.get("is_ensemble", False):
             member_dirs = select_ensemble_member_dirs(config["outputs_root"])
-            print(f"Using ensemble for {config['name']}: {len(member_dirs)} members")
+            print(timestamped_message(f"Using ensemble for {config['name']}: {len(member_dirs)} members"))
             member_site_errors = {}
             member_site_error_list = []
             for member_idx, member_dir in enumerate(member_dirs, start=1):
-                print(f"  member {member_idx}/{len(member_dirs)}: {member_dir}")
+                print(timestamped_message(f"  member {member_idx}/{len(member_dirs)}: {member_dir}"))
                 this_site_error = get_site_error(
                     member_dir,
                     progress_label=(
@@ -364,7 +414,7 @@ def build_model_entries(model_configs, model_df_index=None):
             )
         else:
             model_dir = select_model_dir(config["outputs_root"], model_df_index=model_df_index)
-            print(f"Using model for {config['name']}: {model_dir}")
+            print(timestamped_message(f"Using model for {config['name']}: {model_dir}"))
             site_error = get_site_error(
                 model_dir,
                 progress_label=f"{config['name']} single-model ({os.path.basename(model_dir)})",
@@ -514,7 +564,7 @@ def _site_to_fmt(site):
 
 
 def _to_naive_datetime(vals):
-    dt = pd.to_datetime(vals)
+    dt = pd.to_datetime(vals, format="mixed", errors="coerce")
     try:
         return dt.tz_localize(None)
     except TypeError:
@@ -524,6 +574,76 @@ def _to_naive_datetime(vals):
 def _parse_site_lat_lon(site):
     lat_str, lon_str = site.split("_", 1)
     return float(lat_str), float(lon_str)
+
+
+def get_site_landcover_annotation(site):
+    if site in _SITE_LANDCOVER_ANNOTATIONS:
+        return _SITE_LANDCOVER_ANNOTATIONS[site]
+    dss = get_inference_datasets()
+    lat, lon = _parse_site_lat_lon(site)
+    site_x, site_y = _WGS84_TO_5070.transform(lon, lat)
+    site_cube = dss["landcover_frac"].sel(x=site_x, y=site_y, method="nearest").load()
+    if "year" in site_cube.dims or "year" in site_cube.coords:
+        site_cube = site_cube.mean(dim="year")
+    frac_names = []
+    frac_vals = []
+    for lc_name in VAR_LOCS["landcover_frac"]:
+        if lc_name not in site_cube.data_vars:
+            continue
+        frac_names.append(lc_name)
+        frac_vals.append(float(site_cube[lc_name].values))
+    if len(frac_vals) == 0 or np.all(~np.isfinite(frac_vals)):
+        _SITE_LANDCOVER_ANNOTATIONS[site] = None
+        return None
+    dominant_idx = int(np.nanargmax(np.asarray(frac_vals, dtype=float)))
+    dominant_name = frac_names[dominant_idx]
+    annotation = f"Land cover: {_LANDCOVER_LABELS.get(dominant_name, dominant_name)}"
+    _SITE_LANDCOVER_ANNOTATIONS[site] = annotation
+    return annotation
+
+
+def get_site_state_annotation(site):
+    if site in _SITE_STATE_ANNOTATIONS:
+        return _SITE_STATE_ANNOTATIONS[site]
+    try:
+        from cartopy.io import shapereader
+        from shapely.geometry import Point
+    except Exception:
+        _SITE_STATE_ANNOTATIONS[site] = None
+        return None
+    global _STATE_SHAPES
+    if _STATE_SHAPES is None:
+        try:
+            shp_path = shapereader.natural_earth(
+                resolution="50m",
+                category="cultural",
+                name="admin_1_states_provinces",
+            )
+            _STATE_SHAPES = list(shapereader.Reader(shp_path).records())
+        except Exception:
+            _STATE_SHAPES = []
+    lat, lon = _parse_site_lat_lon(site)
+    point = Point(lon, lat)
+    state_name = None
+    for rec in _STATE_SHAPES:
+        attrs = rec.attributes
+        admin = attrs.get("admin")
+        if admin != "United States of America":
+            continue
+        try:
+            if rec.geometry.contains(point) or rec.geometry.touches(point):
+                state_name = (
+                    attrs.get("postal")
+                    or attrs.get("iso_3166_2")
+                    or attrs.get("name")
+                )
+                break
+        except Exception:
+            continue
+    if isinstance(state_name, str) and state_name.startswith("US-"):
+        state_name = state_name.split("-", 1)[1]
+    _SITE_STATE_ANNOTATIONS[site] = state_name
+    return state_name
 
 
 def model_color(model_name):
@@ -652,14 +772,21 @@ def get_model_training_series(model_entry, site, start_date, end_date):
     site_entry = model_entry["site_error"][site]
     train_dates = _to_naive_datetime(site_entry["dates"])
     train_preds = np.asarray(site_entry["predictions"], dtype=float)
+    train_pred_std = None
+    if "prediction_std" in site_entry:
+        train_pred_std = np.asarray(site_entry["prediction_std"], dtype=float)
     keep = (pd.to_datetime(train_dates) >= start_date) & (pd.to_datetime(train_dates) <= end_date)
     train_dates = pd.to_datetime(train_dates)[keep].values
     train_preds = train_preds[keep]
+    if train_pred_std is not None:
+        train_pred_std = train_pred_std[keep]
     if len(train_dates) > 0:
         order = np.argsort(pd.to_datetime(train_dates).values)
         train_dates = train_dates[order]
         train_preds = train_preds[order]
-    return train_dates, train_preds
+        if train_pred_std is not None:
+            train_pred_std = train_pred_std[order]
+    return train_dates, train_preds, train_pred_std
 
 
 def get_model_lag_days(input_data_dir):
@@ -802,9 +929,17 @@ def _empty_inference_output():
     }
 
 
-def _run_runtime_forward(runtime, model_type, tensor_payload):
+def _run_runtime_forward(runtime, model_type, tensor_payload, batch_size=4096, progress_label=None):
     if tensor_payload["empty"]:
         return _empty_inference_output()
+    n_obs = int(tensor_payload["short_tensor"].shape[0])
+    t0 = time.perf_counter()
+    if progress_label is not None:
+        print(
+            timestamped_message(
+                f"{progress_label}: forward start for {n_obs:,} examples with batch_size={batch_size}"
+            )
+        )
     preds_df = run_model_forward(
         tensor_payload["short_tensor"],
         tensor_payload["long_tensor"],
@@ -812,9 +947,19 @@ def _run_runtime_forward(runtime, model_type, tensor_payload):
         tensor_payload["info_df"].copy(),
         runtime["checkpoint_path"],
         runtime["norm_params"],
+        batch_size=batch_size,
         model_task_weights=runtime["model_num_tasks"],
         model_type=model_type,
     )
+    elapsed = time.perf_counter() - t0
+    if progress_label is not None:
+        rate = (n_obs / elapsed) if elapsed > 0 else float("nan")
+        print(
+            timestamped_message(
+                f"{progress_label}: forward complete in {_format_seconds(elapsed)} "
+                f"({rate:.1f} examples/s)"
+            )
+        )
     return {
         "dates": _to_naive_datetime(preds_df["date"].values),
         "lfmc_pred": np.asarray(preds_df["lfmc_pred"].values, dtype=float),
@@ -936,25 +1081,62 @@ def _get_or_build_inference_tensors(
     )
     if cache_key in tensor_cache:
         if progress_label is not None:
-            print(f"{progress_label}: tensor cache hit")
+            print(timestamped_message(f"{progress_label}: tensor cache hit"))
         return tensor_cache[cache_key]
     if progress_label is not None:
         print(
-            f"{progress_label}: building initial tensors "
-            f"for {site} from {safe_start.date()} to {safe_end.date()}"
+            timestamped_message(
+                f"{progress_label}: building initial tensors "
+                f"for {site} from {safe_start.date()} to {safe_end.date()}"
+            )
         )
     lat, lon = _parse_site_lat_lon(site)
-    short_tensor, long_tensor, static_tensor, info_df = build_tensors(
-        locs=[[lon, lat]],
-        start_dates=[safe_start],
-        end_dates=[safe_end],
-        var_names=runtime["var_names"],
-        var_locs=VAR_LOCS,
-        dss=dss,
-        short_lag_days=runtime["short_lag_days"],
-        long_lag_days=runtime["long_lag_days"],
-        norm_params=runtime["norm_params"],
-    )
+    static_vars = set(runtime["var_names"].get("static_vars", []))
+    use_fast_pixel_path = not ({"latitude", "longitude"} & static_vars)
+    if use_fast_pixel_path:
+        from map_runtime_utils import _nearest_index, build_reference_tensor_payload
+        model_grid = get_model_grid()
+        site_x, site_y = _WGS84_TO_5070.transform(lon, lat)
+        x_coords = np.asarray(model_grid["x"].values, dtype=np.float64)
+        y_coords = np.asarray(model_grid["y"].values, dtype=np.float64)
+        x_idx = _nearest_index(x_coords, site_x)
+        y_idx = _nearest_index(y_coords, site_y)
+        tile_payload = {
+            "tile_name": "single_pixel",
+            "tile_ix": np.asarray(int(x_idx), dtype=np.int32),
+            "tile_iy": np.asarray(int(y_idx), dtype=np.int32),
+            "y0": np.asarray(int(y_idx), dtype=np.int32),
+            "y1": np.asarray(int(y_idx + 1), dtype=np.int32),
+            "x0": np.asarray(int(x_idx), dtype=np.int32),
+            "x1": np.asarray(int(x_idx + 1), dtype=np.int32),
+            "iy": np.asarray([int(y_idx)], dtype=np.int32),
+            "ix": np.asarray([int(x_idx)], dtype=np.int32),
+            "lat": np.asarray([float(model_grid["lat"].values[y_idx, x_idx])], dtype=np.float64),
+            "lon": np.asarray([float(model_grid["lon"].values[y_idx, x_idx])], dtype=np.float64),
+        }
+        tensor_payload = build_reference_tensor_payload(
+            tile_payload=tile_payload,
+            runtime=runtime,
+            dss=dss,
+            start_date=safe_start,
+            end_date=safe_end,
+        )
+        short_tensor = tensor_payload["short_tensor"]
+        long_tensor = tensor_payload["long_tensor"]
+        static_tensor = tensor_payload["static_tensor"]
+        info_df = tensor_payload["info_df"]
+    else:
+        short_tensor, long_tensor, static_tensor, info_df = build_tensors(
+            locs=[[lon, lat]],
+            start_dates=[safe_start],
+            end_dates=[safe_end],
+            var_names=runtime["var_names"],
+            var_locs=VAR_LOCS,
+            dss=dss,
+            short_lag_days=runtime["short_lag_days"],
+            long_lag_days=runtime["long_lag_days"],
+            norm_params=runtime["norm_params"],
+        )
     out = {
         "empty": False,
         "safe_start": safe_start,
@@ -977,6 +1159,7 @@ def get_model_inference_series(
     tensor_cache,
     runtime_cache,
     inputs_root,
+    forward_batch_size,
 ):
     if model_entry.get("is_ensemble", False):
         return get_ensemble_inference_series(
@@ -988,6 +1171,7 @@ def get_model_inference_series(
             tensor_cache,
             runtime_cache,
             inputs_root,
+            forward_batch_size,
         )
     fold = str(model_entry["site_error"][site]["fold"])
     runtime = _load_model_runtime(
@@ -1019,7 +1203,13 @@ def get_model_inference_series(
         tensor_cache,
         progress_label=f"[{model_entry['name']}] tensor prep",
     )
-    out = _run_runtime_forward(runtime, model_entry["model_type"], tensor_payload)
+    out = _run_runtime_forward(
+        runtime,
+        model_entry["model_type"],
+        tensor_payload,
+        batch_size=forward_batch_size,
+        progress_label=f"[{model_entry['name']}] single-model forward",
+    )
     inference_cache[cache_key] = out
     return out
 
@@ -1033,6 +1223,7 @@ def get_ensemble_inference_series(
     tensor_cache,
     runtime_cache,
     inputs_root,
+    forward_batch_size,
 ):
     if len(model_entry["member_dirs"]) == 0:
         raise ValueError(f"No ensemble member dirs found for {model_entry['name']}")
@@ -1074,6 +1265,7 @@ def get_ensemble_inference_series(
         desc=f"Running ensemble members for {model_entry['name']} at {site}",
         unit="member",
     )
+    ensemble_start = time.perf_counter()
     for member_idx, member_dir in member_iter:
         member_iter.set_postfix_str(os.path.basename(member_dir)[-24:])
         member_fold = str(model_entry["member_site_errors"][member_dir][site]["fold"])
@@ -1096,20 +1288,22 @@ def get_ensemble_inference_series(
             _input_norm_signature(runtime["norm_params"]),
         )
         if member_cache_key in inference_cache:
-            tqdm.write(f"[{model_entry['name']}] member {member_idx}/{len(model_entry['member_dirs'])}: inference cache hit")
+            tqdm.write(timestamped_message(
+                f"[{model_entry['name']}] member {member_idx}/{len(model_entry['member_dirs'])}: inference cache hit"
+            ))
             member_outputs.append(inference_cache[member_cache_key])
             continue
         if member_idx == 1:
-            tqdm.write(
+            tqdm.write(timestamped_message(
                 f"[{model_entry['name']}] member {member_idx}/{len(model_entry['member_dirs'])}: "
                 "running reference tensors through model"
-            )
+            ))
             tensor_payload = reference_payload
         elif _runtimes_share_feature_layout(reference_runtime, runtime):
-            tqdm.write(
+            tqdm.write(timestamped_message(
                 f"[{model_entry['name']}] member {member_idx}/{len(model_entry['member_dirs'])}: "
                 "re-normalizing cached tensors for this member"
-            )
+            ))
             tensor_payload = _convert_tensor_payload_norm(
                 reference_payload,
                 reference_runtime,
@@ -1118,10 +1312,10 @@ def get_ensemble_inference_series(
                 site,
             )
         else:
-            tqdm.write(
+            tqdm.write(timestamped_message(
                 f"[{model_entry['name']}] member {member_idx}/{len(model_entry['member_dirs'])}: "
                 "feature layout differs, rebuilding tensors"
-            )
+            ))
             tensor_payload = _get_or_build_inference_tensors(
                 site,
                 start_date,
@@ -1131,7 +1325,15 @@ def get_ensemble_inference_series(
                 tensor_cache,
                 progress_label=f"[{model_entry['name']}] member {member_idx}/{len(model_entry['member_dirs'])} tensor prep",
             )
-        member_out = _run_runtime_forward(runtime, model_entry["model_type"], tensor_payload)
+        member_out = _run_runtime_forward(
+            runtime,
+            model_entry["model_type"],
+            tensor_payload,
+            batch_size=forward_batch_size,
+            progress_label=(
+                f"[{model_entry['name']}] member {member_idx}/{len(model_entry['member_dirs'])}"
+            ),
+        )
         inference_cache[member_cache_key] = member_out
         member_outputs.append(member_out)
     dates = member_outputs[0]["dates"]
@@ -1150,6 +1352,12 @@ def get_ensemble_inference_series(
         else:
             out[key] = np.array([])
             out[f"{key}_std"] = np.array([])
+    print(
+        timestamped_message(
+            f"[{model_entry['name']}] ensemble inference for {site} complete in "
+            f"{_format_seconds(time.perf_counter() - ensemble_start)}"
+        )
+    )
     inference_cache[cache_key] = out
     return out
 
@@ -1330,6 +1538,7 @@ def plot_site_comparison(
     plot_vh=True,
     tensor_cache=None,
     runtime_cache=None,
+    forward_batch_size=4096,
 ):
     anchor_site = anchor_entry["site_error"][site]
     true_dates = _to_naive_datetime(anchor_site["dates"])
@@ -1389,6 +1598,7 @@ def plot_site_comparison(
             tensor_cache if tensor_cache is not None else {},
             runtime_cache if runtime_cache is not None else {},
             inputs_root,
+            forward_batch_size,
         )
         this_color = model_color(model_entry["name"])
         all_dates.append(this_infer["dates"])
@@ -1427,6 +1637,7 @@ def plot_site_comparison(
             tensor_cache if tensor_cache is not None else {},
             runtime_cache if runtime_cache is not None else {},
             inputs_root,
+            forward_batch_size,
         )
         if plot_vv:
             vv_infer_dates = vhvv_infer["dates"]
@@ -1449,6 +1660,14 @@ def plot_site_comparison(
         f"{criterion}_rank{rank_idx:02d}_plot-{plotted_tag}.png"
     )
     save_path = os.path.join(plot_dir, save_name)
+    landcover_text = get_site_landcover_annotation(site)
+    state_text = get_site_state_annotation(site)
+    title_parts = []
+    if state_text:
+        title_parts.append(str(state_text))
+    if landcover_text:
+        title_parts.append(str(landcover_text).replace("Land cover: ", ""))
+    title_text = " | ".join(title_parts) if len(title_parts) > 0 else site_fmt
     plotting.plot_lfmc_with_vv_vh(
         lfmc_dates=all_dates,
         lfmc_vals=all_vals,
@@ -1469,6 +1688,7 @@ def plot_site_comparison(
         vh_pred_dates=vh_infer_dates,
         vh_pred=vh_infer_vals,
         vh_pred_std=vh_infer_std,
+        title_text=title_text,
     )
 
 
@@ -1539,13 +1759,13 @@ def main():
     common_sites = set.intersection(*site_sets)
     if len(common_sites) == 0:
         raise ValueError("No overlapping sites across selected models")
-    print(f"Common sites across all models: {len(common_sites)}")
+    print(timestamped_message(f"Common sites across all models: {len(common_sites)}"))
     os.makedirs(args.plot_dir, exist_ok=True)
     vhvv_entry = find_vhvv_entry(model_entries)
     if vhvv_entry is not None and (args.plot_vv or args.plot_vh):
-        print(f"Using VV/VH overlay model: {vhvv_entry['name']}")
+        print(timestamped_message(f"Using VV/VH overlay model: {vhvv_entry['name']}"))
     else:
-        print("No VV/VH model found in selected model list; plotting LFMC only.")
+        print(timestamped_message("No VV/VH model found in selected model list; plotting LFMC only."))
     vhvv_fold_cache = {}
     inference_cache = {}
     tensor_cache = {}
@@ -1559,9 +1779,9 @@ def main():
             args.num_sites_per_criterion,
             args.min_measurements,
         )
-        print(f"\nAnchor model: {anchor_entry['name']}")
+        print(timestamped_message(f"Anchor model: {anchor_entry['name']}"))
         for criterion in criteria_order:
-            print(f"  {criterion}: {len(selected[criterion])} sites")
+            print(timestamped_message(f"  {criterion}: {len(selected[criterion])} sites"))
             for rank_idx, site in enumerate(selected[criterion], start=1):
                 plot_site_comparison(
                     site=site,
@@ -1580,9 +1800,10 @@ def main():
                     plot_vh=args.plot_vh,
                     tensor_cache=tensor_cache,
                     runtime_cache=runtime_cache,
+                    forward_batch_size=args.forward_batch_size,
                 )
                 total_plots += 1
-    print(f"\nFinished. Wrote {total_plots} plots to: {args.plot_dir}")
+    print(timestamped_message(f"Finished. Wrote {total_plots} plots to: {args.plot_dir}"))
 
 
 if __name__ == "__main__":

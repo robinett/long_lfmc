@@ -672,6 +672,7 @@ def plot_scatter_from_arrays(
     metric_std=None,
     color_array=None,
     cbar_label="Color Value",
+    cbar_scale="linear",
 ):
     metrics = compute_basic_metrics(obs, pred)
     if metrics["n"] == 0:
@@ -707,6 +708,7 @@ def plot_scatter_from_arrays(
         marker_color="#440154" if color_vals is None else None,
         color_array=color_vals,
         cbar_label=cbar_label,
+        cbar_scale=cbar_scale,
     )
     metrics["r2_std_across_members"] = metric_std.get("r2") if metric_std else np.nan
     metrics["rmse_std_across_members"] = metric_std.get("rmse") if metric_std else np.nan
@@ -773,6 +775,7 @@ def run_lfmc_space_time_analysis(eval_df, plot_dir, gridsize, fontsize, member_e
         metric_std=space_metric_std,
         color_array=site_summary_df["obs_per_year"].values,
         cbar_label="Obs / year",
+        cbar_scale="log",
     )
     time_metrics = plot_hexbin_from_arrays(
         obs=anomaly_df["obs_anom"].values,
@@ -824,9 +827,55 @@ def build_lfmc_y2y_df(eval_df):
     return lfmc_df
 
 
-def compute_monthly_y2y_metrics(lfmc_df, min_obs, min_years):
+def run_lfmc_site_coverage_map(eval_df, plot_dir):
+    lfmc_df = build_lfmc_y2y_df(eval_df)
     if len(lfmc_df) == 0:
-        return pd.DataFrame()
+        print("No LFMC rows found; skipping site-coverage map.")
+        return {}
+    site_df = (
+        lfmc_df.groupby("site_key", dropna=False)
+        .agg(
+            latitude=("latitude", "first"),
+            longitude=("longitude", "first"),
+            n_obs=("obs", "size"),
+        )
+        .reset_index()
+    )
+    if len(site_df) == 0:
+        print("No LFMC sites found; skipping site-coverage map.")
+        return {}
+    site_csv_path = os.path.join(plot_dir, "lfmc_site_coverage.csv")
+    site_map_path = os.path.join(plot_dir, "lfmc_site_coverage_map.png")
+    site_df.to_csv(site_csv_path, index=False)
+    map_points(
+        site_df["longitude"].values,
+        site_df["latitude"].values,
+        site_df["n_obs"].values,
+        site_map_path,
+        colors="#440154",
+        s_min=12,
+        s_max=60,
+        stats_text=(
+            f"Sites = {int(len(site_df))}\n"
+            f"N = {int(site_df['n_obs'].sum())}"
+        ),
+        show_size_legend=True,
+    )
+    print(f"Wrote LFMC site-coverage map: {site_map_path}")
+    return {
+        "lfmc_site_coverage": {
+            "csv_path": site_csv_path,
+            "plot_path": site_map_path,
+            "n_sites": int(len(site_df)),
+            "n_obs_total": int(site_df["n_obs"].sum()),
+            "size_count_definition": "n_obs",
+        }
+    }
+
+
+def build_site_month_anomaly_eval_df(lfmc_df, min_obs, min_years):
+    if len(lfmc_df) == 0:
+        return pd.DataFrame(), pd.DataFrame()
     grp_cols = ["site_key", "month"]
     group_stats = (
         lfmc_df.groupby(grp_cols, dropna=False)
@@ -841,15 +890,31 @@ def compute_monthly_y2y_metrics(lfmc_df, min_obs, min_years):
         (group_stats["n_years"] >= min_years)
     ].copy()
     if len(valid_groups) == 0:
-        return pd.DataFrame()
-    eval_df = lfmc_df.merge(valid_groups, on=grp_cols, how="inner")
+        return pd.DataFrame(), pd.DataFrame()
+    eval_df = lfmc_df.merge(
+        valid_groups,
+        on=grp_cols,
+        how="inner",
+    )
     eval_df["obs_mean"] = eval_df.groupby(grp_cols)["obs"].transform("mean")
     eval_df["pred_mean"] = eval_df.groupby(grp_cols)["pred"].transform("mean")
     eval_df["obs_dev"] = eval_df["obs"] - eval_df["obs_mean"]
     eval_df["pred_dev"] = eval_df["pred"] - eval_df["pred_mean"]
     eval_df["sq_err"] = np.square(eval_df["pred_dev"] - eval_df["obs_dev"])
     eval_df["sq_obs_dev"] = np.square(eval_df["obs_dev"])
+    return eval_df, valid_groups
 
+
+def compute_monthly_y2y_metrics(lfmc_df, min_obs, min_years):
+    if len(lfmc_df) == 0:
+        return pd.DataFrame()
+    eval_df, valid_groups = build_site_month_anomaly_eval_df(
+        lfmc_df=lfmc_df,
+        min_obs=min_obs,
+        min_years=min_years,
+    )
+    if len(valid_groups) == 0:
+        return pd.DataFrame()
     overall_denom = float(eval_df["sq_obs_dev"].sum())
     if overall_denom <= 0:
         overall_pct_captured = np.nan
@@ -872,6 +937,7 @@ def compute_monthly_y2y_metrics(lfmc_df, min_obs, min_years):
                     "total_obs": 0,
                     "min_obs": min_obs,
                     "min_years": min_years,
+                    "metric_basis": "site_month_source_centered",
                 }
             )
             continue
@@ -891,6 +957,7 @@ def compute_monthly_y2y_metrics(lfmc_df, min_obs, min_years):
                 "total_obs": int(len(month_df)),
                 "min_obs": min_obs,
                 "min_years": min_years,
+                "metric_basis": "site_month_source_centered",
             }
         )
     return pd.DataFrame.from_records(month_records)
@@ -899,29 +966,13 @@ def compute_monthly_y2y_metrics(lfmc_df, min_obs, min_years):
 def compute_site_y2y_metrics(lfmc_df, min_obs, min_years):
     if len(lfmc_df) == 0:
         return pd.DataFrame()
-    grp_cols = ["site_key", "month"]
-    group_stats = (
-        lfmc_df.groupby(grp_cols, dropna=False)
-        .agg(
-            n_obs=("obs", "size"),
-            n_years=("year", "nunique"),
-        )
-        .reset_index()
+    eval_df, valid_groups = build_site_month_anomaly_eval_df(
+        lfmc_df=lfmc_df,
+        min_obs=min_obs,
+        min_years=min_years,
     )
-    valid_groups = group_stats[
-        (group_stats["n_obs"] >= min_obs) &
-        (group_stats["n_years"] >= min_years)
-    ].copy()
     if len(valid_groups) == 0:
         return pd.DataFrame()
-    eval_df = lfmc_df.merge(valid_groups, on=grp_cols, how="inner")
-    eval_df["obs_mean"] = eval_df.groupby(grp_cols)["obs"].transform("mean")
-    eval_df["pred_mean"] = eval_df.groupby(grp_cols)["pred"].transform("mean")
-    eval_df["obs_dev"] = eval_df["obs"] - eval_df["obs_mean"]
-    eval_df["pred_dev"] = eval_df["pred"] - eval_df["pred_mean"]
-    eval_df["sq_err"] = np.square(eval_df["pred_dev"] - eval_df["obs_dev"])
-    eval_df["sq_obs_dev"] = np.square(eval_df["obs_dev"])
-
     site_records = []
     for site_key, site_df in eval_df.groupby("site_key", dropna=False):
         denom = float(site_df["sq_obs_dev"].sum())
@@ -939,6 +990,7 @@ def compute_site_y2y_metrics(lfmc_df, min_obs, min_years):
                 "total_obs": int(len(site_df)),
                 "min_obs": min_obs,
                 "min_years": min_years,
+                "metric_basis": "site_month_source_centered",
             }
         )
     return pd.DataFrame.from_records(site_records)
@@ -1065,28 +1117,13 @@ def compute_landcover_y2y_metrics(lfmc_df, min_obs, min_years, plot_dir):
         return pd.DataFrame(), pd.DataFrame(), np.nan
     lfmc_df = lfmc_df.copy()
     lfmc_df["site_key"] = lfmc_df["site_key"].astype(str)
-    grp_cols = ["site_key", "month"]
-    group_stats = (
-        lfmc_df.groupby(grp_cols, dropna=False)
-        .agg(
-            n_obs=("obs", "size"),
-            n_years=("year", "nunique"),
-        )
-        .reset_index()
+    eval_df, valid_groups = build_site_month_anomaly_eval_df(
+        lfmc_df=lfmc_df,
+        min_obs=min_obs,
+        min_years=min_years,
     )
-    valid_groups = group_stats[
-        (group_stats["n_obs"] >= min_obs) &
-        (group_stats["n_years"] >= min_years)
-    ].copy()
     if len(valid_groups) == 0:
         return pd.DataFrame(), pd.DataFrame(), np.nan
-    eval_df = lfmc_df.merge(valid_groups, on=grp_cols, how="inner")
-    eval_df["obs_mean"] = eval_df.groupby(grp_cols)["obs"].transform("mean")
-    eval_df["pred_mean"] = eval_df.groupby(grp_cols)["pred"].transform("mean")
-    eval_df["obs_dev"] = eval_df["obs"] - eval_df["obs_mean"]
-    eval_df["pred_dev"] = eval_df["pred"] - eval_df["pred_mean"]
-    eval_df["sq_err"] = np.square(eval_df["pred_dev"] - eval_df["obs_dev"])
-    eval_df["sq_obs_dev"] = np.square(eval_df["obs_dev"])
     overall_denom = float(eval_df["sq_obs_dev"].sum())
     if overall_denom <= 0:
         overall_pct_captured = np.nan
@@ -1141,6 +1178,7 @@ def compute_landcover_y2y_metrics(lfmc_df, min_obs, min_years, plot_dir):
                 "total_obs": int(len(class_eval_df)),
                 "min_obs": min_obs,
                 "min_years": min_years,
+                "metric_basis": "site_month_source_centered",
             }
         )
     return pd.DataFrame.from_records(records), site_lookup_df, overall_pct_captured
@@ -1159,7 +1197,7 @@ def plot_landcover_y2y_metrics(landcover_df, save_path, fontsize):
         categories=landcover_df["dominant_landcover"].tolist(),
         values=landcover_df["pct_variability_captured_source_centered"].to_numpy(dtype=float),
         xlabel="Dominant land cover",
-        ylabel="LFMC variability captured (%)",
+        ylabel="LFMC variability explained (%)",
         save_path=save_path,
         annotations=annotations,
         fontsize=fontsize,
@@ -1292,30 +1330,15 @@ def compute_landcover_fraction_bin_metrics(lfmc_lc_df, min_obs=20, min_years=5, 
             if len(bin_df) == 0:
                 continue
             overall_r2 = _safe_r2(bin_df["obs"].values, bin_df["pred"].values)
-            grp_cols = ["site_key", "month"]
-            group_stats = (
-                bin_df.groupby(grp_cols, dropna=False)
-                .agg(
-                    n_obs=("obs", "size"),
-                    n_years=("year", "nunique"),
-                )
-                .reset_index()
+            eval_df, valid_groups = build_site_month_anomaly_eval_df(
+                lfmc_df=bin_df,
+                min_obs=min_obs,
+                min_years=min_years,
             )
-            valid_groups = group_stats[
-                (group_stats["n_obs"] >= min_obs) &
-                (group_stats["n_years"] >= min_years)
-            ].copy()
             if len(valid_groups) == 0:
                 fraction_captured = np.nan
                 n_groups = 0
             else:
-                eval_df = bin_df.merge(valid_groups, on=grp_cols, how="inner")
-                eval_df["obs_mean"] = eval_df.groupby(grp_cols)["obs"].transform("mean")
-                eval_df["pred_mean"] = eval_df.groupby(grp_cols)["pred"].transform("mean")
-                eval_df["obs_dev"] = eval_df["obs"] - eval_df["obs_mean"]
-                eval_df["pred_dev"] = eval_df["pred"] - eval_df["pred_mean"]
-                eval_df["sq_err"] = np.square(eval_df["pred_dev"] - eval_df["obs_dev"])
-                eval_df["sq_obs_dev"] = np.square(eval_df["obs_dev"])
                 denom = float(eval_df["sq_obs_dev"].sum())
                 if denom <= 0:
                     fraction_captured = np.nan
@@ -1332,6 +1355,7 @@ def compute_landcover_fraction_bin_metrics(lfmc_lc_df, min_obs=20, min_years=5, 
                     "n_groups": int(n_groups),
                     "min_obs": min_obs,
                     "min_years": min_years,
+                    "metric_basis": "site_month_source_centered",
                 }
             )
         if len(records) > 0:
@@ -1394,7 +1418,14 @@ def run_lfmc_landcover_metric_analysis(eval_df, plot_dir, fontsize, member_eval_
     metric_df["fraction_yearly_variability_captured"] = (
         metric_df["pct_variability_captured_source_centered"] / 100.0
     )
-    simple_annotations = [f"N={int(v)}" for v in metric_df["n_points"].values]
+    simple_annotations = [
+        f"R²={r2:.2f}\nN={int(n_points)}"
+        if np.isfinite(r2) else f"R²=nan\nN={int(n_points)}"
+        for r2, n_points in zip(
+            metric_df["overall_r2"].values,
+            metric_df["n_points"].values,
+        )
+    ]
     overall_r2_global = _safe_r2(lfmc_lc_df["obs"].values, lfmc_lc_df["pred"].values)
     annotated_bar_plot(
         categories=metric_df["dominant_landcover"].tolist(),
@@ -1411,6 +1442,7 @@ def run_lfmc_landcover_metric_analysis(eval_df, plot_dir, fontsize, member_eval_
             if "overall_r2_std" in metric_df.columns
             else None
         ),
+        xtick_rotation=25,
     )
     if member_eval_dfs is not None and len(member_eval_dfs) > 0 and len(landcover_y2y_df) > 0:
         std_lookup = {}
@@ -1557,6 +1589,7 @@ def run_lfmc_landcover_metric_analysis(eval_df, plot_dir, fontsize, member_eval_
         fraction_bin_outputs[landcover] = {
             "csv_path": fracbin_csv_path,
             "plot_path": fracbin_plot_path,
+            "metric_basis": "site_month_source_centered",
             "n_bins": int(len(plot_df)),
         }
         print(f"Wrote LFMC land-cover fraction-bin plot: {fracbin_plot_path}")
@@ -1565,6 +1598,7 @@ def run_lfmc_landcover_metric_analysis(eval_df, plot_dir, fontsize, member_eval_
             "csv_path": metric_csv_path,
             "simple_plot_path": simple_plot_path,
             "grouped_plot_path": grouped_plot_path,
+            "metric_basis": "site_month_source_centered",
             "n_classes": int(len(metric_df)),
         },
         "lfmc_landcover_fraction_bins": fraction_bin_outputs,
@@ -1588,7 +1622,7 @@ def plot_monthly_y2y_metrics(month_df, save_path, fontsize):
         categories=month_df["month_label"].tolist(),
         values=month_df["pct_variability_captured_source_centered"].to_numpy(dtype=float),
         xlabel="Month",
-        ylabel="LFMC variability captured (%)",
+        ylabel="LFMC variability explained (%)",
         save_path=save_path,
         annotations=annotations,
         fontsize=fontsize,
@@ -1674,6 +1708,7 @@ def run_lfmc_monthly_y2y_analysis(eval_df, plot_dir, fontsize, member_eval_dfs=N
             if np.isfinite(pooled_value) else np.nan,
             "pct_variability_captured_source_centered_global_std": pooled_std
             if np.isfinite(pooled_std) else np.nan,
+            "metric_basis": "site_month_source_centered",
             "n_groups_total": total_groups,
             "avg_points_per_group_mean": avg_points,
             "csv_path": csv_path,
@@ -1732,6 +1767,7 @@ def run_lfmc_monthly_y2y_analysis(eval_df, plot_dir, fontsize, member_eval_dfs=N
                 out[f"{key}_landcover"] = {
                     "csv_path": landcover_csv_path,
                     "plot_path": landcover_plot_path,
+                    "metric_basis": "site_month_source_centered",
                     "n_classes": int(len(landcover_df)),
                     "site_lookup_path": os.path.join(plot_dir, "lfmc_site_landcover_lookup.csv"),
                 }
@@ -1762,14 +1798,15 @@ def run_lfmc_monthly_y2y_analysis(eval_df, plot_dir, fontsize, member_eval_dfs=N
                         cbar_upper = 1.0
                 else:
                     cbar_upper = 1.0
+                uniform_sizes = np.full(len(site_df), 1.0, dtype=float)
                 map_points(
                     site_df["longitude"].values,
                     site_df["latitude"].values,
-                    site_df["n_valid_months"].values,
+                    uniform_sizes,
                     site_map_path,
                     colors=site_df["pct_variability_captured_source_centered"].values,
                     cmap="viridis",
-                    colorbar_label="LFMC monthly anomaly explained (%)",
+                    colorbar_label="LFMC variability explained (%)",
                     cbar_lim=(0.0, cbar_upper),
                     s_min=12,
                     s_max=42,
@@ -1777,16 +1814,18 @@ def run_lfmc_monthly_y2y_analysis(eval_df, plot_dir, fontsize, member_eval_dfs=N
                         f"Overall = {pooled_value:.2f}%"
                         if np.isfinite(pooled_value) else "Overall = nan"
                     ),
+                    show_size_legend=False,
                 )
                 out[f"{key}_site_map"] = {
                     "csv_path": site_csv_path,
                     "plot_path": site_map_path,
+                    "metric_basis": "site_month_source_centered",
                     "n_sites": int(len(site_df)),
-                    "size_count_definition": "n_valid_months",
+                    "size_count_definition": "uniform",
                 }
                 print(
                     "Wrote stringent LFMC site monthly-anomaly map: "
-                    f"{site_map_path} (point size = total contributing months)"
+                    f"{site_map_path} (uniform point size)"
                 )
     return out
 
@@ -1934,6 +1973,12 @@ def main():
             gridsize=args.hexbin_gridsize,
             fontsize=args.fontsize,
             member_eval_dfs=member_eval_dfs,
+        )
+    )
+    metrics_out.update(
+        run_lfmc_site_coverage_map(
+            eval_df=eval_df,
+            plot_dir=plot_dir,
         )
     )
     metrics_out.update(

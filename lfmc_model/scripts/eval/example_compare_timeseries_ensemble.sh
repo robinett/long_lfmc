@@ -25,22 +25,22 @@
 # plot_vh=true
 
 ensemble_model_names=(
-    "lfmc_ens"
-    "lfmc_vh_vv_ens_fullrandom"
+    #"lfmc_ens"
+    "lfmc_vh_vv_365_ens"
 )
 ensemble_model_roots=(
-    "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_ens"
-    "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_ens_fullrandom"
+    #"/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_ens"
+    "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_ens"
 )
 ensemble_input_data_names=(
-    "lfmc"
-    "ensemble/lfmc_vh_vv_ens_fullrandom"
+    #"lfmc"
+    "ensemble/lfmc_vh_vv_365_ens"
 )
 
-num_sites_per_criterion=3
+num_sites_per_criterion=10
 min_measurements=10
 padding_days=60
-max_years=3
+max_years=50
 plot_vv=false
 plot_vh=false
 
