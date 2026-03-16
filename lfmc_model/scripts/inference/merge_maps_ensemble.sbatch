@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --partition=serc
-#SBATCH --time=00:30:00
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=64G
+#SBATCH --time=14:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=128G
 #SBATCH --output=/home/users/trobinet/long_lfmc/lfmc_model/scripts/inference/logs/merge_maps_%A_%a.out
 #SBATCH --error=/home/users/trobinet/long_lfmc/lfmc_model/scripts/inference/logs/merge_maps_%A_%a.err
 #SBATCH --mail-type=BEGIN,END,FAIL

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --partition=serc
-#SBATCH --time=04:00:00
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=128G
+#SBATCH --time=08:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=256G
 #SBATCH --output=/home/users/trobinet/long_lfmc/lfmc_model/scripts/inference/logs/create_maps_driver_%j.out
 #SBATCH --error=/home/users/trobinet/long_lfmc/lfmc_model/scripts/inference/logs/create_maps_driver_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
@@ -18,8 +18,9 @@ cd "${script_dir}"
 source /home/users/trobinet/uv_activations/activate_lfmc_model_py312.sh
 
 if [[ -z "${CONFIG_PATH:-}" ]]; then
-    CONFIG_PATH="${script_dir}/map_configs.yaml"
+    CONFIG_PATH="${script_dir}/map_configs_full_2024.yaml"
 fi
+export CONFIG_PATH
 
 echo "[create_maps_driver] Running manifest/submission workflow"
 echo "[create_maps_driver] CONFIG_PATH=${CONFIG_PATH}"

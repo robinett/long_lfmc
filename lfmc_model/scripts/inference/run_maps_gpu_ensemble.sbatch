@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --partition=serc
-#SBATCH --time=02:00:00
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --time=14:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
 #SBATCH --gres=gpu:1
 #SBATCH --output=/home/users/trobinet/long_lfmc/lfmc_model/scripts/inference/logs/run_maps_gpu_%j.out
 #SBATCH --error=/home/users/trobinet/long_lfmc/lfmc_model/scripts/inference/logs/run_maps_gpu_%j.err
@@ -17,19 +17,14 @@ mkdir -p "${script_dir}/logs"
 
 source /home/users/trobinet/uv_activations/activate_lfmc_model_py312.sh
 
-lock_file="${LOCK_FILE:-}"
-if [[ -n "${lock_file}" ]]; then
-  cleanup() { rm -f "${lock_file}"; }
-  trap cleanup EXIT INT TERM
-fi
-
 if [[ -z "${MANIFEST_PATH:-}" ]]; then
     echo "MANIFEST_PATH must be set before submitting ${BASH_SOURCE[0]}" >&2
     exit 1
 fi
 
+GPU_TASK_ID="${GPU_TASK_ID:-${SLURM_ARRAY_TASK_ID:-}}"
 if [[ -z "${GPU_TASK_ID:-}" ]]; then
-    echo "GPU_TASK_ID must be set before submitting ${BASH_SOURCE[0]}" >&2
+    echo "GPU_TASK_ID or SLURM_ARRAY_TASK_ID must be set before submitting ${BASH_SOURCE[0]}" >&2
     exit 1
 fi
 

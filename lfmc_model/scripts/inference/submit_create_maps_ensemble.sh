@@ -12,6 +12,7 @@ source /home/users/trobinet/uv_activations/activate_lfmc_model_py312.sh
 if [[ -z "${CONFIG_PATH:-}" ]]; then
     CONFIG_PATH="${script_dir}/map_configs.yaml"
 fi
+export CONFIG_PATH
 
 cfg_value() {
     local section="$1"
@@ -36,7 +37,7 @@ PY
 }
 
 validation_test="${VALIDATION_TEST:-$(cfg_value submission validation_test true)}"
-max_tiles="${MAX_TILES:-$(cfg_value submission max_tiles 20)}"
+max_tiles="${MAX_TILES:-$(cfg_value submission max_tiles '')}"
 months_per_block="${MONTHS_PER_BLOCK:-$(cfg_value chunking months_per_block 1)}"
 time_chunk_days="${TIME_CHUNK_DAYS:-$(cfg_value chunking time_chunk_days 31)}"
 y_chunk="${Y_CHUNK:-$(cfg_value chunking y_chunk 100)}"
@@ -48,8 +49,6 @@ tasks_per_job="${TASKS_PER_JOB:-$(cfg_value submission tasks_per_job 1)}"
 use_gpu_forward="${USE_GPU_FORWARD:-$(cfg_value submission use_gpu_forward false)}"
 gpu_fine_tasks_per_job="${GPU_FINE_TASKS_PER_JOB:-$(cfg_value submission gpu_fine_tasks_per_job 1)}"
 gpu_max_jobs="${GPU_MAX_JOBS:-$(cfg_value submission gpu_max_jobs 8)}"
-gpu_lock_dir="${GPU_LOCK_DIR:-$(cfg_value submission gpu_lock_dir /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/gpu_locks)}"
-gpu_submit_sleep_seconds="${GPU_SUBMIT_SLEEP_SECONDS:-$(cfg_value submission gpu_submit_sleep_seconds 30)}"
 gpu_time_limit="${GPU_TIME_LIMIT:-$(cfg_value submission gpu_time_limit 02:00:00)}"
 gpu_cpus_per_task="${GPU_CPUS_PER_TASK:-$(cfg_value submission gpu_cpus_per_task 4)}"
 gpu_mem="${GPU_MEM:-$(cfg_value submission gpu_mem 32G)}"
@@ -159,31 +158,29 @@ if [[ "${use_gpu_forward}" == "true" ]]; then
             "${script_dir}/prepare_maps_ensemble.sbatch"
     )"
     echo "Submitted CPU prepare array job ${prepare_job_id}"
-    mkdir -p "${gpu_lock_dir}"
-    gpu_job_ids=()
-    for (( gpu_task_id=0; gpu_task_id<num_gpu_job_tasks; gpu_task_id++ )); do
-        while [[ "$(find "${gpu_lock_dir}" -type f | wc -l)" -ge "${gpu_max_jobs}" ]]; do
-            echo "Found $(find "${gpu_lock_dir}" -type f | wc -l) active GPU locks. Waiting."
-            sleep "${gpu_submit_sleep_seconds}"
-        done
-        lock_file="${gpu_lock_dir}/lock_$(basename "$(dirname "${manifest_path}")")_gpu_${gpu_task_id}.lock"
-        touch "${lock_file}"
-        gpu_job_id="$(
-            sbatch \
-                --parsable \
-                --dependency=afterok:${prepare_job_id} \
-                --time="${gpu_time_limit}" \
-                --cpus-per-task="${gpu_cpus_per_task}" \
-                --mem="${gpu_mem}" \
-                --job-name="map_gpu_${gpu_task_id}" \
-                --export=ALL,MANIFEST_PATH="${manifest_path}",GPU_TASK_ID="${gpu_task_id}",MODEL_TYPE="${model_type}",LOCK_FILE="${lock_file}" \
-                "${script_dir}/run_maps_gpu_ensemble.sbatch"
-        )"
-        gpu_job_ids+=("${gpu_job_id}")
-        echo "Submitted GPU forward job ${gpu_job_id} for gpu_job_task_id=${gpu_task_id}"
-        sleep "${gpu_submit_sleep_seconds}"
-    done
-    upstream_dependency="$(IFS=:; echo "${gpu_job_ids[*]}")"
+    gpu_array_job_id="$(
+        sbatch \
+            --parsable \
+            --dependency=afterok:${prepare_job_id} \
+            --array="0-$(( num_gpu_job_tasks - 1 ))%${gpu_max_jobs}" \
+            --time="${gpu_time_limit}" \
+            --cpus-per-task="${gpu_cpus_per_task}" \
+            --mem="${gpu_mem}" \
+            --job-name="map_gpu" \
+            --export=ALL,MANIFEST_PATH="${manifest_path}",MODEL_TYPE="${model_type}" \
+            "${script_dir}/run_maps_gpu_ensemble.sbatch"
+    )"
+    echo "Submitted GPU forward array job ${gpu_array_job_id} with %${gpu_max_jobs} concurrency"
+    cleanup_job_id="$(
+        sbatch \
+            --parsable \
+            --dependency=afterok:${gpu_array_job_id} \
+            --job-name="cleanup_prepared_tensors" \
+            --export=ALL,MANIFEST_PATH="${manifest_path}" \
+            "${script_dir}/cleanup_prepared_tensors.sbatch"
+    )"
+    echo "Submitted prepared-tensor cleanup job ${cleanup_job_id}"
+    upstream_dependency="${gpu_array_job_id}"
 else
     array_job_id="$(
         sbatch \

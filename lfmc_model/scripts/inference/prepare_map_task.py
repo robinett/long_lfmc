@@ -6,7 +6,6 @@ import os
 
 import pandas as pd
 
-from compare_timeseries import _runtimes_share_feature_layout
 from map_runtime_utils import (
     build_reference_tensor_payload,
     build_static_superset_runtime,
