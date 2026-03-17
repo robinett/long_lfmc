@@ -17,6 +17,12 @@ mkdir -p "${script_dir}/logs"
 
 source /home/users/trobinet/uv_activations/activate_lfmc_model_py312.sh
 
+lock_file="${LOCK_FILE:-}"
+if [[ -n "${lock_file}" ]]; then
+    cleanup() { rm -f "${lock_file}"; }
+    trap cleanup EXIT INT TERM
+fi
+
 if [[ -z "${MANIFEST_PATH:-}" ]]; then
     echo "MANIFEST_PATH must be set before submitting ${BASH_SOURCE[0]}" >&2
     exit 1

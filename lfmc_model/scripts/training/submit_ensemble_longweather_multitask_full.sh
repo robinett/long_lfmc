@@ -14,10 +14,10 @@ mkdir -p logs
 ########################
 
 scratch_root="/scratch/users/trobinet/long_lfmc/final_lfmc"
-sar_root="${scratch_root}/sar/ensemble/lfmc_vh_vv_365_ens"
-sample_index_root="${scratch_root}/lfmc_model/indexes/ensemble/lfmc_vh_vv_365_ens"
-input_root="${scratch_root}/lfmc_model/inputs/ensemble/lfmc_vh_vv_365_ens"
-save_root="${scratch_root}/lfmc_model/outputs/lfmc_vh_vv_365_ens"
+sar_root="${scratch_root}/sar/ensemble/lfmc_vh_vv_365_fullspatial_ensemble"
+sample_index_root="${scratch_root}/lfmc_model/indexes/ensemble/lfmc_vh_vv_365_fullspatial_ensemble"
+input_root="${scratch_root}/lfmc_model/inputs/ensemble/lfmc_vh_vv_365_fullspatial_ensemble"
+save_root="${scratch_root}/lfmc_model/outputs/lfmc_vh_vv_365_fullspatial_ensemble"
 fold_info_path="${save_root}/canonical_fold_info.json"
 
 mkdir -p "${sar_root}" "${sample_index_root}" "${input_root}" "${save_root}"

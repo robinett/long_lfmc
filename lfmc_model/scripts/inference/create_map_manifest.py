@@ -46,6 +46,14 @@ def _json_safe_obj(obj):
     return obj
 
 
+def _runtime_climate_codes(runtime):
+    return {
+        int(var_name.split("_")[-1])
+        for var_name in runtime["var_names"].get("static_vars", [])
+        if var_name.startswith("climate_zone_")
+    }
+
+
 def get_args():
     parser = argparse.ArgumentParser(
         description="Create a blockwise manifest for ensemble wall-to-wall LFMC inference."
@@ -200,6 +208,17 @@ def main():
         f"[create_map_manifest] shared valid window: "
         f"{safe_start.date()} to {safe_end.date()}"
     )
+    climate_layouts = [_runtime_climate_codes(runtime) for runtime in runtimes]
+    allowed_climate_codes = sorted(set.intersection(*climate_layouts)) if climate_layouts else []
+    if len(allowed_climate_codes) == 0:
+        raise ValueError("No overlapping climate-zone channels were found across ensemble members")
+    excluded_climate_codes = [
+        code for code in range(1, 30) if code not in set(allowed_climate_codes)
+    ]
+    print(
+        f"[create_map_manifest] climate-zone intersection across members="
+        f"{allowed_climate_codes} (excluded={excluded_climate_codes})"
+    )
 
     blocks = month_blocks(safe_start, safe_end, months_per_block=months_per_block)
     block_years = sorted({block_start.year for block_start, _ in blocks})
@@ -218,6 +237,8 @@ def main():
             landcover_ds=dss["landcover_frac"],
             year=block_year,
             grid_path=grid_path,
+            climate_ds=dss["climate_zone"],
+            allowed_climate_codes=allowed_climate_codes,
         )
         tile_payloads_for_year = build_tile_payloads(
             model_grid,
@@ -231,7 +252,8 @@ def main():
         year_tile_payloads[block_year] = tile_payloads_for_year
         valid_pixel_n = int(np.asarray(prediction_mask.values, dtype=bool).sum())
         print(
-            f"[create_map_manifest] year={block_year} valid tiles after NLCD/random_vals "
+            f"[create_map_manifest] year={block_year} valid tiles after "
+            f"NLCD/random_vals/climate "
             f"filter: {len(tile_payloads_for_year):,}; valid pixels={valid_pixel_n:,}"
         )
 
@@ -512,6 +534,8 @@ def main():
         "daymet_path": dss["daymet"].encoding.get("source", DEFAULT_SCRATCH_ROOT),
         "static_path": STATIC_NC_PATH,
         "climate_path": CLIMATE_NC_PATH,
+        "allowed_climate_codes": allowed_climate_codes,
+        "excluded_climate_codes": excluded_climate_codes,
         "tile_metadata_dir": tile_meta_dir,
         "prepared_dir": prepared_dir,
         "shard_dir": shard_dir,

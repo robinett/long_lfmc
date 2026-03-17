@@ -140,29 +140,27 @@ def _read_table(path: str) -> pd.DataFrame:
 
 
 def default_paths() -> Dict[str, str]:
-    scratch_dir = "/scratch/users/trobinet/long_lfmc/trent_datasets"
+    final_dir = "/scratch/users/trobinet/long_lfmc/final_lfmc"
     oak_dir = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets"
-    return {"scratch_dir": scratch_dir, "oak_dir": oak_dir}
+    return {"final_dir": final_dir, "oak_dir": oak_dir}
 
 
 def default_dataset_paths() -> Dict[str, str]:
     paths = default_paths()
-    scratch_dir = paths["scratch_dir"]
-    oak_dir = paths["oak_dir"]
+    final_dir = paths["final_dir"]
+    scratch_dir = final_dir
     return {
-        "daymet": os.path.join(oak_dir, "daymet", "daymet_all_vars.zarr"),
+        "daymet": os.path.join(final_dir, "daymet", "daymet_all_vars.zarr"),
         "modis": os.path.join(
-            oak_dir,
+            final_dir,
             "modis",
-            "modis_regridded_gapfilled",
-            "quality_1",
-            "interpolated",
-            "modis_all_vars.zarr",
+            "modis_regrid_interpolated",
+            "modis_interp_5d.zarr",
         ),
-        "static": os.path.join(oak_dir, "static", "static_features_500m_epsg5070_float32.nc"),
-        "climate_zone": os.path.join(oak_dir, "climate_zones", "climate_zone_per_pixel_westUS.nc4"),
-        "landcover_frac": os.path.join(oak_dir, "nlcd", "nlcd_target_grid_2003_2023.zarr"),
-        "nlcd": os.path.join(oak_dir, "nlcd", "nlcd_2003_2023.zarr"),
+        "static": os.path.join(final_dir, "static", "static_features_500m_epsg5070_float32.nc"),
+        "climate_zone": os.path.join(final_dir, "climate_zones", "climate_zone_per_pixel_fullgrid.nc4"),
+        "landcover_frac": os.path.join(final_dir, "nlcd", "nlcd_target_grid_2000_2024.zarr"),
+        "nlcd": os.path.join(final_dir, "nlcd", "nlcd_2000_2024.zarr"),
         "sar_vh": os.path.join(scratch_dir, "sar", "sar_500m_filled.zarr"),
         "sar_vv": os.path.join(scratch_dir, "sar", "sar_500m_filled_vv.zarr"),
         "sar_ratios": os.path.join(scratch_dir, "sar", "sar_500m_filled_ratios.zarr"),
@@ -1169,6 +1167,125 @@ class DirectBuildResult:
     stratifier: np.ndarray
     var_names: Dict[str, List[str]]
     keep_mask: np.ndarray
+    build_metadata: Optional[Dict[str, object]] = None
+
+
+def _extract_row_climate_zone_codes_from_static(
+    static_arr: np.ndarray,
+    static_feature_names: Sequence[str],
+) -> np.ndarray:
+    climate_slots: List[int] = []
+    climate_codes: List[int] = []
+    for idx, feat in enumerate(static_feature_names):
+        if feat.startswith("climate_zone_"):
+            climate_slots.append(idx)
+            climate_codes.append(int(feat.split("_")[-1]))
+    if not climate_slots:
+        raise ValueError("No climate zone features found in static feature list")
+
+    static_np = np.asarray(static_arr)
+    if static_np.ndim == 3:
+        static_np = static_np[:, 0, :]
+    if static_np.ndim != 2:
+        raise ValueError(f"Expected static array with 2 or 3 dims, got shape {static_np.shape}")
+
+    climate_block = static_np[:, climate_slots]
+    active_mask = climate_block > 0.5
+    active_counts = active_mask.sum(axis=1)
+    if np.any(active_counts == 0):
+        raise ValueError(
+            "Found rows with no active climate zone one-hot channel in static tensor"
+        )
+    if np.any(active_counts > 1):
+        raise ValueError(
+            "Found rows with multiple active climate zone one-hot channels in static tensor"
+        )
+    return np.asarray(climate_codes, dtype=np.int16)[np.argmax(active_mask, axis=1)]
+
+
+def _filter_rows_by_min_sites_per_climate_zone(
+    rows: pd.DataFrame,
+    X_short: np.ndarray,
+    X_long: np.ndarray,
+    X_static: np.ndarray,
+    Y: np.ndarray,
+    source: np.ndarray,
+    stratifier: np.ndarray,
+    static_feature_names: Sequence[str],
+    min_sites_per_zone: int = 2,
+    round_decimals: int = 10,
+) -> Tuple[
+    pd.DataFrame,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    Dict[str, object],
+]:
+    climate_codes = _extract_row_climate_zone_codes_from_static(
+        X_static, static_feature_names
+    )
+    rows_with_climate = rows.copy()
+    rows_with_climate["climate_zone_code"] = climate_codes
+    rows_with_climate["site_lat"] = pd.to_numeric(
+        rows_with_climate["latitude"], errors="coerce"
+    ).round(round_decimals)
+    rows_with_climate["site_lon"] = pd.to_numeric(
+        rows_with_climate["longitude"], errors="coerce"
+    ).round(round_decimals)
+
+    site_counts_by_zone = (
+        rows_with_climate[["climate_zone_code", "site_lat", "site_lon"]]
+        .drop_duplicates()
+        .groupby("climate_zone_code")
+        .size()
+        .astype(int)
+    )
+    kept_codes = sorted(
+        int(code) for code, count in site_counts_by_zone.items() if int(count) >= min_sites_per_zone
+    )
+    dropped_codes = sorted(
+        int(code) for code, count in site_counts_by_zone.items() if int(count) < min_sites_per_zone
+    )
+    keep_rows = rows_with_climate["climate_zone_code"].isin(kept_codes).to_numpy(dtype=bool)
+
+    kept_rows = rows.loc[keep_rows].copy().reset_index(drop=True)
+    kept_climate_codes = climate_codes[keep_rows]
+    metadata = {
+        "min_sites_per_climate_zone": int(min_sites_per_zone),
+        "kept_climate_zone_codes": kept_codes,
+        "dropped_climate_zone_codes": dropped_codes,
+        "dropped_rows_due_to_rare_climate_zone": int((~keep_rows).sum()),
+        "dropped_sites_due_to_rare_climate_zone": int(
+            site_counts_by_zone.loc[dropped_codes].sum() if dropped_codes else 0
+        ),
+        "site_counts_by_climate_zone": {
+            str(int(code)): int(count) for code, count in site_counts_by_zone.items()
+        },
+    }
+    print(
+        "[build_direct_tensors] Climate-zone site filter: "
+        f"kept_codes={kept_codes}, dropped_codes={dropped_codes}, "
+        f"dropped_rows={metadata['dropped_rows_due_to_rare_climate_zone']:,}, "
+        f"dropped_sites={metadata['dropped_sites_due_to_rare_climate_zone']:,}"
+    )
+
+    return (
+        kept_rows,
+        X_short[keep_rows],
+        X_long[keep_rows],
+        X_static[keep_rows],
+        Y[keep_rows],
+        source[keep_rows],
+        stratifier[keep_rows],
+        kept_climate_codes,
+        keep_rows,
+        metadata,
+    )
 
 
 def build_direct_tensors_from_sample_index(
@@ -2286,6 +2403,37 @@ def build_direct_tensors_from_sample_index(
     X_short_kept = X_short_np[finite_mask]
     X_long_kept = X_long_np[finite_mask]
     X_static_kept = X_static_np[finite_mask]
+    Y_kept_np = Y_np[finite_mask][:, None, None]
+    source_kept_np = source_np[finite_mask]
+    stratifier_kept = stratifier_np[finite_mask]
+
+    climate_filter_keep_mask = np.ones(kept_rows.shape[0], dtype=bool)
+    climate_filter_metadata = None
+    (
+        kept_rows,
+        X_short_kept,
+        X_long_kept,
+        X_static_kept,
+        Y_kept_np,
+        source_kept_np,
+        stratifier_kept,
+        _kept_climate_codes,
+        climate_filter_keep_mask,
+        climate_filter_metadata,
+    ) = _filter_rows_by_min_sites_per_climate_zone(
+        rows=kept_rows,
+        X_short=X_short_kept,
+        X_long=X_long_kept,
+        X_static=X_static_kept,
+        Y=Y_kept_np,
+        source=source_kept_np,
+        stratifier=stratifier_kept,
+        static_feature_names=static_features,
+        min_sites_per_zone=2,
+    )
+    final_keep_mask = finite_mask.copy()
+    if kept_n > 0:
+        final_keep_mask[finite_mask] = climate_filter_keep_mask
 
     X_short_kept, short_vars_kept, short_vars_dropped = _drop_zero_variance_channels(
         X_short_kept, short_vars_out, "short"
@@ -2318,9 +2466,8 @@ def build_direct_tensors_from_sample_index(
     X_short = torch.from_numpy(X_short_kept).float()
     X_long = torch.from_numpy(X_long_kept).float()
     X_static = torch.from_numpy(X_static_kept).float()
-    Y = torch.from_numpy(Y_np[finite_mask][:, None, None]).float()
-    source = torch.from_numpy(source_np[finite_mask])
-    stratifier_kept = stratifier_np[finite_mask]
+    Y = torch.from_numpy(Y_kept_np).float()
+    source = torch.from_numpy(source_kept_np)
     target_cols_out = list(target_cols) if target_cols else sorted(rows["target_name"].astype(str).unique().tolist())
 
     var_names = default_var_names(
@@ -2341,7 +2488,8 @@ def build_direct_tensors_from_sample_index(
         info=kept_rows,
         stratifier=stratifier_kept,
         var_names=var_names,
-        keep_mask=finite_mask,
+        keep_mask=final_keep_mask,
+        build_metadata=climate_filter_metadata,
     )
 
 

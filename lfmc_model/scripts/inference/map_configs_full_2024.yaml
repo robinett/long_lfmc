@@ -40,6 +40,8 @@ submission:
   use_gpu_forward: true
   gpu_fine_tasks_per_job: 20
   gpu_max_jobs: 8
+  gpu_lock_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/gpu_locks
+  gpu_submit_sleep_seconds: 30
   gpu_time_limit: "14:00:00"
   gpu_cpus_per_task: 8
   gpu_mem: 128G

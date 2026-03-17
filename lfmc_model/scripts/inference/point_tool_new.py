@@ -621,7 +621,6 @@ def run_model_forward(
 def main():
     scratch_root = '/scratch/users/trobinet/long_lfmc/final_lfmc'
     scratch_model_dir = os.path.join(scratch_root, 'lfmc_model')
-    oak_dir = '/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/'
     # where to save the outputs of the model
     out_dir = os.path.join(scratch_model_dir, 'inference', 'for_mitch_20260124')
     plots_dir = os.path.join(scratch_model_dir, 'inference', 'plots')
@@ -726,10 +725,10 @@ def main():
             )
         ),
         'static': xr.open_dataset(
-            os.path.join(oak_dir, 'static', 'static_features_500m_epsg5070_float32.nc')
+            os.path.join(scratch_root, 'static', 'static_features_500m_epsg5070_float32.nc')
         ),
         'climate_zone': xr.open_dataset(
-            os.path.join(oak_dir, 'climate_zones', 'climate_zone_per_pixel_westUS.nc4')
+            os.path.join(scratch_root, 'climate_zones', 'climate_zone_per_pixel_fullgrid.nc4')
         ),
         'landcover_frac': xr.open_zarr(
             os.path.join(scratch_root, 'nlcd', 'nlcd_target_grid_2000_2024.zarr')

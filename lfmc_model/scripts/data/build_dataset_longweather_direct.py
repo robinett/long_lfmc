@@ -203,7 +203,6 @@ def main():
 
     # All configuration is explicitly set here.
     scratch_dir = "/scratch/users/trobinet/long_lfmc/final_lfmc"
-    oak_dir = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets"
 
     sample_index_inputs = [sample_index_path]
 
@@ -221,14 +220,14 @@ def main():
             "modis_interp_5d.zarr",
         ),
         "static": os.path.join(
-            oak_dir,
+            scratch_dir,
             "static",
             "static_features_500m_epsg5070_float32.nc",
         ),
         "climate_zone": os.path.join(
-            oak_dir,
+            scratch_dir,
             "climate_zones",
-            "climate_zone_per_pixel_westUS.nc4",
+            "climate_zone_per_pixel_fullgrid.nc4",
         ),
         "landcover_frac": os.path.join(
             scratch_dir,
@@ -494,6 +493,8 @@ def main():
     os.makedirs(save_dir, exist_ok=True)
     print(f"[build_dataset] Saving outputs to: {save_dir}")
     save_direct_build_result(result, save_dir)
+    if result.build_metadata is not None:
+        build_cfg["build_metadata"] = result.build_metadata
     with open(os.path.join(save_dir, "build_config.json"), "w") as f:
         json.dump(build_cfg, f, indent=2, sort_keys=True)
 

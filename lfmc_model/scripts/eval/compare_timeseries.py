@@ -39,11 +39,15 @@ MODIS_ZARR_PATH = os.path.join(
     "modis_interp_5d.zarr",
 )
 NLCD_ZARR_PATH = os.path.join(DEFAULT_SCRATCH_ROOT, "nlcd", "nlcd_target_grid_2000_2024.zarr")
-STATIC_NC_PATH = os.path.join(DEFAULT_OAK_ROOT, "static", "static_features_500m_epsg5070_float32.nc")
+STATIC_NC_PATH = os.path.join(
+    DEFAULT_SCRATCH_ROOT,
+    "static",
+    "static_features_500m_epsg5070_float32.nc",
+)
 CLIMATE_NC_PATH = os.path.join(
-    DEFAULT_OAK_ROOT,
+    DEFAULT_SCRATCH_ROOT,
     "climate_zones",
-    "climate_zone_per_pixel_westUS.nc4",
+    "climate_zone_per_pixel_fullgrid.nc4",
 )
 SHORT_LAG_DAYS = list(range(31))
 LONG_LAG_DAYS = list(range(181))

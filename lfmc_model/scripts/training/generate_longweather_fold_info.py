@@ -5,6 +5,13 @@ import json
 import os
 
 from train_multitarget_longweather_vvvh import _fold_locs_to_jsonable, create_site_split, load_data
+from train_multitarget_longweather_vvvh import (
+    _assign_remaining_sites_to_test_folds,
+    _build_site_lookup,
+    _dedupe_sites_in_order,
+    _extract_climate_zone_codes_from_static_tensor,
+    _validate_sites_assigned_exactly_once,
+)
 
 
 def parse_args():
@@ -21,9 +28,27 @@ def parse_args():
 def main():
     args = parse_args()
     datasets = load_data(args.input_data_dir)
+    with open(os.path.join(args.input_data_dir, "var_names.json"), "r") as f:
+        var_names = json.load(f)
     source = datasets[4]
     info = datasets[5]
     stratifier = datasets[6]
+    static_data = datasets[2]
+    climate_zone_codes = _extract_climate_zone_codes_from_static_tensor(
+        static_data,
+        var_names["static_vars"],
+    )
+    all_sites = _dedupe_sites_in_order(info[["latitude", "longitude"]].to_numpy())
+    site_climate_lookup = _build_site_lookup(
+        climate_zone_codes,
+        info,
+        column_name="climate_zone_code",
+    )
+    site_stratifier_lookup = _build_site_lookup(
+        stratifier,
+        info,
+        column_name="stratifier",
+    )
 
     num_insitu_obs = int((source == 0).sum().item())
     num_vv_obs = int((source == 1).sum().item())
@@ -53,9 +78,16 @@ def main():
             seed=int(args.split_seed),
             used_sites=used_sites,
             stratifier=stratifier,
+            climate_zone_codes=climate_zone_codes,
         )
         used_sites.extend(this_locs)
         fold_locs[fold + 1] = this_locs
+    fold_locs = _assign_remaining_sites_to_test_folds(
+        fold_locs=fold_locs,
+        all_sites=all_sites,
+        site_climate_lookup=site_climate_lookup,
+        site_stratifier_lookup=site_stratifier_lookup,
+    )
 
     remove_last = False
     for fold in sorted(fold_locs):
@@ -66,6 +98,7 @@ def main():
             remove_last = True
     if remove_last:
         del fold_locs[args.n_folds]
+    _validate_sites_assigned_exactly_once(fold_locs, all_sites=all_sites)
 
     out_dir = os.path.dirname(args.out_path)
     if out_dir:

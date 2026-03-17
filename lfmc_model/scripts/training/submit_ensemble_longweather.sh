@@ -12,8 +12,8 @@ mkdir -p logs
 # Constant directories
 ########################
 
-input_data_dir="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc_365"
-save_root="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_365_ens"
+input_data_dir="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs/lfmc_365_fullspatial"
+save_root="/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_365_fullspatial_ensemble"
 
 ########################
 # Ensemble settings
@@ -112,4 +112,3 @@ for (( member_idx=0; member_idx<ensemble_size; member_idx++ )); do
 done
 
 echo "Submitted ${submitted} ensemble members."
-

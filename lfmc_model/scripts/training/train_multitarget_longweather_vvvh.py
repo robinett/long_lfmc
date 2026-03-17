@@ -708,6 +708,223 @@ def load_data(center_data_dir):
     ]
     return all_center_data
 
+
+def _round_site_tuple(site, round_decimals: int = 10):
+    return (
+        round(float(site[0]), round_decimals),
+        round(float(site[1]), round_decimals),
+    )
+
+
+def _dedupe_sites_in_order(sites, round_decimals: int = 10):
+    ordered = []
+    seen = set()
+    for site in sites:
+        if site is None:
+            continue
+        rounded = _round_site_tuple(site, round_decimals=round_decimals)
+        if rounded in seen:
+            continue
+        seen.add(rounded)
+        ordered.append(rounded)
+    return ordered
+
+
+def _extract_climate_zone_codes_from_static_tensor(static_data, static_var_names):
+    climate_slots = []
+    climate_codes = []
+    for idx, feat in enumerate(static_var_names):
+        if feat.startswith("climate_zone_"):
+            climate_slots.append(idx)
+            climate_codes.append(int(feat.split("_")[-1]))
+    if not climate_slots:
+        raise ValueError("No climate_zone_* features found in static_var_names")
+
+    if isinstance(static_data, torch.Tensor):
+        static_np = static_data.detach().cpu().numpy()
+    else:
+        static_np = np.asarray(static_data)
+    if static_np.ndim == 3:
+        static_np = static_np[:, 0, :]
+    if static_np.ndim != 2:
+        raise ValueError(f"Expected static data with 2 or 3 dims, got shape {static_np.shape}")
+
+    climate_block = static_np[:, climate_slots]
+    active_mask = climate_block > 0.5
+    active_counts = active_mask.sum(axis=1)
+    if np.any(active_counts == 0):
+        raise ValueError(
+            "Found rows with no active climate-zone one-hot channel in X_static"
+        )
+    if np.any(active_counts > 1):
+        raise ValueError(
+            "Found rows with multiple active climate-zone one-hot channels in X_static"
+        )
+    return np.asarray(climate_codes, dtype=np.int16)[np.argmax(active_mask, axis=1)]
+
+
+def _build_site_lookup(values, data_info, round_decimals: int = 10, column_name: str = "value"):
+    if len(values) != data_info.shape[0]:
+        raise ValueError(
+            f"{column_name} length mismatch: {len(values)} vs data_info rows {data_info.shape[0]}"
+        )
+    site_df = pd.DataFrame(
+        {
+            "lat": pd.to_numeric(data_info["latitude"], errors="coerce").round(round_decimals),
+            "lon": pd.to_numeric(data_info["longitude"], errors="coerce").round(round_decimals),
+            column_name: np.asarray(values),
+        }
+    ).dropna(subset=["lat", "lon"])
+    nunique = site_df.groupby(["lat", "lon"])[column_name].nunique()
+    bad = nunique[nunique > 1]
+    if not bad.empty:
+        example = bad.index[0]
+        raise ValueError(
+            f"Site {example} has multiple {column_name} values; cannot build site lookup cleanly"
+        )
+    site_lookup = (
+        site_df.groupby(["lat", "lon"], as_index=False)[column_name]
+        .first()
+    )
+    return {
+        _round_site_tuple((row["lat"], row["lon"]), round_decimals=round_decimals): row[column_name]
+        for _, row in site_lookup.iterrows()
+    }
+
+
+def _site_counts_by_climate_zone(site_climate_lookup):
+    counts = {}
+    for climate_code in site_climate_lookup.values():
+        climate_code = int(climate_code)
+        counts[climate_code] = counts.get(climate_code, 0) + 1
+    return counts
+
+
+def _enforce_climate_zone_train_support(
+    selected_sites,
+    candidate_sites,
+    site_climate_lookup,
+    total_sites_by_climate_zone,
+    round_decimals: int = 10,
+):
+    selected_unique = _dedupe_sites_in_order(selected_sites, round_decimals=round_decimals)
+    candidate_unique = _dedupe_sites_in_order(candidate_sites, round_decimals=round_decimals)
+    target_n = len(selected_unique)
+    candidate_order = selected_unique + [
+        site for site in candidate_unique if site not in set(selected_unique)
+    ]
+    chosen = []
+    chosen_set = set()
+    chosen_counts_by_zone = {}
+    for site in candidate_order:
+        if len(chosen) >= target_n:
+            break
+        if site in chosen_set:
+            continue
+        if site not in site_climate_lookup:
+            raise ValueError(f"Missing climate-zone lookup for site {site}")
+        climate_code = int(site_climate_lookup[site])
+        max_holdout_for_zone = int(total_sites_by_climate_zone[climate_code]) - 1
+        if max_holdout_for_zone < 1:
+            continue
+        next_count = chosen_counts_by_zone.get(climate_code, 0) + 1
+        if next_count > max_holdout_for_zone:
+            continue
+        chosen.append(site)
+        chosen_set.add(site)
+        chosen_counts_by_zone[climate_code] = next_count
+    if len(chosen) < target_n:
+        print(
+            "WARNING: climate-zone feasibility reduced selected site count from "
+            f"{target_n} to {len(chosen)}"
+        )
+    return chosen
+
+
+def _assign_remaining_sites_to_test_folds(
+    fold_locs,
+    all_sites,
+    site_climate_lookup,
+    site_stratifier_lookup,
+    round_decimals: int = 10,
+):
+    fold_locs = {
+        int(fold): _dedupe_sites_in_order(locs, round_decimals=round_decimals)
+        for fold, locs in fold_locs.items()
+    }
+    all_sites = _dedupe_sites_in_order(all_sites, round_decimals=round_decimals)
+    total_sites_by_climate_zone = _site_counts_by_climate_zone(site_climate_lookup)
+    fold_zone_counts = {
+        int(fold): {} for fold in fold_locs
+    }
+    fold_strat_counts = {
+        int(fold): {} for fold in fold_locs
+    }
+    assigned_sites = set()
+    for fold, locs in fold_locs.items():
+        for site in locs:
+            assigned_sites.add(site)
+            climate_code = int(site_climate_lookup[site])
+            fold_zone_counts[fold][climate_code] = fold_zone_counts[fold].get(climate_code, 0) + 1
+            stratifier_code = int(site_stratifier_lookup[site])
+            fold_strat_counts[fold][stratifier_code] = fold_strat_counts[fold].get(stratifier_code, 0) + 1
+
+    unassigned_sites = [site for site in all_sites if site not in assigned_sites]
+    unassigned_sites = sorted(
+        unassigned_sites,
+        key=lambda site: (
+            total_sites_by_climate_zone[int(site_climate_lookup[site])],
+            int(site_stratifier_lookup[site]),
+            float(site[0]),
+            float(site[1]),
+        ),
+    )
+    for site in unassigned_sites:
+        climate_code = int(site_climate_lookup[site])
+        feasible_folds = [
+            fold
+            for fold in sorted(fold_locs)
+            if fold_zone_counts[fold].get(climate_code, 0) + 1
+            <= total_sites_by_climate_zone[climate_code] - 1
+        ]
+        if not feasible_folds:
+            raise ValueError(
+                f"Could not place unassigned site {site} into any test fold without "
+                f"eliminating climate zone {climate_code} from train"
+            )
+        stratifier_code = int(site_stratifier_lookup[site])
+        best_fold = min(
+            feasible_folds,
+            key=lambda fold: (
+                fold_strat_counts[fold].get(stratifier_code, 0),
+                len(fold_locs[fold]),
+                fold,
+            ),
+        )
+        fold_locs[best_fold].append(site)
+        fold_zone_counts[best_fold][climate_code] = (
+            fold_zone_counts[best_fold].get(climate_code, 0) + 1
+        )
+        fold_strat_counts[best_fold][stratifier_code] = (
+            fold_strat_counts[best_fold].get(stratifier_code, 0) + 1
+        )
+    return fold_locs
+
+
+def _validate_sites_assigned_exactly_once(fold_locs, all_sites, round_decimals: int = 10):
+    site_counts = {}
+    for fold, locs in fold_locs.items():
+        for site in _dedupe_sites_in_order(locs, round_decimals=round_decimals):
+            site_counts[site] = site_counts.get(site, 0) + 1
+    all_sites = _dedupe_sites_in_order(all_sites, round_decimals=round_decimals)
+    missing = [site for site in all_sites if site_counts.get(site, 0) == 0]
+    repeated = [(site, count) for site, count in site_counts.items() if count != 1]
+    if missing or repeated:
+        raise ValueError(
+            "Each site must appear in test exactly once. "
+            f"Missing={len(missing)}, repeated={len(repeated)}"
+        )
+
 class EarlyStopping:
     def __init__(
         self,
@@ -756,13 +973,24 @@ def create_site_split(
     seed: int = 42,
     used_sites = None,
     round_decimals: int = 10,
-    stratifier = None
+    stratifier = None,
+    climate_zone_codes = None,
 ):
     source_np = np.asarray(source).reshape(-1)
     if source_np.shape[0] != data_info.shape[0]:
         raise ValueError(
             f"source and data_info length mismatch: {source_np.shape[0]} vs {data_info.shape[0]}"
         )
+    site_climate_lookup = None
+    total_sites_by_climate_zone = None
+    if climate_zone_codes is not None:
+        site_climate_lookup = _build_site_lookup(
+            climate_zone_codes,
+            data_info,
+            round_decimals=round_decimals,
+            column_name="climate_zone_code",
+        )
+        total_sites_by_climate_zone = _site_counts_by_climate_zone(site_climate_lookup)
     # split sources by numeric source code
     # 0=insitu, 1=vv/ratios, 2=vh
     insitu_rows = np.where(source_np == 0)[0]
@@ -786,6 +1014,8 @@ def create_site_split(
         # optional: snap to grid to avoid tiny fp diffs
         out['lat'] = out['lat'].round(round_decimals)
         out['lon'] = out['lon'].round(round_decimals)
+        if climate_zone_codes is not None:
+            out["climate_zone_code"] = np.asarray(climate_zone_codes)[out["row_idx"].to_numpy(dtype=int)]
         return out
     insitu = clean(insitu)
     vv     = clean(vv)
@@ -837,6 +1067,19 @@ def create_site_split(
         insitu_counts['stratifier'] = insitu_lcs
         vv_counts['stratifier'] = vv_lcs
         vh_counts['stratifier'] = vh_lcs
+    if climate_zone_codes is not None:
+        insitu_counts["climate_zone_code"] = [
+            int(site_climate_lookup[_round_site_tuple((row["lat"], row["lon"]), round_decimals=round_decimals)])
+            for _, row in insitu_counts.iterrows()
+        ]
+        vv_counts["climate_zone_code"] = [
+            int(site_climate_lookup[_round_site_tuple((row["lat"], row["lon"]), round_decimals=round_decimals)])
+            for _, row in vv_counts.iterrows()
+        ]
+        vh_counts["climate_zone_code"] = [
+            int(site_climate_lookup[_round_site_tuple((row["lat"], row["lon"]), round_decimals=round_decimals)])
+            for _, row in vh_counts.iterrows()
+        ]
     insitu_counts_orig = insitu_counts.copy()
     vv_counts_orig = vv_counts.copy()
     vh_counts_orig = vh_counts.copy()
@@ -928,9 +1171,24 @@ def create_site_split(
     perc_data_vh = num_sel_vh / len(vh) * 100 if len(vh) > 0 else 0
     print(f'Selected {perc_data_i:.2f}% of insitu data, {perc_data_vv:.2f}% of VV data, {perc_data_vh:.2f}% of VH data')
     # combine (allow duplicates if the same site is selected for multiple sources)
-    val_locs = val_i + val_rs
-    # If you want unique sites only:
-    # val_locs = list(dict.fromkeys(val_locs))
+    candidate_sites = []
+    if not insitu_counts.empty:
+        candidate_sites.extend(
+            insitu_counts[["lat", "lon"]].apply(tuple, axis=1).tolist()
+        )
+    if not rs_counts.empty:
+        candidate_sites.extend(
+            rs_counts[["lat", "lon"]].apply(tuple, axis=1).tolist()
+        )
+    val_locs = _dedupe_sites_in_order(val_i + val_rs, round_decimals=round_decimals)
+    if site_climate_lookup is not None:
+        val_locs = _enforce_climate_zone_train_support(
+            selected_sites=val_locs,
+            candidate_sites=candidate_sites,
+            site_climate_lookup=site_climate_lookup,
+            total_sites_by_climate_zone=total_sites_by_climate_zone,
+            round_decimals=round_decimals,
+        )
     return val_locs
 
 def run_model(
@@ -1223,6 +1481,10 @@ def train_fold_k(
     num_val_obs_insitu = remaining_insitu_obs * val_split
     num_val_obs_vv = remaining_vv_obs * val_split
     num_val_obs_vh = remaining_vh_obs * val_split
+    remaining_climate_zone_codes = _extract_climate_zone_codes_from_static_tensor(
+        remaining_static_data,
+        var_names["static_vars"],
+    )
     val_locs = create_site_split(
         remaining_info,
         remaining_source,
@@ -1230,7 +1492,8 @@ def train_fold_k(
         desired_vv_sample_size=int(num_val_obs_vv),
         desired_vh_sample_size=int(num_val_obs_vh),
         seed=this_split_seed,
-        stratifier=remaining_stratifier
+        stratifier=remaining_stratifier,
+        climate_zone_codes=remaining_climate_zone_codes,
     )
     val_locs = np.array(val_locs)
     # perform the same masking as was done for the test sites
@@ -2121,6 +2384,26 @@ def main():
     source = datasets[4]
     info = datasets[5]
     stratifier = datasets[6]
+    climate_zone_codes = _extract_climate_zone_codes_from_static_tensor(
+        static_data,
+        var_names["static_vars"],
+    )
+    all_sites = _dedupe_sites_in_order(
+        info[["latitude", "longitude"]].to_numpy(),
+        round_decimals=10,
+    )
+    site_climate_lookup = _build_site_lookup(
+        climate_zone_codes,
+        info,
+        round_decimals=10,
+        column_name="climate_zone_code",
+    )
+    site_stratifier_lookup = _build_site_lookup(
+        stratifier,
+        info,
+        round_decimals=10,
+        column_name="stratifier",
+    )
     num_insitu_obs = int((source == 0).sum().item())
     num_vv_obs = int((source == 1).sum().item())
     num_vh_obs = int((source == 2).sum().item())
@@ -2179,10 +2462,18 @@ def main():
                 desired_vh_sample_size=int(desired_vh_obs_per_fold),
                 seed=split_seed,
                 used_sites=used_sites,
-                stratifier=stratifier
+                stratifier=stratifier,
+                climate_zone_codes=climate_zone_codes,
             )
             used_sites.extend(this_locs)
             fold_locs[fold + 1] = this_locs
+        fold_locs = _assign_remaining_sites_to_test_folds(
+            fold_locs=fold_locs,
+            all_sites=all_sites,
+            site_climate_lookup=site_climate_lookup,
+            site_stratifier_lookup=site_stratifier_lookup,
+            round_decimals=10,
+        )
         # if there is any fold with zero locations, raise an error
         # we are allowed to get rid of the last fold if it has no locations
         remove_last = False
@@ -2196,6 +2487,11 @@ def main():
             del fold_locs[fold]
         n_folds = len(fold_locs)
         print(f'Using {n_folds} folds for training')
+    _validate_sites_assigned_exactly_once(
+        fold_locs,
+        all_sites=all_sites,
+        round_decimals=10,
+    )
     # save fold info actually used for this run
     with open(os.path.join(full_save_dir, 'fold_info.json'), 'w') as f:
         json.dump(_fold_locs_to_jsonable(fold_locs), f)

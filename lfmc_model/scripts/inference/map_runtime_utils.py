@@ -299,8 +299,19 @@ def _mask_cache_signature(
     landcover_ds: xr.Dataset,
     grid_path: str,
     allowed_classes: Sequence[str],
+    climate_ds: Optional[xr.Dataset] = None,
+    allowed_climate_codes: Optional[Sequence[int]] = None,
 ) -> str:
+    def _source_signature(path: str) -> Dict[str, object]:
+        out: Dict[str, object] = {"path": str(path)}
+        if path and os.path.exists(path):
+            stat = os.stat(path)
+            out["mtime_ns"] = int(stat.st_mtime_ns)
+            out["size"] = int(stat.st_size)
+        return out
+
     landcover_var = next(iter(landcover_ds.data_vars.values()))
+    climate_var = None if climate_ds is None else next(iter(climate_ds.data_vars.values()))
     payload = {
         "grid_path": grid_path,
         "grid_shape": {k: int(v) for k, v in model_grid.sizes.items()},
@@ -312,10 +323,20 @@ def _mask_cache_signature(
             float(model_grid["y"].values[0]),
             float(model_grid["y"].values[-1]),
         ],
-        "landcover_source": str(landcover_var.encoding.get("source", "")),
+        "landcover_source": _source_signature(str(landcover_var.encoding.get("source", ""))),
         "landcover_shape": {k: int(v) for k, v in landcover_ds.sizes.items()},
         "landcover_vars": sorted(landcover_ds.data_vars),
         "allowed_classes": list(allowed_classes),
+        "climate_source": (
+            None
+            if climate_var is None
+            else _source_signature(str(climate_var.encoding.get("source", "")))
+        ),
+        "allowed_climate_codes": (
+            None
+            if allowed_climate_codes is None
+            else [int(code) for code in sorted(set(allowed_climate_codes))]
+        ),
     }
     raw = json.dumps(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha1(raw).hexdigest()[:16]
@@ -327,6 +348,8 @@ def load_or_build_prediction_mask_for_year(
     year: int,
     grid_path: str = DEFAULT_MODEL_GRID_PATH,
     allowed_classes: Sequence[str] = ALLOWED_DOMINANT_LANDCOVER,
+    climate_ds: Optional[xr.Dataset] = None,
+    allowed_climate_codes: Optional[Sequence[int]] = None,
     cache_root: str = DEFAULT_LANDCOVER_MASK_CACHE_DIR,
 ) -> xr.DataArray:
     cache_sig = _mask_cache_signature(
@@ -334,6 +357,8 @@ def load_or_build_prediction_mask_for_year(
         landcover_ds=landcover_ds,
         grid_path=grid_path,
         allowed_classes=allowed_classes,
+        climate_ds=climate_ds,
+        allowed_climate_codes=allowed_climate_codes,
     )
     cache_dir = os.path.join(cache_root, cache_sig)
     cache_path = os.path.join(cache_dir, f"prediction_mask_{year}.npz")
@@ -342,7 +367,7 @@ def load_or_build_prediction_mask_for_year(
             mask = np.asarray(npz["mask"], dtype=bool)
             y_vals = np.asarray(npz["y"])
             x_vals = np.asarray(npz["x"])
-        print(f"[landcover_mask] year={year} cache hit: {cache_path}")
+        print(f"[prediction_mask] year={year} cache hit: {cache_path}")
         return xr.DataArray(mask, coords={"y": y_vals, "x": x_vals}, dims=("y", "x"))
 
     landcover_mask = build_landcover_allowed_mask_for_year(
@@ -352,6 +377,15 @@ def load_or_build_prediction_mask_for_year(
     )
     model_random_mask = model_grid["random_vals"].notnull()
     prediction_mask = (model_random_mask & landcover_mask).transpose(*model_random_mask.dims)
+    if climate_ds is not None and allowed_climate_codes is not None:
+        climate_codes = sorted({int(code) for code in allowed_climate_codes})
+        if len(climate_codes) == 0:
+            raise ValueError("allowed_climate_codes must not be empty when climate_ds is provided")
+        climate_da = climate_ds["climate_zone"]
+        if "band" in climate_da.dims:
+            climate_da = climate_da.isel(band=0)
+        climate_mask = climate_da.isin(climate_codes).astype(bool)
+        prediction_mask = (prediction_mask & climate_mask).transpose(*model_random_mask.dims)
     mask = np.asarray(prediction_mask.values, dtype=bool)
     y_vals = np.asarray(model_grid["y"].values)
     x_vals = np.asarray(model_grid["x"].values)
@@ -362,7 +396,7 @@ def load_or_build_prediction_mask_for_year(
         y=y_vals,
         x=x_vals,
     )
-    print(f"[landcover_mask] year={year} wrote cache: {cache_path}")
+    print(f"[prediction_mask] year={year} wrote cache: {cache_path}")
     return xr.DataArray(mask, coords={"y": y_vals, "x": x_vals}, dims=("y", "x"))
 
 
@@ -454,7 +488,7 @@ def save_prepared_tensor_payload(prepared_path: str, tensor_payload: Dict[str, o
 
 
 def load_prepared_tensor_payload(prepared_path: str) -> Dict[str, object]:
-    raw = torch.load(prepared_path, map_location="cpu")
+    raw = torch.load(prepared_path, map_location="cpu", weights_only=False)
     info_df = pd.DataFrame(
         {
             "lat": np.asarray(raw["lat"], dtype=np.float64),

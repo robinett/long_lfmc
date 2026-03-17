@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --partition=serc
-#SBATCH --time=02:00:00
+#SBATCH --time=01:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --output=/home/users/trobinet/long_lfmc/lfmc_model/scripts/inference/logs/prepare_maps_%A_%a.out
