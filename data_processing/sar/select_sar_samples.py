@@ -176,6 +176,45 @@ def _select_prefix_whole_sites(
         return ordered_flat_idxs[:stop_idx], obs_under
     return ordered_flat_idxs[: stop_idx + 1], obs_over
 
+
+def _select_sites_preferring_primary_pool(
+    primary_idxs,
+    primary_counts,
+    secondary_idxs,
+    secondary_counts,
+    target_num_observations,
+    strict_target=False,
+):
+    selected_primary, obs_primary = _select_prefix_whole_sites(
+        ordered_flat_idxs=primary_idxs,
+        ordered_counts=primary_counts,
+        target_num_observations=target_num_observations,
+        strict_target=False,
+    )
+    if obs_primary >= target_num_observations or secondary_idxs.size == 0:
+        if strict_target and obs_primary < target_num_observations:
+            raise RuntimeError(
+                f"Could only collect {obs_primary} observations, below target "
+                f"{target_num_observations}."
+            )
+        return selected_primary, obs_primary, selected_primary.size, 0
+
+    remaining_target = max(0, int(target_num_observations) - int(obs_primary))
+    selected_secondary, obs_secondary = _select_prefix_whole_sites(
+        ordered_flat_idxs=secondary_idxs,
+        ordered_counts=secondary_counts,
+        target_num_observations=remaining_target,
+        strict_target=False,
+    )
+    selected = np.concatenate([selected_primary, selected_secondary])
+    total_obs = int(obs_primary + obs_secondary)
+    if strict_target and total_obs < target_num_observations:
+        raise RuntimeError(
+            f"Could only collect {total_obs} observations, below target "
+            f"{target_num_observations}."
+        )
+    return selected, total_obs, selected_primary.size, selected_secondary.size
+
 def main():
     args = _parse_args()
     # which sampling should we do
@@ -266,13 +305,31 @@ def main():
     _log("Land cover masks prepared.")
     if sample_at_sites:
         _log("Sampling all variables at sites with shared site selection.")
+        lfmc_df = lfmc_df.copy()
+        lfmc_df["date"] = pd.to_datetime(lfmc_df["date"], errors="coerce")
+        lfmc_df = lfmc_df.dropna(subset=["date", "latitude", "longitude"])
         all_lats = lfmc_df["latitude"]
         all_lons = lfmc_df["longitude"]
         all_lat_lon = pd.DataFrame({"latitude": all_lats, "longitude": all_lons})
         all_lat_lon = all_lat_lon.drop_duplicates().reset_index(drop=True)
+        lfmc_site_ranges = (
+            lfmc_df.groupby(["latitude", "longitude"], as_index=False)
+            .agg(lfmc_start=("date", "min"), lfmc_end=("date", "max"))
+        )
+        all_lat_lon = all_lat_lon.merge(
+            lfmc_site_ranges,
+            on=["latitude", "longitude"],
+            how="left",
+        )
         _log(f"Sites: {len(all_lat_lon)} unique LFMC locations.")
         site_lats = all_lat_lon["latitude"].to_numpy()
         site_lons = all_lat_lon["longitude"].to_numpy()
+        site_lfmc_start = pd.to_datetime(
+            all_lat_lon["lfmc_start"], errors="coerce"
+        ).to_numpy(dtype="datetime64[ns]")
+        site_lfmc_end = pd.to_datetime(
+            all_lat_lon["lfmc_end"], errors="coerce"
+        ).to_numpy(dtype="datetime64[ns]")
         _log("Sites: transforming coordinates to EPSG:5070...")
         site_xs, site_ys = trns.transform(site_lons, site_lats)
         _log("Sites: extracting all variables in one vectorized pull...")
@@ -288,7 +345,9 @@ def main():
             _log("Dask ProgressBar unavailable; computing without progress bar.")
             sites_stack_da = sites_stack_da.compute()
         site_values = sites_stack_da.values
-        site_dates = sites_stack_da.coords["time"].values
+        site_dates = pd.to_datetime(
+            sites_stack_da.coords["time"].values
+        ).to_numpy(dtype="datetime64[ns]")
         # shape: (variable, points)
         site_obs_counts = np.sum(~np.isnan(site_values), axis=0).astype(np.int64)
         _log(f"Sites: obs-count matrix shape={site_obs_counts.shape} (variable, points).")
@@ -297,14 +356,39 @@ def main():
 
         site_vars_iter = tqdm(vars_to_sample, desc="Site vars", unit="var") if tqdm else vars_to_sample
         for var_idx, var in enumerate(site_vars_iter):
-            _log(f"{var}: selecting random LFMC sites to hit target observations...")
+            _log(f"{var}: selecting LFMC sites with overlap priority to hit target observations...")
+            var_valid_mask = ~np.isnan(site_values[:, var_idx, :])
+            var_has_obs = var_valid_mask.any(axis=0)
+            var_sar_start = np.full(site_lats.shape[0], np.datetime64("NaT"), dtype="datetime64[ns]")
+            var_sar_end = np.full(site_lats.shape[0], np.datetime64("NaT"), dtype="datetime64[ns]")
+            if np.any(var_has_obs):
+                first_valid_idx = np.argmax(var_valid_mask, axis=0)
+                last_valid_idx = var_valid_mask.shape[0] - 1 - np.argmax(var_valid_mask[::-1], axis=0)
+                valid_cols = np.where(var_has_obs)[0]
+                var_sar_start[valid_cols] = site_dates[first_valid_idx[valid_cols]]
+                var_sar_end[valid_cols] = site_dates[last_valid_idx[valid_cols]]
+            overlap_mask = (
+                var_has_obs
+                & ~np.isnat(site_lfmc_start)
+                & ~np.isnat(site_lfmc_end)
+                & ~np.isnat(var_sar_start)
+                & ~np.isnat(var_sar_end)
+                & (site_lfmc_start <= var_sar_end)
+                & (site_lfmc_end >= var_sar_start)
+            )
             ordered_counts = site_obs_counts[var_idx, shuffled_site_idxs]
             eligible_mask = ordered_counts > 0
             eligible_site_idxs = shuffled_site_idxs[eligible_mask]
-            eligible_counts = ordered_counts[eligible_mask]
-            selected_site_idxs, selected_obs_total = _select_prefix_whole_sites(
-                ordered_flat_idxs=eligible_site_idxs,
-                ordered_counts=eligible_counts,
+            overlap_site_mask = overlap_mask[eligible_site_idxs]
+            overlap_site_idxs = eligible_site_idxs[overlap_site_mask]
+            non_overlap_site_idxs = eligible_site_idxs[~overlap_site_mask]
+            overlap_counts = site_obs_counts[var_idx, overlap_site_idxs]
+            non_overlap_counts = site_obs_counts[var_idx, non_overlap_site_idxs]
+            selected_site_idxs, selected_obs_total, n_overlap_selected, n_non_overlap_selected = _select_sites_preferring_primary_pool(
+                primary_idxs=overlap_site_idxs,
+                primary_counts=overlap_counts,
+                secondary_idxs=non_overlap_site_idxs,
+                secondary_counts=non_overlap_counts,
                 target_num_observations=target_num_observations,
                 strict_target=strict_target,
             )
@@ -323,8 +407,11 @@ def main():
                 }
             )
             _log(
-                f"{var}: target={target_num_observations}, selected_sites={selected_site_idxs.size}, "
-                f"estimated_obs={selected_obs_total}, written_obs={len(sampled_sar_at_sites)}."
+                f"{var}: target={target_num_observations}, eligible_sites={eligible_site_idxs.size}, "
+                f"overlap_sites={overlap_site_idxs.size}, non_overlap_sites={non_overlap_site_idxs.size}, "
+                f"selected_sites={selected_site_idxs.size}, overlap_selected={n_overlap_selected}, "
+                f"non_overlap_selected={n_non_overlap_selected}, estimated_obs={selected_obs_total}, "
+                f"written_obs={len(sampled_sar_at_sites)}."
             )
             var_fmt = var.lower()
             out_path = _tagged_csv_path(
