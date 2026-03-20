@@ -41,7 +41,12 @@ from compare_timeseries import (
     get_inference_datasets,
     select_ensemble_member_dirs,
 )
-from point_tool_new import build_tensors, run_model_forward
+from point_tool_new import (
+    build_tensors,
+    load_model_for_inference,
+    predict_with_loaded_model,
+    run_model_forward,
+)
 
 
 DEFAULT_ENSEMBLE_OUTPUT_ROOT = os.path.join(
@@ -65,6 +70,9 @@ DEFAULT_MODEL_GRID_PATH = os.path.join(
 )
 OUTPUT_MEAN_NAME = "lfmc_ens_mean"
 OUTPUT_STD_NAME = "lfmc_ens_std"
+OUTPUT_QUALITY_FLAG_NAME = "quality_flag"
+OUTPUT_DOMINANT_LANDCOVER_NAME = "dominant_landcover_code"
+OUTPUT_LANDCOVER_YEAR_NAME = "landcover_year"
 DEFAULT_FALLBACK_NUM_TASKS = 3
 DEFAULT_MODEL_TYPE = "standard"
 DEFAULT_LANDCOVER_MASK_CACHE_DIR = os.path.join(
@@ -81,6 +89,8 @@ ALLOWED_DOMINANT_LANDCOVER = (
     "shrub",
     "grass",
 )
+QUALITY_FLAG_VALUES = {"final": 0, "low_latency": 1}
+LANDCOVER_NODATA_CODE = np.uint8(255)
 
 
 def timestamped_message(message: str) -> str:
@@ -216,14 +226,27 @@ def resolve_common_runtime_window(
     return max(starts), min(ends)
 
 
+def _select_member_subset(member_dirs: Sequence[str], max_members: Optional[int] = None) -> List[str]:
+    if max_members in {None, "", "None"}:
+        return list(member_dirs)
+    max_members = int(max_members)
+    if max_members <= 0:
+        raise ValueError("max_members must be >= 1 when provided")
+    return list(member_dirs[:max_members])
+
+
 def load_ensemble_runtimes(
     ensemble_root: str = DEFAULT_ENSEMBLE_OUTPUT_ROOT,
     input_data_name: str = DEFAULT_INPUT_DATA_NAME,
     inputs_root: str = DEFAULT_INPUTS_ROOT,
     fold: int = 9998,
     fallback_num_tasks: int = DEFAULT_FALLBACK_NUM_TASKS,
+    max_members: Optional[int] = None,
 ) -> Tuple[List[str], List[Dict[str, object]]]:
-    member_dirs = select_ensemble_member_dirs(ensemble_root)
+    member_dirs = _select_member_subset(
+        select_ensemble_member_dirs(ensemble_root),
+        max_members=max_members,
+    )
     runtime_cache: Dict[Tuple[str, str, str], Dict[str, object]] = {}
     runtimes = [
         _load_model_runtime(
@@ -1096,26 +1119,117 @@ def build_reference_tensor_payload(
     )
 
 
+def load_runtime_forward_predictor(
+    runtime: Dict[str, object],
+    model_type: str = DEFAULT_MODEL_TYPE,
+    device: Optional[str] = None,
+) -> Dict[str, object]:
+    model, resolved_device = load_model_for_inference(
+        short_input_dim=len(runtime["var_names"]["short_vars"]),
+        long_input_dim=len(runtime["var_names"]["long_vars"]),
+        static_input_dim=len(runtime["var_names"]["static_vars"]),
+        model_path=runtime["checkpoint_path"],
+        model_task_weights=runtime["model_num_tasks"],
+        model_type=model_type,
+        device=device,
+    )
+    return {
+        "model": model,
+        "device": resolved_device,
+        "norm_params": runtime["norm_params"],
+    }
+
+
+def run_runtime_forward_loaded(
+    predictor: Dict[str, object],
+    tensor_payload: Dict[str, object],
+    batch_size: int = 512,
+    return_info_df: bool = False,
+    use_cuda_autocast: bool = True,
+) -> Dict[str, np.ndarray] | pd.DataFrame:
+    preds = predict_with_loaded_model(
+        tensor_payload["short_tensor"],
+        tensor_payload["long_tensor"],
+        tensor_payload["static_tensor"],
+        model=predictor["model"],
+        device=predictor["device"],
+        norm_params=predictor["norm_params"],
+        batch_size=batch_size,
+        use_cuda_autocast=use_cuda_autocast,
+    )
+    if not return_info_df:
+        return preds
+    out = tensor_payload["info_df"].copy().reset_index(drop=True)
+    out["date"] = pd.to_datetime(out["date"])
+    out["lfmc_pred"] = np.asarray(preds["lfmc_pred"], dtype=np.float32)
+    out["lfmc_pred_std"] = np.asarray(preds["lfmc_pred_std"], dtype=np.float32)
+    out["vv_pred"] = np.asarray(preds["vv_pred"], dtype=np.float32)
+    out["vv_pred_std"] = np.asarray(preds["vv_pred_std"], dtype=np.float32)
+    out["vh_pred"] = np.asarray(preds["vh_pred"], dtype=np.float32)
+    out["vh_pred_std"] = np.asarray(preds["vh_pred_std"], dtype=np.float32)
+    return out
+
+
+def initialize_running_ensemble_predictions(info_df: pd.DataFrame) -> Dict[str, object]:
+    base = info_df[["lat", "lon", "date"]].copy().reset_index(drop=True)
+    base["date"] = pd.to_datetime(base["date"])
+    n = len(base)
+    return {
+        "base": base,
+        "count": 0,
+        "mean": np.zeros(n, dtype=np.float64),
+        "m2": np.zeros(n, dtype=np.float64),
+    }
+
+
+def update_running_ensemble_predictions(
+    accumulator: Dict[str, object],
+    preds: np.ndarray,
+) -> None:
+    preds = np.asarray(preds, dtype=np.float64).reshape(-1)
+    mean = accumulator["mean"]
+    if preds.shape[0] != mean.shape[0]:
+        raise ValueError(
+            f"Prediction length mismatch: expected {mean.shape[0]:,}, got {preds.shape[0]:,}"
+        )
+    accumulator["count"] += 1
+    count = float(accumulator["count"])
+    delta = preds - mean
+    mean += delta / count
+    accumulator["m2"] += delta * (preds - mean)
+
+
+def finalize_running_ensemble_predictions(
+    accumulator: Dict[str, object],
+    mean_col_name: str = OUTPUT_MEAN_NAME,
+    std_col_name: str = OUTPUT_STD_NAME,
+) -> pd.DataFrame:
+    count = int(accumulator["count"])
+    if count <= 0:
+        raise ValueError("Cannot finalize ensemble predictions without member predictions")
+    variance = np.maximum(accumulator["m2"] / float(count), 0.0)
+    out = accumulator["base"].copy()
+    out["ensemble_n"] = count
+    out[mean_col_name] = np.asarray(accumulator["mean"], dtype=np.float32)
+    out[std_col_name] = np.sqrt(variance).astype(np.float32)
+    return out
+
+
 def run_runtime_forward(
     runtime: Dict[str, object],
     tensor_payload: Dict[str, object],
     model_type: str = DEFAULT_MODEL_TYPE,
     batch_size: int = 512,
+    use_cuda_autocast: bool = True,
 ) -> pd.DataFrame:
-    preds_df = run_model_forward(
-        tensor_payload["short_tensor"],
-        tensor_payload["long_tensor"],
-        tensor_payload["static_tensor"],
-        tensor_payload["info_df"].copy(),
-        runtime["checkpoint_path"],
-        runtime["norm_params"],
+    predictor = load_runtime_forward_predictor(runtime, model_type=model_type)
+    return run_runtime_forward_loaded(
+        predictor=predictor,
+        tensor_payload=tensor_payload,
         batch_size=batch_size,
-        model_task_weights=runtime["model_num_tasks"],
-        model_type=model_type,
+        return_info_df=True,
+        use_cuda_autocast=use_cuda_autocast,
     )
-    preds_df = preds_df.copy().reset_index(drop=True)
-    preds_df["date"] = pd.to_datetime(preds_df["date"])
-    return preds_df
 
 
 def aggregate_member_predictions(
@@ -1228,6 +1342,94 @@ def save_tile_shard(
     )
 
 
+def normalize_product_tier(product_tier: str) -> str:
+    tier = str(product_tier).strip().lower()
+    if tier not in QUALITY_FLAG_VALUES:
+        raise ValueError(
+            "product tier must be one of "
+            f"{sorted(QUALITY_FLAG_VALUES.keys())}; got {product_tier!r}"
+        )
+    return tier
+
+
+def _year_coord_to_int(value: object) -> int:
+    if isinstance(value, (np.datetime64, pd.Timestamp)):
+        return int(pd.Timestamp(value).year)
+    return int(value)
+
+
+def _resolve_landcover_source_year(
+    available_years: Sequence[int],
+    output_year: int,
+) -> int:
+    available_years = sorted(int(year) for year in available_years)
+    if output_year in available_years:
+        return int(output_year)
+    prior_years = [year for year in available_years if year <= output_year]
+    if len(prior_years) > 0:
+        return int(prior_years[-1])
+    return int(available_years[0])
+
+
+def build_dominant_landcover_metadata(
+    landcover_path: str,
+    output_years: Sequence[int],
+) -> Dict[str, object]:
+    landcover_ds = xr.open_zarr(landcover_path)
+    if "year" not in landcover_ds.coords:
+        raise ValueError(f"Landcover store is missing 'year' coordinate: {landcover_path}")
+    landcover_var_names = [
+        var_name
+        for var_name in landcover_ds.data_vars
+        if {"year", "y", "x"}.issubset(set(landcover_ds[var_name].dims))
+    ]
+    if len(landcover_var_names) == 0:
+        raise ValueError(f"No yearly landcover variables found in {landcover_path}")
+    available_year_lookup = {
+        _year_coord_to_int(coord_value): coord_value
+        for coord_value in landcover_ds["year"].values
+    }
+    available_years = sorted(available_year_lookup.keys())
+    requested_output_years = sorted({int(year) for year in output_years})
+    y_size = int(landcover_ds.sizes["y"])
+    x_size = int(landcover_ds.sizes["x"])
+    dominant_codes = np.full(
+        (len(requested_output_years), y_size, x_size),
+        LANDCOVER_NODATA_CODE,
+        dtype=np.uint8,
+    )
+    output_year_to_source_year: Dict[str, int] = {}
+    code_to_name = {str(code): var_name for code, var_name in enumerate(landcover_var_names)}
+    for year_idx, output_year in enumerate(requested_output_years):
+        source_year = _resolve_landcover_source_year(available_years, output_year)
+        output_year_to_source_year[str(output_year)] = int(source_year)
+        if source_year != output_year:
+            print(
+                f"[map_runtime_utils] landcover year {output_year} not available; "
+                f"using source year {source_year}"
+            )
+        best_fraction = np.full((y_size, x_size), -np.inf, dtype=np.float32)
+        best_code = np.full((y_size, x_size), LANDCOVER_NODATA_CODE, dtype=np.uint8)
+        year_coord_value = available_year_lookup[source_year]
+        for code, var_name in enumerate(landcover_var_names):
+            frac_vals = np.asarray(
+                landcover_ds[var_name].sel(year=year_coord_value).values,
+                dtype=np.float32,
+            )
+            valid = np.isfinite(frac_vals)
+            better = valid & (frac_vals > best_fraction)
+            best_fraction[better] = frac_vals[better]
+            best_code[better] = np.uint8(code)
+        dominant_codes[year_idx] = best_code
+    return {
+        "output_years": np.asarray(requested_output_years, dtype=np.int32),
+        "dominant_landcover_code": dominant_codes,
+        "code_to_name": code_to_name,
+        "output_year_to_source_year": output_year_to_source_year,
+        "landcover_var_names": list(landcover_var_names),
+    }
+
+
 def initialize_output_store(
     out_path: str,
     model_grid: xr.Dataset,
@@ -1235,9 +1437,12 @@ def initialize_output_store(
     time_chunk: int,
     y_chunk: int,
     x_chunk: int,
+    landcover_metadata: Optional[Dict[str, object]] = None,
+    product_tier: str = "final",
 ) -> None:
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     root = zarr.open_group(out_path, mode="w")
+    product_tier = normalize_product_tier(product_tier)
     y_size = int(model_grid.sizes["y"])
     x_size = int(model_grid.sizes["x"])
     root.create_dataset(
@@ -1276,6 +1481,29 @@ def initialize_output_store(
     root["time"].attrs["dimension_names"] = ["time"]
     root["time"].attrs["units"] = "nanoseconds since 1970-01-01 00:00:00"
     root["time"].attrs["calendar"] = "proleptic_gregorian"
+    quality_vals = np.full(
+        len(time_index),
+        np.uint8(QUALITY_FLAG_VALUES[product_tier]),
+        dtype=np.uint8,
+    )
+    root.create_dataset(
+        OUTPUT_QUALITY_FLAG_NAME,
+        data=quality_vals,
+        shape=quality_vals.shape,
+        chunks=(time_chunk,),
+        dtype="u1",
+        fill_value=int(LANDCOVER_NODATA_CODE),
+        dimension_names=("time",),
+        overwrite=True,
+    )
+    root[OUTPUT_QUALITY_FLAG_NAME].attrs["_ARRAY_DIMENSIONS"] = ["time"]
+    root[OUTPUT_QUALITY_FLAG_NAME].attrs["dimension_names"] = ["time"]
+    root[OUTPUT_QUALITY_FLAG_NAME].attrs["flag_values"] = [
+        int(QUALITY_FLAG_VALUES["final"]),
+        int(QUALITY_FLAG_VALUES["low_latency"]),
+    ]
+    root[OUTPUT_QUALITY_FLAG_NAME].attrs["flag_meanings"] = "final low_latency"
+    root[OUTPUT_QUALITY_FLAG_NAME].attrs["product_tier"] = product_tier
     for coord_name in ["y", "x"]:
         vals = np.asarray(model_grid[coord_name].values)
         root.create_dataset(
@@ -1304,6 +1532,60 @@ def initialize_output_store(
         )
         root[coord_name].attrs["_ARRAY_DIMENSIONS"] = ["y", "x"]
         root[coord_name].attrs["dimension_names"] = ["y", "x"]
+    if landcover_metadata is not None:
+        landcover_years = np.asarray(landcover_metadata["output_years"], dtype=np.int32)
+        dominant_codes = np.asarray(
+            landcover_metadata["dominant_landcover_code"],
+            dtype=np.uint8,
+        )
+        root.create_dataset(
+            OUTPUT_LANDCOVER_YEAR_NAME,
+            data=landcover_years,
+            shape=landcover_years.shape,
+            chunks=(max(1, min(len(landcover_years), 32)),),
+            dtype="i4",
+            dimension_names=(OUTPUT_LANDCOVER_YEAR_NAME,),
+            overwrite=True,
+        )
+        root[OUTPUT_LANDCOVER_YEAR_NAME].attrs["_ARRAY_DIMENSIONS"] = [
+            OUTPUT_LANDCOVER_YEAR_NAME
+        ]
+        root[OUTPUT_LANDCOVER_YEAR_NAME].attrs["dimension_names"] = [
+            OUTPUT_LANDCOVER_YEAR_NAME
+        ]
+        root.create_dataset(
+            OUTPUT_DOMINANT_LANDCOVER_NAME,
+            data=dominant_codes,
+            shape=dominant_codes.shape,
+            chunks=(1, y_chunk, x_chunk),
+            dtype="u1",
+            fill_value=int(LANDCOVER_NODATA_CODE),
+            dimension_names=(OUTPUT_LANDCOVER_YEAR_NAME, "y", "x"),
+            overwrite=True,
+        )
+        root[OUTPUT_DOMINANT_LANDCOVER_NAME].attrs["_ARRAY_DIMENSIONS"] = [
+            OUTPUT_LANDCOVER_YEAR_NAME,
+            "y",
+            "x",
+        ]
+        root[OUTPUT_DOMINANT_LANDCOVER_NAME].attrs["dimension_names"] = [
+            OUTPUT_LANDCOVER_YEAR_NAME,
+            "y",
+            "x",
+        ]
+        root[OUTPUT_DOMINANT_LANDCOVER_NAME].attrs["code_to_name"] = dict(
+            landcover_metadata["code_to_name"]
+        )
+        root[OUTPUT_DOMINANT_LANDCOVER_NAME].attrs["nodata_code"] = int(
+            LANDCOVER_NODATA_CODE
+        )
+        root[OUTPUT_DOMINANT_LANDCOVER_NAME].attrs["output_year_to_source_year"] = dict(
+            landcover_metadata["output_year_to_source_year"]
+        )
+    root.attrs["product_tier"] = product_tier
+    root.attrs["quality_flag_values"] = {
+        name: int(value) for name, value in QUALITY_FLAG_VALUES.items()
+    }
 
 
 def merge_shard_into_store(
@@ -1336,8 +1618,12 @@ def select_measurement_rich_month(
     end_date: pd.Timestamp,
     fold: Optional[int] = None,
     split: str = "test",
+    max_members: Optional[int] = None,
 ) -> Tuple[pd.Timestamp, pd.Timestamp, Dict[str, object]]:
-    member_dirs = select_ensemble_member_dirs(ensemble_root)
+    member_dirs = _select_member_subset(
+        select_ensemble_member_dirs(ensemble_root),
+        max_members=max_members,
+    )
     member_site_errors = []
     for member_idx, member_dir in enumerate(member_dirs, start=1):
         member_site_errors.append(

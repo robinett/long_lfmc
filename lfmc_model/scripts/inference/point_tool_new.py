@@ -435,32 +435,15 @@ def build_tensors(
     static_tensor = torch.tensor(static_input)
     return [short_tensor, long_tensor, static_tensor, info_df]
 
-def run_model_forward(
-    short_tensor,
-    long_tensor,
-    static_tensor,
-    info_df,
+def _build_inference_model(
+    short_input_dim,
+    long_input_dim,
+    static_input_dim,
     model_path,
-    norm_params,
-    batch_size=512,
     model_num_queries=2,
     model_task_weights=2,
-    model_type = 'standard'
+    model_type='standard',
 ):
-    dataset = TensorDataset(
-        short_tensor,
-        long_tensor,
-        static_tensor
-    )
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False
-    )
-    # get the model and restore the saved weights
-    short_input_dim = short_tensor.shape[-1]
-    long_input_dim = long_tensor.shape[-1]
-    static_input_dim = static_tensor.shape[-1]
     model_params = parse_model_path(model_path)
     with warnings.catch_warnings():
         warnings.filterwarnings(
@@ -473,55 +456,92 @@ def run_model_forward(
         )
         if model_type == 'standard':
             model = LFMCTransformer(
-                short_input_dim = short_input_dim,
-                long_input_dim = long_input_dim,
-                static_input_dim = static_input_dim,
-                d_model = model_params['d_model'],
-                nhead = model_params['nhead'],
-                num_layers = model_params['num_layers'],
-                dim_feedforward = model_params['dim_feedforward'],
-                dropout = model_params['dropout'],
-                num_queries = model_num_queries,
-                long_d_model = model_params['long_d_model'],
-                long_nhead = model_params['long_nhead'],
-                long_num_layers = model_params['long_num_layers'],
-                long_dim_feedforward = model_params['long_dim_feedforward'],
-                long_out_dim = model_params['long_out_dim'],
-                num_task_weights = model_task_weights
+                short_input_dim=short_input_dim,
+                long_input_dim=long_input_dim,
+                static_input_dim=static_input_dim,
+                d_model=model_params['d_model'],
+                nhead=model_params['nhead'],
+                num_layers=model_params['num_layers'],
+                dim_feedforward=model_params['dim_feedforward'],
+                dropout=model_params['dropout'],
+                num_queries=model_num_queries,
+                long_d_model=model_params['long_d_model'],
+                long_nhead=model_params['long_nhead'],
+                long_num_layers=model_params['long_num_layers'],
+                long_dim_feedforward=model_params['long_dim_feedforward'],
+                long_out_dim=model_params['long_out_dim'],
+                num_task_weights=model_task_weights,
             )
         elif model_type == 'uncertainty':
             model = LFMCTransformerUncertainty(
-                short_input_dim = short_input_dim,
-                long_input_dim = long_input_dim,
-                static_input_dim = static_input_dim,
-                d_model = model_params['d_model'],
-                nhead = model_params['nhead'],
-                num_layers = model_params['num_layers'],
-                dim_feedforward = model_params['dim_feedforward'],
-                dropout = model_params['dropout'],
-                num_queries = model_num_queries,
-                long_d_model = model_params['long_d_model'],
-                long_nhead = model_params['long_nhead'],
-                long_num_layers = model_params['long_num_layers'],
-                long_dim_feedforward = model_params['long_dim_feedforward'],
-                long_out_dim = model_params['long_out_dim'],
-                num_task_weights = model_task_weights
+                short_input_dim=short_input_dim,
+                long_input_dim=long_input_dim,
+                static_input_dim=static_input_dim,
+                d_model=model_params['d_model'],
+                nhead=model_params['nhead'],
+                num_layers=model_params['num_layers'],
+                dim_feedforward=model_params['dim_feedforward'],
+                dropout=model_params['dropout'],
+                num_queries=model_num_queries,
+                long_d_model=model_params['long_d_model'],
+                long_nhead=model_params['long_nhead'],
+                long_num_layers=model_params['long_num_layers'],
+                long_dim_feedforward=model_params['long_dim_feedforward'],
+                long_out_dim=model_params['long_out_dim'],
+                num_task_weights=model_task_weights,
             )
         else:
-            raise notImplementedError(
-                f"Model choice '{model_choice}' is not implemented"
+            raise NotImplementedError(
+                f"Model type '{model_type}' is not implemented"
             )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    #model.load_state_dict(torch.load(model_path, map_location=device))
-    ckpt = torch.load(model_path, map_location=device)
-    missing, unexpected = model.load_state_dict(
-        ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt,
-        strict=False
+    return model
+
+
+def load_model_for_inference(
+    short_input_dim,
+    long_input_dim,
+    static_input_dim,
+    model_path,
+    model_num_queries=2,
+    model_task_weights=2,
+    model_type='standard',
+    device=None,
+):
+    model = _build_inference_model(
+        short_input_dim=short_input_dim,
+        long_input_dim=long_input_dim,
+        static_input_dim=static_input_dim,
+        model_path=model_path,
+        model_num_queries=model_num_queries,
+        model_task_weights=model_task_weights,
+        model_type=model_type,
     )
-    #sys.exit()
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(device)
+    model.to(device)
+    ckpt = torch.load(model_path, map_location=device)
+    model.load_state_dict(
+        ckpt["model_state_dict"] if "model_state_dict" in ckpt else ckpt,
+        strict=False,
+    )
     model.eval()
-    # run the model
+    return model, device
+
+
+def predict_with_loaded_model(
+    short_tensor,
+    long_tensor,
+    static_tensor,
+    model,
+    device,
+    norm_params,
+    batch_size=512,
+    use_cuda_autocast=True,
+):
+    dataset = TensorDataset(short_tensor, long_tensor, static_tensor)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     n_obs = short_tensor.shape[0]
     preds_i = np.zeros(n_obs, dtype=np.float64)
     preds_vv = np.full(n_obs, np.nan, dtype=np.float64)
@@ -530,48 +550,37 @@ def run_model_forward(
     preds_vv_std = np.full(n_obs, np.nan, dtype=np.float64)
     preds_vh_std = np.full(n_obs, np.nan, dtype=np.float64)
     batch_counter = 0
-    with torch.no_grad():
+    use_cuda_autocast = bool(use_cuda_autocast) and device.type == "cuda"
+    autocast_dtype = torch.float16
+    with torch.inference_mode():
         for Xsh_b, Xl_b, Xst_b in dataloader:
             Xsh_b = Xsh_b.to(device=device, dtype=torch.float32)
             Xl_b = Xl_b.to(device=device, dtype=torch.float32)
             Xst_b = Xst_b.to(device=device, dtype=torch.float32)
-            output = model(Xsh_b, Xl_b, Xst_b)
-            preds_i_b = np.asarray(
-                output['mu_insitu'].detach().cpu().numpy()
-            ).reshape(-1)
-            preds_vv_b = np.asarray(
-                output['mu_vv'].detach().cpu().numpy()
-            ).reshape(-1)
-            preds_vh_b = np.asarray(
-                output['mu_vh'].detach().cpu().numpy()
-            ).reshape(-1)
+            with torch.autocast(
+                device_type=device.type,
+                dtype=autocast_dtype,
+                enabled=use_cuda_autocast,
+            ):
+                output = model(Xsh_b, Xl_b, Xst_b)
+            preds_i_b = np.asarray(output['mu_insitu'].detach().cpu().numpy()).reshape(-1)
+            preds_vv_b = np.asarray(output['mu_vv'].detach().cpu().numpy()).reshape(-1)
+            preds_vh_b = np.asarray(output['mu_vh'].detach().cpu().numpy()).reshape(-1)
             if 'log_var_insitu' in output:
                 preds_i_std_b = np.sqrt(
-                    np.exp(
-                        np.asarray(
-                            output['log_var_insitu'].detach().cpu().numpy()
-                        ).reshape(-1)
-                    )
+                    np.exp(np.asarray(output['log_var_insitu'].detach().cpu().numpy()).reshape(-1))
                 )
             else:
                 preds_i_std_b = np.full_like(preds_i_b, np.nan)
             if 'log_var_vv' in output:
                 preds_vv_std_b = np.sqrt(
-                    np.exp(
-                        np.asarray(
-                            output['log_var_vv'].detach().cpu().numpy()
-                        ).reshape(-1)
-                    )
+                    np.exp(np.asarray(output['log_var_vv'].detach().cpu().numpy()).reshape(-1))
                 )
             else:
                 preds_vv_std_b = np.full_like(preds_vv_b, np.nan)
             if 'log_var_vh' in output:
                 preds_vh_std_b = np.sqrt(
-                    np.exp(
-                        np.asarray(
-                            output['log_var_vh'].detach().cpu().numpy()
-                        ).reshape(-1)
-                    )
+                    np.exp(np.asarray(output['log_var_vh'].detach().cpu().numpy()).reshape(-1))
                 )
             else:
                 preds_vh_std_b = np.full_like(preds_vh_b, np.nan)
@@ -608,13 +617,60 @@ def run_model_forward(
     else:
         preds_vh[:] = np.nan
         preds_vh_std[:] = np.nan
-    info_df['lfmc_pred'] = preds_i
-    info_df['lfmc_pred_std'] = preds_i_std
-    info_df['vv_pred'] = preds_vv
-    info_df['vv_pred_std'] = preds_vv_std
-    info_df['vh_pred'] = preds_vh
-    info_df['vh_pred_std'] = preds_vh_std
+    return {
+        'lfmc_pred': preds_i,
+        'lfmc_pred_std': preds_i_std,
+        'vv_pred': preds_vv,
+        'vv_pred_std': preds_vv_std,
+        'vh_pred': preds_vh,
+        'vh_pred_std': preds_vh_std,
+    }
+
+
+def _attach_predictions_to_info_df(info_df, preds):
+    info_df = info_df.copy()
+    info_df['lfmc_pred'] = preds['lfmc_pred']
+    info_df['lfmc_pred_std'] = preds['lfmc_pred_std']
+    info_df['vv_pred'] = preds['vv_pred']
+    info_df['vv_pred_std'] = preds['vv_pred_std']
+    info_df['vh_pred'] = preds['vh_pred']
+    info_df['vh_pred_std'] = preds['vh_pred_std']
     return info_df
+
+
+def run_model_forward(
+    short_tensor,
+    long_tensor,
+    static_tensor,
+    info_df,
+    model_path,
+    norm_params,
+    batch_size=512,
+    model_num_queries=2,
+    model_task_weights=2,
+    model_type='standard',
+    use_cuda_autocast=True,
+):
+    model, device = load_model_for_inference(
+        short_input_dim=short_tensor.shape[-1],
+        long_input_dim=long_tensor.shape[-1],
+        static_input_dim=static_tensor.shape[-1],
+        model_path=model_path,
+        model_num_queries=model_num_queries,
+        model_task_weights=model_task_weights,
+        model_type=model_type,
+    )
+    preds = predict_with_loaded_model(
+        short_tensor=short_tensor,
+        long_tensor=long_tensor,
+        static_tensor=static_tensor,
+        model=model,
+        device=device,
+        norm_params=norm_params,
+        batch_size=batch_size,
+        use_cuda_autocast=use_cuda_autocast,
+    )
+    return _attach_predictions_to_info_df(info_df, preds)
 
 
 

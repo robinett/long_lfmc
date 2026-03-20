@@ -77,12 +77,17 @@ use_gpu_forward="${USE_GPU_FORWARD:-$(cfg_value submission use_gpu_forward false
 gpu_fine_tasks_per_job="${GPU_FINE_TASKS_PER_JOB:-$(cfg_value submission gpu_fine_tasks_per_job 1)}"
 gpu_max_jobs="${GPU_MAX_JOBS:-$(cfg_value submission gpu_max_jobs 8)}"
 gpu_lock_dir="${GPU_LOCK_DIR:-$(cfg_value submission gpu_lock_dir /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/gpu_locks)}"
-gpu_submit_sleep_seconds="${GPU_SUBMIT_SLEEP_SECONDS:-$(cfg_value submission gpu_submit_sleep_seconds 30)}"
+gpu_submit_sleep_seconds="${GPU_SUBMIT_SLEEP_SECONDS:-$(cfg_value submission gpu_submit_sleep_seconds 60)}"
 gpu_time_limit="${GPU_TIME_LIMIT:-$(cfg_value submission gpu_time_limit 02:00:00)}"
 gpu_cpus_per_task="${GPU_CPUS_PER_TASK:-$(cfg_value submission gpu_cpus_per_task 4)}"
 gpu_mem="${GPU_MEM:-$(cfg_value submission gpu_mem 32G)}"
+gpu_constraint="${GPU_CONSTRAINT:-$(cfg_value submission gpu_constraint '')}"
 merge_blocks_per_job="${MERGE_BLOCKS_PER_JOB:-$(cfg_value submission merge_blocks_per_job 1)}"
 model_type="${MODEL_TYPE:-$(cfg_value ensemble model_type standard)}"
+
+start_from_gpu=false
+existing_run_dir=
+cleanup_prepared_tensors_after_gpu=false
 
 manifest_args=(
     --config_path "${CONFIG_PATH}"
@@ -125,27 +130,45 @@ if [[ -n "${max_tiles}" ]]; then
     manifest_args+=(--max_tiles "${max_tiles}")
 fi
 
-echo "Submitting manifest build job..."
-manifest_job_id="$(
-    sbatch         --parsable         --export=ALL,CONFIG_PATH="${CONFIG_PATH}"         "${script_dir}/build_map_manifest_ensemble.sbatch"         "${manifest_args[@]}"
-)"
-echo "Submitted manifest build job ${manifest_job_id}"
-
-while true; do
-    manifest_job_state="$(job_state "${manifest_job_id}")"
-    if job_failed "${manifest_job_state}"; then
-        echo "Manifest build job ${manifest_job_id} failed with state ${manifest_job_state}" >&2
+if [[ "${start_from_gpu}" == "true" ]]; then
+    latest_run_dir="${existing_run_dir}"
+    manifest_path="${latest_run_dir}/manifest.csv"
+    run_name="$(basename "${latest_run_dir}")"
+    echo "GPU-only restart mode active; reusing run directory ${latest_run_dir}"
+    if [[ ! -d "${latest_run_dir}" ]]; then
+        echo "Existing run directory does not exist: ${latest_run_dir}" >&2
         exit 1
     fi
-    if [[ "${manifest_job_state}" == "COMPLETED" ]]; then
-        break
+    if [[ ! -f "${manifest_path}" ]]; then
+        echo "Existing manifest not found: ${manifest_path}" >&2
+        exit 1
     fi
-    echo "Manifest build monitor: job=${manifest_job_id} state=${manifest_job_state}; sleeping ${gpu_submit_sleep_seconds}s"
-    sleep "${gpu_submit_sleep_seconds}"
-done
+    if [[ ! -f "${latest_run_dir}/run_config.json" ]]; then
+        echo "Existing run_config.json not found in ${latest_run_dir}" >&2
+        exit 1
+    fi
+else
+    echo "Submitting manifest build job..."
+    manifest_job_id="$({
+        sbatch --parsable --export=ALL,CONFIG_PATH="${CONFIG_PATH}" "${script_dir}/build_map_manifest_ensemble.sbatch" "${manifest_args[@]}"
+    })"
+    echo "Submitted manifest build job ${manifest_job_id}"
 
-echo "Manifest build job ${manifest_job_id} completed"
-latest_run_dir="$(python3 - <<'PYRUN'
+    while true; do
+        manifest_job_state="$(job_state "${manifest_job_id}")"
+        if job_failed "${manifest_job_state}"; then
+            echo "Manifest build job ${manifest_job_id} failed with state ${manifest_job_state}" >&2
+            exit 1
+        fi
+        if [[ "${manifest_job_state}" == "COMPLETED" ]]; then
+            break
+        fi
+        echo "Manifest build monitor: job=${manifest_job_id} state=${manifest_job_state}; sleeping ${gpu_submit_sleep_seconds}s"
+        sleep "${gpu_submit_sleep_seconds}"
+    done
+
+    echo "Manifest build job ${manifest_job_id} completed"
+    latest_run_dir="$(python3 - <<'PYRUN'
 import os
 from map_config import load_map_config, get_cfg
 from map_runtime_utils import latest_run_dir
@@ -153,9 +176,10 @@ cfg = load_map_config(os.environ["CONFIG_PATH"])
 run_root = os.environ.get("RUN_ROOT") or get_cfg(cfg, "paths", "run_root")
 print(latest_run_dir(run_root))
 PYRUN
-)"
-manifest_path="${latest_run_dir}/manifest.csv"
-run_name="$(basename "${latest_run_dir}")"
+    )"
+    manifest_path="${latest_run_dir}/manifest.csv"
+    run_name="$(basename "${latest_run_dir}")"
+fi
 mkdir -p "${gpu_lock_dir}"
 
 lock_count() {
@@ -195,6 +219,15 @@ print(int(df["merge_task_id"].max()) + 1)
 PYCOUNT
 )"
 
+prepared_tensor_count="$(find "${latest_run_dir}/prepared_tensors" -maxdepth 1 -type f | wc -l)"
+if [[ "${start_from_gpu}" == "true" ]]; then
+    if [[ "${prepared_tensor_count}" -ne "${num_fine_tasks}" ]]; then
+        echo "GPU-only restart requested, but prepared tensor count ${prepared_tensor_count} does not match manifest tasks ${num_fine_tasks}" >&2
+        exit 1
+    fi
+    echo "Validated GPU-only restart inputs: prepared_tensors=${prepared_tensor_count}, manifest_tasks=${num_fine_tasks}"
+fi
+
 echo "Submitting ${num_job_tasks} array jobs covering ${num_fine_tasks} fine tasks from manifest ${manifest_path}"
 echo "tasks_per_job=${tasks_per_job}"
 echo "use_gpu_forward=${use_gpu_forward}; gpu_fine_tasks_per_job=${gpu_fine_tasks_per_job}; num_gpu_job_tasks=${num_gpu_job_tasks}"
@@ -202,17 +235,24 @@ echo "merge_blocks_per_job=${merge_blocks_per_job}; num_merge_tasks=${num_merge_
 
 after_gpu_dependency=""
 if [[ "${use_gpu_forward}" == "true" ]]; then
-    prepare_job_id="$(
-        sbatch \
-            --parsable \
-            --array="0-$(( num_job_tasks - 1 ))%${array_concurrency}" \
-            --export=ALL,MANIFEST_PATH="${manifest_path}" \
-            "${script_dir}/prepare_maps_ensemble.sbatch"
-    )"
-    echo "Submitted CPU prepare array job ${prepare_job_id}"
-    echo "Monitoring prepare tasks and submitting GPU jobs under shared lock budget ${gpu_max_jobs} from ${gpu_lock_dir}"
+    declare -a gpu_prepare_task_ids
+    declare -a gpu_job_ids
+    declare -a gpu_submitted_flags
 
-    mapfile -t gpu_dependency_lines < <(python3 - <<PYMAP
+    if [[ "${start_from_gpu}" == "true" ]]; then
+        echo "GPU-only restart mode: skipping CPU prepare array and starting directly from prepared tensors in ${latest_run_dir}"
+        for (( gpu_task_id=0; gpu_task_id<num_gpu_job_tasks; gpu_task_id++ )); do
+            gpu_prepare_task_ids[${gpu_task_id}]="PREBUILT"
+            gpu_submitted_flags[${gpu_task_id}]=0
+        done
+    else
+        prepare_job_id="$({
+            sbatch --parsable --array="0-$(( num_job_tasks - 1 ))%${array_concurrency}" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/prepare_maps_ensemble.sbatch"
+        })"
+        echo "Submitted CPU prepare array job ${prepare_job_id}"
+        echo "Monitoring prepare tasks and submitting GPU jobs under shared lock budget ${gpu_max_jobs} from ${gpu_lock_dir}"
+
+        mapfile -t gpu_dependency_lines < <(python3 - <<PYMAP
 import pandas as pd
 
 df = pd.read_csv("${manifest_path}")
@@ -226,17 +266,14 @@ for gpu_job_task_id, job_task_ids in grouped:
     csv_ids = ",".join(str(int(v)) for v in job_task_ids.astype(int).tolist())
     print(f"{int(gpu_job_task_id)}|{csv_ids}")
 PYMAP
-    )
+        )
 
-    declare -a gpu_prepare_task_ids
-    declare -a gpu_job_ids
-    declare -a gpu_submitted_flags
-
-    for line in "${gpu_dependency_lines[@]}"; do
-        IFS='|' read -r gpu_task_id prepare_task_csv <<< "${line}"
-        gpu_prepare_task_ids[${gpu_task_id}]="${prepare_task_csv}"
-        gpu_submitted_flags[${gpu_task_id}]=0
-    done
+        for line in "${gpu_dependency_lines[@]}"; do
+            IFS='|' read -r gpu_task_id prepare_task_csv <<< "${line}"
+            gpu_prepare_task_ids[${gpu_task_id}]="${prepare_task_csv}"
+            gpu_submitted_flags[${gpu_task_id}]=0
+        done
+    fi
 
     submitted_gpu_jobs=0
     while [[ "${submitted_gpu_jobs}" -lt "${num_gpu_job_tasks}" ]]; do
@@ -256,18 +293,20 @@ PYMAP
             fi
 
             prereqs_ready=1
-            IFS=',' read -r -a prepare_task_ids <<< "${prepare_task_csv}"
-            for prepare_task_id in "${prepare_task_ids[@]}"; do
-                prepare_task_state="$(job_state "${prepare_job_id}_${prepare_task_id}")"
-                if job_failed "${prepare_task_state}"; then
-                    echo "Prepare array task ${prepare_job_id}_${prepare_task_id} failed with state ${prepare_task_state}; aborting GPU submission monitor." >&2
-                    exit 1
-                fi
-                if [[ "${prepare_task_state}" != "COMPLETED" ]]; then
-                    prereqs_ready=0
-                    break
-                fi
-            done
+            if [[ "${start_from_gpu}" != "true" ]]; then
+                IFS=',' read -r -a prepare_task_ids <<< "${prepare_task_csv}"
+                for prepare_task_id in "${prepare_task_ids[@]}"; do
+                    prepare_task_state="$(job_state "${prepare_job_id}_${prepare_task_id}")"
+                    if job_failed "${prepare_task_state}"; then
+                        echo "Prepare array task ${prepare_job_id}_${prepare_task_id} failed with state ${prepare_task_state}; aborting GPU submission monitor." >&2
+                        exit 1
+                    fi
+                    if [[ "${prepare_task_state}" != "COMPLETED" ]]; then
+                        prereqs_ready=0
+                        break
+                    fi
+                done
+            fi
 
             if [[ "${prereqs_ready}" != "1" ]]; then
                 blocked_by_prepare=$(( blocked_by_prepare + 1 ))
@@ -282,16 +321,21 @@ PYMAP
 
             lock_file="${gpu_lock_dir}/lock_${run_name}_gpu_${gpu_task_id}.lock"
             touch "${lock_file}"
-            if ! gpu_job_id="$(
+            sbatch_gpu_constraint_args=()
+            if [[ -n "${gpu_constraint}" ]]; then
+                sbatch_gpu_constraint_args+=(--constraint="${gpu_constraint}")
+            fi
+            if ! gpu_job_id="$({
                 sbatch \
                     --parsable \
                     --time="${gpu_time_limit}" \
                     --cpus-per-task="${gpu_cpus_per_task}" \
                     --mem="${gpu_mem}" \
+                    "${sbatch_gpu_constraint_args[@]}" \
                     --job-name="map_gpu_${gpu_task_id}" \
                     --export=ALL,MANIFEST_PATH="${manifest_path}",MODEL_TYPE="${model_type}",GPU_TASK_ID="${gpu_task_id}",LOCK_FILE="${lock_file}" \
                     "${script_dir}/run_maps_gpu_ensemble.sbatch"
-            )"; then
+            })"; then
                 rm -f "${lock_file}"
                 echo "Failed to submit GPU job for gpu_job_task_id=${gpu_task_id}" >&2
                 exit 1
@@ -306,11 +350,7 @@ PYMAP
 
         if [[ "${submitted_gpu_jobs}" -lt "${num_gpu_job_tasks}" ]]; then
             echo "GPU submission monitor: submitted=${submitted_gpu_jobs}/${num_gpu_job_tasks}; blocked_by_prepare=${blocked_by_prepare}; blocked_by_lock=${blocked_by_lock}; active_locks=$(lock_count)/${gpu_max_jobs}; sleeping ${gpu_submit_sleep_seconds}s"
-            if [[ "${progress_made}" == "1" ]]; then
-                sleep 5
-            else
-                sleep "${gpu_submit_sleep_seconds}"
-            fi
+            sleep "${gpu_submit_sleep_seconds}"
         fi
     done
 
@@ -348,22 +388,18 @@ PYMAP
         sleep "${gpu_submit_sleep_seconds}"
     done
 
-    cleanup_job_id="$(
-        sbatch \
-            --parsable \
-            --job-name="cleanup_prepared_tensors" \
-            --export=ALL,MANIFEST_PATH="${manifest_path}" \
-            "${script_dir}/cleanup_prepared_tensors.sbatch"
-    )"
-    echo "Submitted prepared-tensor cleanup job ${cleanup_job_id}"
+    if [[ "${cleanup_prepared_tensors_after_gpu}" == "true" ]]; then
+        cleanup_job_id="$({
+            sbatch --parsable --job-name="cleanup_prepared_tensors" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/cleanup_prepared_tensors.sbatch"
+        })"
+        echo "Submitted prepared-tensor cleanup job ${cleanup_job_id}"
+    else
+        echo "Skipping prepared-tensor cleanup after GPU stage."
+    fi
 else
-    array_job_id="$(
-        sbatch \
-            --parsable \
-            --array="0-$(( num_job_tasks - 1 ))%${array_concurrency}" \
-            --export=ALL,MANIFEST_PATH="${manifest_path}",MODEL_TYPE="${model_type}" \
-            "${script_dir}/create_maps_ensemble.sbatch"
-    )"
+    array_job_id="$({
+        sbatch --parsable --array="0-$(( num_job_tasks - 1 ))%${array_concurrency}" --export=ALL,MANIFEST_PATH="${manifest_path}",MODEL_TYPE="${model_type}" "${script_dir}/create_maps_ensemble.sbatch"
+    })"
     echo "Submitted worker array job ${array_job_id}"
     after_gpu_dependency="${array_job_id}"
 fi
@@ -381,21 +417,12 @@ merge_init_args+=(
 merge_init_job_id="$(sbatch "${merge_init_args[@]}")"
 echo "Submitted merge initialization job ${merge_init_job_id}"
 
-merge_array_job_id="$(
-    sbatch \
-        --parsable \
-        --dependency=afterok:${merge_init_job_id} \
-        --array="0-$(( num_merge_tasks - 1 ))%${array_concurrency}" \
-        --export=ALL,MANIFEST_PATH="${manifest_path}" \
-        "${script_dir}/merge_maps_ensemble.sbatch"
-)"
+merge_array_job_id="$({
+    sbatch --parsable --dependency=afterok:${merge_init_job_id} --array="0-$(( num_merge_tasks - 1 ))%${array_concurrency}" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/merge_maps_ensemble.sbatch"
+})"
 echo "Submitted merge array job ${merge_array_job_id}"
 
-validate_job_id="$(
-    sbatch \
-        --parsable \
-        --dependency=afterok:${merge_array_job_id} \
-        --export=ALL,MANIFEST_PATH="${manifest_path}" \
-        "${script_dir}/validate_maps_ensemble.sbatch"
-)"
+validate_job_id="$({
+    sbatch --parsable --dependency=afterok:${merge_array_job_id} --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/validate_maps_ensemble.sbatch"
+})"
 echo "Submitted validation job ${validate_job_id}"

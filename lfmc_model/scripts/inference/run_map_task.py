@@ -44,7 +44,15 @@ def _format_seconds(seconds):
     return f"{sec:d}s"
 
 
-def process_task_row(task_row, runtimes, dss, model_type, forward_batch_size, progress_label):
+def process_task_row(
+    task_row,
+    runtimes,
+    dss,
+    model_type,
+    forward_batch_size,
+    use_cuda_autocast,
+    progress_label,
+):
     task_t0 = time.perf_counter()
     print(timestamped_message(
         f"[run_map_task] {progress_label} fine_task_id={int(task_row['task_id'])}, tile={task_row['tile_name']}, "
@@ -103,6 +111,7 @@ def process_task_row(task_row, runtimes, dss, model_type, forward_batch_size, pr
             tensor_payload=tensor_payload,
             model_type=model_type,
             batch_size=forward_batch_size,
+            use_cuda_autocast=use_cuda_autocast,
         )
         member_dfs.append(preds_df)
     agg_df = aggregate_member_predictions(member_dfs)
@@ -154,9 +163,10 @@ def main():
         raise ValueError(
             f"Run config member count {len(run_config['member_dirs'])} does not match "
             f"resolved member count {len(member_dirs)}"
-        )
+    )
     model_type = args.model_type if args.model_type is not None else run_config.get("model_type", DEFAULT_MODEL_TYPE)
     forward_batch_size = int(run_config.get("forward_batch_size", 512))
+    use_cuda_autocast = bool(run_config.get("use_cuda_autocast", True))
     dss = get_inference_datasets()
     job_t0 = time.perf_counter()
     total_fine_tasks = len(manifest_df)
@@ -194,6 +204,7 @@ def main():
             dss=dss,
             model_type=model_type,
             forward_batch_size=forward_batch_size,
+            use_cuda_autocast=use_cuda_autocast,
             progress_label=progress_label,
         )
         completed_elapsed.append(task_elapsed)

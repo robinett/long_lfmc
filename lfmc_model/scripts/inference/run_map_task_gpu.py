@@ -9,16 +9,19 @@ import pandas as pd
 
 from map_runtime_utils import (
     DEFAULT_MODEL_TYPE,
-    aggregate_member_predictions,
     build_static_superset_runtime,
     convert_tensor_payload_to_runtime,
     densify_tile_predictions,
+    finalize_running_ensemble_predictions,
+    initialize_running_ensemble_predictions,
     load_ensemble_runtimes,
     load_prepared_tensor_payload,
+    load_runtime_forward_predictor,
     load_tile_payload,
-    run_runtime_forward,
+    run_runtime_forward_loaded,
     save_tile_shard,
     timestamped_message,
+    update_running_ensemble_predictions,
 )
 
 
@@ -78,6 +81,7 @@ def main():
         inputs_root=run_config.get("inputs_root"),
         fold=int(run_config.get("fold", 9998)),
         fallback_num_tasks=int(run_config.get("fallback_num_tasks", 3)),
+        max_members=run_config.get("max_ensemble_members"),
     )
     if len(member_dirs) != len(run_config["member_dirs"]):
         raise ValueError(
@@ -90,89 +94,153 @@ def main():
         else run_config.get("model_type", DEFAULT_MODEL_TYPE)
     )
     forward_batch_size = int(run_config.get("forward_batch_size", 512))
+    use_cuda_autocast = bool(run_config.get("use_cuda_autocast", True))
     prepared_dir = run_config["prepared_dir"]
     reference_runtime = build_static_superset_runtime(runtimes[0], runtimes)
-
-    job_t0 = time.perf_counter()
     total_fine_tasks = len(manifest_df)
-    completed_elapsed = []
     task_rows = task_rows.reset_index(drop=False).rename(columns={"index": "overall_zero_idx"})
+
+    print(timestamped_message(
+        f"[run_map_task_gpu] selected {len(runtimes)} ensemble members for GPU job {task_id}"
+    ))
+
+    preload_t0 = time.perf_counter()
+    task_states = []
     for row_idx in range(len(task_rows)):
         task_row = task_rows.iloc[row_idx]
         fine_task_id = int(task_row["task_id"])
         overall_rank = int(task_row["overall_zero_idx"]) + 1
-        elapsed_so_far = time.perf_counter() - job_t0
-        mean_task_elapsed = (
-            sum(completed_elapsed) / len(completed_elapsed)
-            if len(completed_elapsed) > 0
-            else None
-        )
-        remaining_in_job = len(task_rows) - row_idx
-        eta_job = (
-            mean_task_elapsed * remaining_in_job
-            if mean_task_elapsed is not None
-            else None
-        )
         progress_label = (
             f"gpu job {task_id} fine {row_idx + 1}/{len(task_rows)} overall {overall_rank}/{total_fine_tasks}"
         )
         print(timestamped_message(
-            f"[run_map_task_gpu] {progress_label}; elapsed={_format_seconds(elapsed_so_far)}"
-            + (
-                f"; est_job_remaining={_format_seconds(eta_job)}"
-                if eta_job is not None
-                else ""
-            )
-        ))
-        task_t0 = time.perf_counter()
-        print(timestamped_message(
-            f"[run_map_task_gpu] {progress_label} "
+            f"[run_map_task_gpu] preloading {progress_label} "
             f"task_id={fine_task_id} tile={task_row['tile_name']} "
             f"window={task_row['start_date']} to {task_row['end_date']}"
         ))
         tile_payload = load_tile_payload(task_row["tile_meta_path"])
         reference_path = _prepared_paths(prepared_dir, fine_task_id)
         reference_payload = load_prepared_tensor_payload(reference_path)
-        renorm_cache = {}
-        member_dfs = []
-        for member_idx, runtime in enumerate(runtimes, start=1):
+        task_states.append({
+            "task_row": task_row,
+            "fine_task_id": fine_task_id,
+            "progress_label": progress_label,
+            "site_key": f"tile_{task_row['tile_name']}_{task_row['start_date']}",
+            "tile_payload": tile_payload,
+            "reference_payload": reference_payload,
+            "aggregator": initialize_running_ensemble_predictions(reference_payload["info_df"]),
+            "started_at": None,
+        })
+    print(timestamped_message(
+        f"[run_map_task_gpu] preloaded {len(task_states)} fine tasks in "
+        f"{_format_seconds(time.perf_counter() - preload_t0)}"
+    ))
+
+    predictor_t0 = time.perf_counter()
+    predictor_states = []
+    for member_idx, runtime in enumerate(runtimes, start=1):
+        print(timestamped_message(
+            f"[run_map_task_gpu] loading member model {member_idx}/{len(runtimes)} "
+            f"({os.path.basename(member_dirs[member_idx - 1])})"
+        ))
+        predictor_states.append({
+            "member_idx": member_idx,
+            "runtime": runtime,
+            "predictor": load_runtime_forward_predictor(runtime, model_type=model_type),
+        })
+    print(timestamped_message(
+        f"[run_map_task_gpu] loaded {len(predictor_states)} predictors in "
+        f"{_format_seconds(time.perf_counter() - predictor_t0)}"
+    ))
+
+    job_t0 = time.perf_counter()
+    completed_member_elapsed = []
+    for member_pos, predictor_state in enumerate(predictor_states, start=1):
+        member_idx = predictor_state["member_idx"]
+        runtime = predictor_state["runtime"]
+        mean_member_elapsed = (
+            sum(completed_member_elapsed) / len(completed_member_elapsed)
+            if completed_member_elapsed
+            else None
+        )
+        remaining_members = len(predictor_states) - member_pos + 1
+        eta_job = (
+            mean_member_elapsed * remaining_members
+            if mean_member_elapsed is not None
+            else None
+        )
+        print(timestamped_message(
+            f"[run_map_task_gpu] member sweep {member_pos}/{len(predictor_states)} "
+            f"member_idx={member_idx}; elapsed={_format_seconds(time.perf_counter() - job_t0)}"
+            + (
+                f"; est_job_remaining={_format_seconds(eta_job)}"
+                if eta_job is not None
+                else ""
+            )
+        ))
+        member_t0 = time.perf_counter()
+        for task_state in task_states:
+            task_row = task_state["task_row"]
+            if task_state["started_at"] is None:
+                task_state["started_at"] = time.perf_counter()
+            print(timestamped_message(
+                f"[run_map_task_gpu] member {member_pos}/{len(predictor_states)} "
+                f"processing {task_state['progress_label']}"
+            ))
             try:
                 tensor_payload = convert_tensor_payload_to_runtime(
-                    reference_payload,
+                    task_state["reference_payload"],
                     reference_runtime,
                     runtime,
-                    renorm_cache,
-                    site=f"tile_{task_row['tile_name']}_{task_row['start_date']}",
+                    {},
+                    site=task_state["site_key"],
                 )
             except ValueError:
-                member_path = _prepared_paths(prepared_dir, fine_task_id, member_idx=member_idx)
+                member_path = _prepared_paths(
+                    prepared_dir,
+                    task_state["fine_task_id"],
+                    member_idx=member_idx,
+                )
                 print(timestamped_message(
                     f"[run_map_task_gpu] member {member_idx}/{len(runtimes)} "
                     f"loading member-specific tensors {member_path} because short/long "
                     "feature layout differs"
                 ))
                 tensor_payload = load_prepared_tensor_payload(member_path)
-            preds_df = run_runtime_forward(
-                runtime=runtime,
+            pred_arrays = run_runtime_forward_loaded(
+                predictor=predictor_state["predictor"],
                 tensor_payload=tensor_payload,
-                model_type=model_type,
                 batch_size=forward_batch_size,
+                return_info_df=False,
+                use_cuda_autocast=use_cuda_autocast,
             )
-            member_dfs.append(preds_df)
-        agg_df = aggregate_member_predictions(member_dfs)
-        dense_payload = densify_tile_predictions(agg_df, tile_payload)
-        save_tile_shard(
-            shard_path=task_row["shard_path"],
-            dense_payload=dense_payload,
-            tile_payload=tile_payload,
-            task_row=task_row,
-        )
-        task_elapsed = time.perf_counter() - task_t0
-        completed_elapsed.append(task_elapsed)
+            update_running_ensemble_predictions(
+                task_state["aggregator"],
+                pred_arrays["lfmc_pred"],
+            )
+            if member_pos == len(predictor_states):
+                agg_df = finalize_running_ensemble_predictions(task_state["aggregator"])
+                dense_payload = densify_tile_predictions(agg_df, task_state["tile_payload"])
+                save_tile_shard(
+                    shard_path=task_row["shard_path"],
+                    dense_payload=dense_payload,
+                    tile_payload=task_state["tile_payload"],
+                    task_row=task_row,
+                )
+                task_elapsed = time.perf_counter() - task_state["started_at"]
+                print(timestamped_message(
+                    f"[run_map_task_gpu] {task_state['progress_label']} wrote shard {task_row['shard_path']} "
+                    f"in {_format_seconds(task_elapsed)} using {len(predictor_states)} members"
+                ))
+                task_state["reference_payload"] = None
+                task_state["aggregator"] = None
+        member_elapsed = time.perf_counter() - member_t0
+        completed_member_elapsed.append(member_elapsed)
         print(timestamped_message(
-            f"[run_map_task_gpu] {progress_label} wrote shard {task_row['shard_path']} "
-            f"in {_format_seconds(task_elapsed)}"
+            f"[run_map_task_gpu] member sweep {member_pos}/{len(predictor_states)} complete in "
+            f"{_format_seconds(member_elapsed)}"
         ))
+
     total_elapsed = time.perf_counter() - job_t0
     print(timestamped_message(
         f"[run_map_task_gpu] gpu_job_task_id={task_id} complete in {_format_seconds(total_elapsed)}"

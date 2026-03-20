@@ -11,8 +11,11 @@ from tqdm import tqdm
 
 from map_runtime_utils import (
     DEFAULT_MODEL_GRID_PATH,
+    OUTPUT_DOMINANT_LANDCOVER_NAME,
     OUTPUT_MEAN_NAME,
+    OUTPUT_QUALITY_FLAG_NAME,
     OUTPUT_STD_NAME,
+    build_dominant_landcover_metadata,
     initialize_output_store,
     merge_shard_into_store,
     open_model_grid,
@@ -67,6 +70,18 @@ def _initialize_store(
     )
     model_grid = open_model_grid(resolved_grid_path)
     time_index = _build_time_index(run_config)
+    landcover_metadata = None
+    landcover_path = run_config.get("landcover_path")
+    landcover_output_years = run_config.get("landcover_output_years", [])
+    if landcover_path and len(landcover_output_years) > 0:
+        print(
+            f"[merge_map_shards] Building dominant landcover metadata from {landcover_path} "
+            f"for years {landcover_output_years}"
+        )
+        landcover_metadata = build_dominant_landcover_metadata(
+            landcover_path=landcover_path,
+            output_years=landcover_output_years,
+        )
     print(
         f"[merge_map_shards] Initializing store {out_zarr_path} with "
         f"{len(time_index):,} daily steps"
@@ -78,6 +93,8 @@ def _initialize_store(
         time_chunk=int(run_config["time_chunk_days"]),
         y_chunk=int(run_config["y_chunk"]),
         x_chunk=int(run_config["x_chunk"]),
+        landcover_metadata=landcover_metadata,
+        product_tier=str(run_config.get("product_tier", "final")),
     )
     return time_index
 
@@ -173,9 +190,18 @@ def main():
         "mode": "merge_task" if args.merge_task_id is not None else "full_merge",
         "merge_task_id": args.merge_task_id,
         "n_shards": int(len(manifest_df)),
-        "vars": [OUTPUT_MEAN_NAME, OUTPUT_STD_NAME],
+        "vars": run_config.get(
+            "output_var_names",
+            [
+                OUTPUT_MEAN_NAME,
+                OUTPUT_STD_NAME,
+                OUTPUT_QUALITY_FLAG_NAME,
+                OUTPUT_DOMINANT_LANDCOVER_NAME,
+            ],
+        ),
         "safe_start_date": run_config["safe_start_date"],
         "safe_end_date": run_config["safe_end_date"],
+        "product_tier": run_config.get("product_tier", "final"),
         "block_indices": sorted(manifest_df["block_idx"].astype(int).unique().tolist()),
     }
     if args.merge_task_id is None:

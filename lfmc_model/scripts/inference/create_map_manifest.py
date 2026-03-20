@@ -9,13 +9,21 @@ from datetime import date, datetime as dt_datetime
 import numpy as np
 import pandas as pd
 
+from input_source_resolver import (
+    json_safe_source_resolution,
+    open_inference_datasets_from_resolution,
+    resolve_inference_sources,
+)
 from map_config import config_or_override, default_map_config_path, load_map_config
 from map_runtime_utils import (
     ALLOWED_DOMINANT_LANDCOVER,
     DEFAULT_SCRATCH_ROOT,
     CLIMATE_NC_PATH,
+    OUTPUT_DOMINANT_LANDCOVER_NAME,
     OUTPUT_MEAN_NAME,
+    OUTPUT_QUALITY_FLAG_NAME,
     OUTPUT_STD_NAME,
+    QUALITY_FLAG_VALUES,
     STATIC_NC_PATH,
     build_tile_payloads,
     filter_site_records_to_valid_tiles,
@@ -63,6 +71,7 @@ def get_args():
     parser.add_argument("--input_data_name", type=str, default=None)
     parser.add_argument("--inputs_root", type=str, default=None)
     parser.add_argument("--run_root", type=str, default=None)
+    parser.add_argument("--source_registry_path", type=str, default=None)
     parser.add_argument("--grid_path", type=str, default=None)
     parser.add_argument("--requested_start_date", type=str, default=None)
     parser.add_argument("--requested_end_date", type=str, default=None)
@@ -90,7 +99,23 @@ def main():
         config_or_override(None, cfg, "ensemble", "fallback_num_tasks", default=3)
     )
     model_type = str(config_or_override(None, cfg, "ensemble", "model_type", default="standard"))
+    max_ensemble_members = config_or_override(None, cfg, "ensemble", "max_members", default=None)
+    if max_ensemble_members in {"", "None"}:
+        max_ensemble_members = None
+    if max_ensemble_members is not None:
+        max_ensemble_members = int(max_ensemble_members)
+        if max_ensemble_members <= 0:
+            raise ValueError("ensemble.max_members must be >= 1 when provided")
     run_root = config_or_override(args.run_root, cfg, "paths", "run_root")
+    source_registry_path = config_or_override(
+        args.source_registry_path,
+        cfg,
+        "sources",
+        "registry_path",
+        default=None,
+    )
+    if source_registry_path in {"", "None"}:
+        source_registry_path = None
     grid_path = config_or_override(args.grid_path, cfg, "data", "grid_path")
     requested_start_raw = config_or_override(
         args.requested_start_date,
@@ -141,11 +166,22 @@ def main():
         max_tiles = int(max_tiles)
         if max_tiles <= 0:
             raise ValueError("submission.max_tiles must be >= 1 when provided")
+    product_tier = str(
+        config_or_override(None, cfg, "product", "tier", default="final")
+    ).strip().lower()
+    if product_tier not in QUALITY_FLAG_VALUES:
+        raise ValueError(
+            "product.tier must be one of "
+            f"{sorted(QUALITY_FLAG_VALUES.keys())}; got {product_tier!r}"
+        )
     forward_batch_size = int(
         config_or_override(None, cfg, "submission", "forward_batch_size", default=512)
     )
     if forward_batch_size <= 0:
         raise ValueError("submission.forward_batch_size must be >= 1")
+    use_cuda_autocast = bool(
+        config_or_override(None, cfg, "submission", "use_cuda_autocast", default=True)
+    )
     tasks_per_job = int(
         config_or_override(None, cfg, "submission", "tasks_per_job", default=1)
     )
@@ -180,8 +216,11 @@ def main():
         inputs_root=inputs_root,
         fold=fold,
         fallback_num_tasks=fallback_num_tasks,
+        max_members=max_ensemble_members,
     )
     print(f"[create_map_manifest] ensemble members={len(member_dirs)}")
+    if max_ensemble_members is not None:
+        print(f"[create_map_manifest] member cap active: first {max_ensemble_members} members")
     if len(runtimes) == 0:
         raise ValueError("No runtimes were resolved for manifest creation")
     for idx, runtime in enumerate(runtimes[:3], start=1):
@@ -192,7 +231,25 @@ def main():
             f"source_lags={runtime_temporal_source_lags(runtime)}"
         )
 
-    dss = get_inference_datasets()
+    source_resolution = None
+    if source_registry_path is not None:
+        source_resolution = resolve_inference_sources(
+            registry_path=source_registry_path,
+            product_tier=product_tier,
+            requested_start_date=requested_start,
+            requested_end_date=requested_end,
+            output_years=None,
+        )
+        print(
+            f"[create_map_manifest] source registry={source_registry_path}; "
+            f"tier={source_resolution['tier']}; daymet_mode={source_resolution['daymet_mode']}"
+        )
+        print(
+            f"[create_map_manifest] resolved daymet paths={source_resolution['daymet_paths']}"
+        )
+        dss = open_inference_datasets_from_resolution(source_resolution)
+    else:
+        dss = get_inference_datasets()
     safe_start, safe_end = resolve_common_runtime_window(
         dss,
         runtimes,
@@ -222,6 +279,18 @@ def main():
 
     blocks = month_blocks(safe_start, safe_end, months_per_block=months_per_block)
     block_years = sorted({block_start.year for block_start, _ in blocks})
+    if source_registry_path is not None:
+        source_resolution = resolve_inference_sources(
+            registry_path=source_registry_path,
+            product_tier=product_tier,
+            requested_start_date=safe_start,
+            requested_end_date=safe_end,
+            output_years=block_years,
+        )
+        print(
+            f"[create_map_manifest] resolved NLCD source years="
+            f"{source_resolution['nlcd_output_year_to_source_year']}"
+        )
     print(
         f"[create_map_manifest] block years={block_years} "
         f"allowed_landcover={list(ALLOWED_DOMINANT_LANDCOVER)}"
@@ -265,6 +334,7 @@ def main():
             safe_end,
             fold=fold,
             split=validation_prediction_split,
+            max_members=max_ensemble_members,
         )
         month_start, month_end = validation_month_window_with_previous(
             best_month_start=best_month_start,
@@ -505,9 +575,12 @@ def main():
         "manifest_path": manifest_path,
         "config_path": cfg["_config_path"],
         "config": _json_safe_obj(cfg),
+        "source_registry_path": source_registry_path,
+        "source_resolution": json_safe_source_resolution(source_resolution),
         "ensemble_root": ensemble_root,
         "input_data_name": input_data_name,
         "member_dirs": member_dirs,
+        "max_ensemble_members": max_ensemble_members,
         "inputs_root": inputs_root,
         "fold": fold,
         "fallback_num_tasks": fallback_num_tasks,
@@ -515,6 +588,7 @@ def main():
         "tasks_per_job": tasks_per_job,
         "num_job_tasks": job_task_n,
         "forward_batch_size": forward_batch_size,
+        "use_cuda_autocast": use_cuda_autocast,
         "use_gpu_forward": use_gpu_forward,
         "gpu_fine_tasks_per_job": gpu_fine_tasks_per_job,
         "num_gpu_job_tasks": gpu_job_task_n,
@@ -530,10 +604,37 @@ def main():
         "y_chunk": y_chunk,
         "x_chunk": x_chunk,
         "grid_path": grid_path,
-        "modis_path": dss["modis"].encoding.get("source", DEFAULT_SCRATCH_ROOT),
-        "daymet_path": dss["daymet"].encoding.get("source", DEFAULT_SCRATCH_ROOT),
-        "static_path": STATIC_NC_PATH,
-        "climate_path": CLIMATE_NC_PATH,
+        "modis_path": (
+            source_resolution["modis_path"]
+            if source_resolution is not None
+            else dss["modis"].encoding.get("source", DEFAULT_SCRATCH_ROOT)
+        ),
+        "daymet_path": (
+            source_resolution["daymet_paths"][0]
+            if source_resolution is not None
+            else dss["daymet"].encoding.get("source", DEFAULT_SCRATCH_ROOT)
+        ),
+        "daymet_paths": (
+            list(source_resolution["daymet_paths"])
+            if source_resolution is not None
+            else [dss["daymet"].encoding.get("source", DEFAULT_SCRATCH_ROOT)]
+        ),
+        "landcover_path": (
+            source_resolution["landcover_path"]
+            if source_resolution is not None
+            else dss["landcover_frac"].encoding.get("source", DEFAULT_SCRATCH_ROOT)
+        ),
+        "landcover_output_years": [int(year) for year in active_years],
+        "static_path": (
+            source_resolution["static_path"]
+            if source_resolution is not None
+            else STATIC_NC_PATH
+        ),
+        "climate_path": (
+            source_resolution["climate_path"]
+            if source_resolution is not None
+            else CLIMATE_NC_PATH
+        ),
         "allowed_climate_codes": allowed_climate_codes,
         "excluded_climate_codes": excluded_climate_codes,
         "tile_metadata_dir": tile_meta_dir,
@@ -543,7 +644,14 @@ def main():
         "validation_dir": validation_dir,
         "plots_dir": plots_dir,
         "out_zarr_path": out_zarr_path,
-        "output_var_names": [OUTPUT_MEAN_NAME, OUTPUT_STD_NAME],
+        "product_tier": product_tier,
+        "quality_flag_value": int(QUALITY_FLAG_VALUES[product_tier]),
+        "output_var_names": [
+            OUTPUT_MEAN_NAME,
+            OUTPUT_STD_NAME,
+            OUTPUT_QUALITY_FLAG_NAME,
+            OUTPUT_DOMINANT_LANDCOVER_NAME,
+        ],
         "validation_test": validation_test,
         "validation_prediction_split": validation_prediction_split,
         "validation_month": validation_month,

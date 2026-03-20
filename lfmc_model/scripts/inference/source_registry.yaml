@@ -1,0 +1,71 @@
+storage:
+  scratch_root: /scratch/users/trobinet/long_lfmc/final_lfmc
+  oak_root: /oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets
+
+sources:
+  modis:
+    path: /scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_regrid_interpolated/modis_interp_5d.zarr
+  daymet:
+    archive_path: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_all_vars.zarr
+    monthly_latency_path: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_monthly_latency_all_vars.zarr
+  climate_low_latency:
+    path: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_low_latency/prism_snodas_low_latency_all_vars.zarr
+  nlcd:
+    raw_path: /scratch/users/trobinet/long_lfmc/final_lfmc/nlcd/nlcd_2000_2024.zarr
+    annual_path: /scratch/users/trobinet/long_lfmc/final_lfmc/nlcd/nlcd_target_grid_2000_2024.zarr
+  static:
+    path: /scratch/users/trobinet/long_lfmc/final_lfmc/static/static_features_500m_epsg5070_float32.nc
+  climate_zone:
+    path: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_zones/climate_zone_per_pixel_fullgrid.nc4
+  production:
+    zarr_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/production/lfmc_maps_production.zarr
+    metadata_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/production/metadata
+
+processing:
+  modis:
+    raw_root: /scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_earthaccess
+    regrid_root: /scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_regrid
+    staging_root: /scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_regrid_interpolated/staging
+    plots_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/modis/plots/monthly_updates
+    interpolation_max_days: 15
+    interpolation_buffer_days: 15
+    interpolation_xy_chunk_size: 128
+    interpolation_time_chunk_size: 1
+    quality_flag: 0
+  daymet:
+    monthly_latency_earthaccess_root: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_monthly_latency_earthaccess
+    monthly_latency_daily_root: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_monthly_latency_daily
+    monthly_latency_regrid_root: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_monthly_latency_regrid
+    monthly_latency_plots_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/plots/monthly_latency
+    regrid_chunk_buffer: 200
+    regrid_chunk_size: 2000
+  prism:
+    raw_root: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_low_latency/prism_raw
+    extracted_root: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_low_latency/prism_extracted
+    target_daily_root: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_low_latency/prism_target_daily
+    plots_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_low_latency/plots/prism
+    release_latency_days: 7
+    vars:
+      - ppt
+      - tmax
+      - tdmean
+      - soltotal
+  snodas:
+    raw_root: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_low_latency/snodas_raw
+    target_daily_root: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_low_latency/snodas_target_daily
+    plots_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_low_latency/plots/snodas
+    swe_product_token: "11034"
+  climate_low_latency:
+    regrid_root: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_low_latency/regridded_daily
+    zarr_path: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_low_latency/prism_snodas_low_latency_all_vars.zarr
+    append_coord_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_low_latency/append_coord
+
+tiers:
+  final:
+    daymet_mode: archive_only
+    nlcd_mode: same_year_required
+    quality_flag: 0
+  low_latency:
+    daymet_mode: archive_then_low_latency_climate
+    nlcd_mode: latest_available_year
+    quality_flag: 1
