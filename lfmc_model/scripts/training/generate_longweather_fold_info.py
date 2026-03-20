@@ -38,21 +38,27 @@ def main():
         static_data,
         var_names["static_vars"],
     )
-    all_sites = _dedupe_sites_in_order(info[["latitude", "longitude"]].to_numpy())
+    source_np = source.detach().cpu().numpy().reshape(-1) if hasattr(source, 'detach') else source.reshape(-1)
+    lfmc_mask = source_np == 0
+    lfmc_info = info.loc[lfmc_mask].reset_index(drop=True)
+    lfmc_stratifier = stratifier[lfmc_mask]
+    lfmc_climate_zone_codes = climate_zone_codes[lfmc_mask]
+    lfmc_source = source_np[lfmc_mask]
+    all_sites = _dedupe_sites_in_order(lfmc_info[["latitude", "longitude"]].to_numpy())
     site_climate_lookup = _build_site_lookup(
-        climate_zone_codes,
-        info,
+        lfmc_climate_zone_codes,
+        lfmc_info,
         column_name="climate_zone_code",
     )
     site_stratifier_lookup = _build_site_lookup(
-        stratifier,
-        info,
+        lfmc_stratifier,
+        lfmc_info,
         column_name="stratifier",
     )
 
-    num_insitu_obs = int((source == 0).sum().item())
-    num_vv_obs = int((source == 1).sum().item())
-    num_vh_obs = int((source == 2).sum().item())
+    num_insitu_obs = int((lfmc_source == 0).sum())
+    num_vv_obs = 0
+    num_vh_obs = 0
     print(
         f"Generating canonical folds from {args.input_data_dir} with "
         f"split_seed={args.split_seed}, n_folds={args.n_folds}"
@@ -70,15 +76,16 @@ def main():
     for fold in range(args.n_folds):
         print(f"Generating fold {fold + 1}/{args.n_folds}")
         this_locs = create_site_split(
-            info,
-            source,
+            lfmc_info,
+            lfmc_source,
             desired_insitu_sample_size=int(desired_insitu_obs_per_fold),
-            desired_vv_sample_size=int(desired_vv_obs_per_fold),
-            desired_vh_sample_size=int(desired_vh_obs_per_fold),
+            desired_vv_sample_size=0,
+            desired_vh_sample_size=0,
             seed=int(args.split_seed),
             used_sites=used_sites,
-            stratifier=stratifier,
-            climate_zone_codes=climate_zone_codes,
+            stratifier=lfmc_stratifier,
+            climate_zone_codes=lfmc_climate_zone_codes,
+            enforce_climate_train_support=True,
         )
         used_sites.extend(this_locs)
         fold_locs[fold + 1] = this_locs
@@ -87,6 +94,7 @@ def main():
         all_sites=all_sites,
         site_climate_lookup=site_climate_lookup,
         site_stratifier_lookup=site_stratifier_lookup,
+        enforce_climate_train_support=True,
     )
 
     remove_last = False

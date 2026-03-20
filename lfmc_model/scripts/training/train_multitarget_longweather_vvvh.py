@@ -716,6 +716,16 @@ def _round_site_tuple(site, round_decimals: int = 10):
     )
 
 
+def _normalize_site_columns(lat_values, lon_values, round_decimals: int = 10):
+    rounded = [
+        _round_site_tuple(site, round_decimals=round_decimals)
+        for site in zip(lat_values, lon_values)
+    ]
+    lat_rounded = [site[0] for site in rounded]
+    lon_rounded = [site[1] for site in rounded]
+    return lat_rounded, lon_rounded
+
+
 def _dedupe_sites_in_order(sites, round_decimals: int = 10):
     ordered = []
     seen = set()
@@ -768,16 +778,40 @@ def _build_site_lookup(values, data_info, round_decimals: int = 10, column_name:
         raise ValueError(
             f"{column_name} length mismatch: {len(values)} vs data_info rows {data_info.shape[0]}"
         )
+    lat_values = pd.to_numeric(data_info["latitude"], errors="coerce")
+    lon_values = pd.to_numeric(data_info["longitude"], errors="coerce")
     site_df = pd.DataFrame(
         {
-            "lat": pd.to_numeric(data_info["latitude"], errors="coerce").round(round_decimals),
-            "lon": pd.to_numeric(data_info["longitude"], errors="coerce").round(round_decimals),
+            "lat": lat_values,
+            "lon": lon_values,
             column_name: np.asarray(values),
         }
     ).dropna(subset=["lat", "lon"])
+    site_df["lat"], site_df["lon"] = _normalize_site_columns(
+        site_df["lat"].to_numpy(),
+        site_df["lon"].to_numpy(),
+        round_decimals=round_decimals,
+    )
     nunique = site_df.groupby(["lat", "lon"])[column_name].nunique()
     bad = nunique[nunique > 1]
     if not bad.empty:
+        if column_name == "stratifier":
+            multi_site_n = int(bad.shape[0])
+            print(
+                f"WARNING: {multi_site_n:,} site(s) have multiple stratifier values; "
+                "collapsing each site to its most common stratifier across observations"
+            )
+            site_lookup = (
+                site_df.groupby(["lat", "lon", column_name], as_index=False)
+                .size()
+                .sort_values(["lat", "lon", "size", column_name], ascending=[True, True, False, True])
+                .drop_duplicates(subset=["lat", "lon"], keep="first")
+                .drop(columns=["size"])
+            )
+            return {
+                _round_site_tuple((row["lat"], row["lon"]), round_decimals=round_decimals): row[column_name]
+                for _, row in site_lookup.iterrows()
+            }
         example = bad.index[0]
         raise ValueError(
             f"Site {example} has multiple {column_name} values; cannot build site lookup cleanly"
@@ -847,13 +881,18 @@ def _assign_remaining_sites_to_test_folds(
     site_climate_lookup,
     site_stratifier_lookup,
     round_decimals: int = 10,
+    enforce_climate_train_support: bool = True,
 ):
     fold_locs = {
         int(fold): _dedupe_sites_in_order(locs, round_decimals=round_decimals)
         for fold, locs in fold_locs.items()
     }
     all_sites = _dedupe_sites_in_order(all_sites, round_decimals=round_decimals)
-    total_sites_by_climate_zone = _site_counts_by_climate_zone(site_climate_lookup)
+    total_sites_by_climate_zone = (
+        _site_counts_by_climate_zone(site_climate_lookup)
+        if enforce_climate_train_support and site_climate_lookup is not None
+        else None
+    )
     fold_zone_counts = {
         int(fold): {} for fold in fold_locs
     }
@@ -870,28 +909,45 @@ def _assign_remaining_sites_to_test_folds(
             fold_strat_counts[fold][stratifier_code] = fold_strat_counts[fold].get(stratifier_code, 0) + 1
 
     unassigned_sites = [site for site in all_sites if site not in assigned_sites]
-    unassigned_sites = sorted(
-        unassigned_sites,
-        key=lambda site: (
-            total_sites_by_climate_zone[int(site_climate_lookup[site])],
-            int(site_stratifier_lookup[site]),
-            float(site[0]),
-            float(site[1]),
-        ),
-    )
+    if enforce_climate_train_support and site_climate_lookup is not None:
+        unassigned_sites = sorted(
+            unassigned_sites,
+            key=lambda site: (
+                total_sites_by_climate_zone[int(site_climate_lookup[site])],
+                int(site_stratifier_lookup[site]),
+                float(site[0]),
+                float(site[1]),
+            ),
+        )
+    else:
+        unassigned_sites = sorted(
+            unassigned_sites,
+            key=lambda site: (
+                int(site_stratifier_lookup[site]),
+                float(site[0]),
+                float(site[1]),
+            ),
+        )
     for site in unassigned_sites:
-        climate_code = int(site_climate_lookup[site])
-        feasible_folds = [
-            fold
-            for fold in sorted(fold_locs)
-            if fold_zone_counts[fold].get(climate_code, 0) + 1
-            <= total_sites_by_climate_zone[climate_code] - 1
-        ]
-        if not feasible_folds:
-            raise ValueError(
-                f"Could not place unassigned site {site} into any test fold without "
-                f"eliminating climate zone {climate_code} from train"
-            )
+        climate_code = (
+            int(site_climate_lookup[site])
+            if site_climate_lookup is not None
+            else None
+        )
+        if enforce_climate_train_support and climate_code is not None:
+            feasible_folds = [
+                fold
+                for fold in sorted(fold_locs)
+                if fold_zone_counts[fold].get(climate_code, 0) + 1
+                <= total_sites_by_climate_zone[climate_code] - 1
+            ]
+            if not feasible_folds:
+                raise ValueError(
+                    f"Could not place unassigned site {site} into any test fold without "
+                    f"eliminating climate zone {climate_code} from train"
+                )
+        else:
+            feasible_folds = sorted(fold_locs)
         stratifier_code = int(site_stratifier_lookup[site])
         best_fold = min(
             feasible_folds,
@@ -917,12 +973,14 @@ def _validate_sites_assigned_exactly_once(fold_locs, all_sites, round_decimals: 
         for site in _dedupe_sites_in_order(locs, round_decimals=round_decimals):
             site_counts[site] = site_counts.get(site, 0) + 1
     all_sites = _dedupe_sites_in_order(all_sites, round_decimals=round_decimals)
+    all_site_set = set(all_sites)
     missing = [site for site in all_sites if site_counts.get(site, 0) == 0]
     repeated = [(site, count) for site, count in site_counts.items() if count != 1]
-    if missing or repeated:
+    extras = [site for site in site_counts if site not in all_site_set]
+    if missing or repeated or extras:
         raise ValueError(
             "Each site must appear in test exactly once. "
-            f"Missing={len(missing)}, repeated={len(repeated)}"
+            f"Missing={len(missing)}, repeated={len(repeated)}, extras={len(extras)}"
         )
 
 class EarlyStopping:
@@ -975,6 +1033,7 @@ def create_site_split(
     round_decimals: int = 10,
     stratifier = None,
     climate_zone_codes = None,
+    enforce_climate_train_support: bool = True,
 ):
     source_np = np.asarray(source).reshape(-1)
     if source_np.shape[0] != data_info.shape[0]:
@@ -983,7 +1042,7 @@ def create_site_split(
         )
     site_climate_lookup = None
     total_sites_by_climate_zone = None
-    if climate_zone_codes is not None:
+    if climate_zone_codes is not None and enforce_climate_train_support:
         site_climate_lookup = _build_site_lookup(
             climate_zone_codes,
             data_info,
@@ -1011,9 +1070,11 @@ def create_site_split(
         out['lat'] = pd.to_numeric(out['lat'], errors='coerce')
         out['lon'] = pd.to_numeric(out['lon'], errors='coerce')
         out = out.dropna(subset=['lat', 'lon'])
-        # optional: snap to grid to avoid tiny fp diffs
-        out['lat'] = out['lat'].round(round_decimals)
-        out['lon'] = out['lon'].round(round_decimals)
+        out['lat'], out['lon'] = _normalize_site_columns(
+            out['lat'].to_numpy(),
+            out['lon'].to_numpy(),
+            round_decimals=round_decimals,
+        )
         if climate_zone_codes is not None:
             out["climate_zone_code"] = np.asarray(climate_zone_codes)[out["row_idx"].to_numpy(dtype=int)]
         return out
@@ -1067,7 +1128,7 @@ def create_site_split(
         insitu_counts['stratifier'] = insitu_lcs
         vv_counts['stratifier'] = vv_lcs
         vh_counts['stratifier'] = vh_lcs
-    if climate_zone_codes is not None:
+    if climate_zone_codes is not None and site_climate_lookup is not None:
         insitu_counts["climate_zone_code"] = [
             int(site_climate_lookup[_round_site_tuple((row["lat"], row["lon"]), round_decimals=round_decimals)])
             for _, row in insitu_counts.iterrows()
@@ -2388,8 +2449,14 @@ def main():
         static_data,
         var_names["static_vars"],
     )
+    source_np = np.asarray(source).reshape(-1)
     all_sites = _dedupe_sites_in_order(
         info[["latitude", "longitude"]].to_numpy(),
+        round_decimals=10,
+    )
+    lfmc_site_mask = source_np == 0
+    lfmc_sites = _dedupe_sites_in_order(
+        info.loc[lfmc_site_mask, ["latitude", "longitude"]].to_numpy(),
         round_decimals=10,
     )
     site_climate_lookup = _build_site_lookup(
@@ -2445,7 +2512,24 @@ def main():
         print(f'Loading fold definitions from {args.fold_info_in}')
         fold_locs = _load_fold_locs_json(args.fold_info_in)
         n_folds = len(fold_locs)
-        print(f'Using {n_folds} precomputed folds for training')
+        print(f'Using {n_folds} precomputed folds for LFMC sites')
+        _validate_sites_assigned_exactly_once(
+            fold_locs,
+            all_sites=lfmc_sites,
+            round_decimals=10,
+        )
+        lfmc_site_set = set(lfmc_sites)
+        non_lfmc_sites = [site for site in all_sites if site not in lfmc_site_set]
+        print(
+            f'Augmenting canonical LFMC folds with {len(non_lfmc_sites)} member-specific non-LFMC sites'
+        )
+        fold_locs = _assign_remaining_sites_to_test_folds(
+            fold_locs=fold_locs,
+            all_sites=non_lfmc_sites,
+            site_climate_lookup=site_climate_lookup,
+            site_stratifier_lookup=site_stratifier_lookup,
+            round_decimals=10,
+        )
     else:
         desired_insitu_obs_per_fold = num_insitu_obs / n_folds
         desired_vv_obs_per_fold = num_vv_obs / n_folds

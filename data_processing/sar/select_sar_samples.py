@@ -79,6 +79,15 @@ def _parse_args():
         help="Minimum dominant land-cover fraction required for random samples.",
     )
     parser.add_argument(
+        "--min-lfmc-sites-per-climate-zone",
+        type=int,
+        default=2,
+        help=(
+            "Minimum number of unique LFMC sites required for a climate zone to be "
+            "eligible for SAR supervision sampling."
+        ),
+    )
+    parser.add_argument(
         "--strict-target",
         action="store_true",
         help="Raise if the requested target observation count cannot be met.",
@@ -225,6 +234,7 @@ def main():
     random_count_batch_points = int(args.random_count_batch_points)
     show_within_batch_progress = not bool(args.hide_within_batch_progress)
     min_dominant_landcover_fraction = float(args.min_dominant_landcover_fraction)
+    min_lfmc_sites_per_climate_zone = int(args.min_lfmc_sites_per_climate_zone)
     strict_target = bool(args.strict_target)
     vars_to_sample = list(args.vars_to_sample)
     output_dir = str(args.output_dir)
@@ -237,6 +247,7 @@ def main():
         f"random_count_batch_points={random_count_batch_points}, "
         f"show_within_batch_progress={show_within_batch_progress}, "
         f"min_dominant_landcover_fraction={min_dominant_landcover_fraction}, "
+        f"min_lfmc_sites_per_climate_zone={min_lfmc_sites_per_climate_zone}, "
         f"strict_target={strict_target}, vars_to_sample={vars_to_sample}, "
         f"output_dir={output_dir}, output_tag={output_tag!r}"
     )
@@ -254,9 +265,79 @@ def main():
     lfmc_df = pd.read_csv(
         "/scratch/users/trobinet/long_lfmc/final_lfmc/nfmd/nfmd_processed.csv"
     )
+    _log("Opening climate-zone dataset...")
+    climate_zone_ds = xr.open_dataset(
+        "/scratch/users/trobinet/long_lfmc/final_lfmc/climate_zones/climate_zone_per_pixel_fullgrid.nc4"
+    )
+    if "climate_zone" not in climate_zone_ds.data_vars:
+        raise KeyError(
+            f"Expected climate_zone variable in climate-zone dataset. "
+            f"Found: {list(climate_zone_ds.data_vars)}"
+        )
     _log(f"Variables to sample: {vars_to_sample}")
     trns = Transformer.from_crs('EPSG:4326','EPSG:5070',always_xy=True)
     trns_back = Transformer.from_crs('EPSG:5070','EPSG:4326',always_xy=True)
+    lfmc_df = lfmc_df.copy()
+    lfmc_df["date"] = pd.to_datetime(lfmc_df["date"], errors="coerce")
+    lfmc_df = lfmc_df.dropna(subset=["date", "latitude", "longitude"])
+    lfmc_site_ranges = (
+        lfmc_df.groupby(["latitude", "longitude"], as_index=False)
+        .agg(lfmc_start=("date", "min"), lfmc_end=("date", "max"))
+    )
+    _log(f"LFMC climate support: {len(lfmc_site_ranges)} unique LFMC locations before climate filtering.")
+    lfmc_site_lats = lfmc_site_ranges["latitude"].to_numpy()
+    lfmc_site_lons = lfmc_site_ranges["longitude"].to_numpy()
+    _log("LFMC climate support: transforming coordinates to EPSG:5070...")
+    lfmc_site_xs, lfmc_site_ys = trns.transform(lfmc_site_lons, lfmc_site_lats)
+    _log("LFMC climate support: sampling climate-zone raster at LFMC sites...")
+    lfmc_site_climate_zone_da = climate_zone_ds["climate_zone"].sel(
+        x=xr.DataArray(lfmc_site_xs, dims="points"),
+        y=xr.DataArray(lfmc_site_ys, dims="points"),
+        method="nearest",
+    )
+    if ProgressBar:
+        with ProgressBar():
+            lfmc_site_climate_zone_da = lfmc_site_climate_zone_da.compute()
+    else:
+        lfmc_site_climate_zone_da = lfmc_site_climate_zone_da.compute()
+    lfmc_site_ranges["climate_zone_code"] = pd.to_numeric(
+        np.asarray(lfmc_site_climate_zone_da.values).reshape(-1),
+        errors="coerce",
+    )
+    lfmc_site_ranges = lfmc_site_ranges.dropna(subset=["climate_zone_code"]).copy()
+    lfmc_site_ranges["climate_zone_code"] = (
+        lfmc_site_ranges["climate_zone_code"].round().astype(int)
+    )
+    climate_zone_site_counts = (
+        lfmc_site_ranges.groupby("climate_zone_code")
+        .size()
+        .astype(int)
+    )
+    eligible_climate_zone_codes = sorted(
+        int(code)
+        for code, count in climate_zone_site_counts.items()
+        if int(count) >= min_lfmc_sites_per_climate_zone
+    )
+    ineligible_climate_zone_codes = sorted(
+        int(code)
+        for code, count in climate_zone_site_counts.items()
+        if int(count) < min_lfmc_sites_per_climate_zone
+    )
+    if len(eligible_climate_zone_codes) == 0:
+        raise RuntimeError(
+            "No climate zones met the LFMC site-count requirement for SAR supervision sampling."
+        )
+    _log(
+        "LFMC climate support: "
+        f"eligible_codes={eligible_climate_zone_codes}, "
+        f"ineligible_codes={ineligible_climate_zone_codes}, "
+        f"eligible_site_count={int(lfmc_site_ranges['climate_zone_code'].isin(eligible_climate_zone_codes).sum())}, "
+        f"ineligible_site_count={int(lfmc_site_ranges['climate_zone_code'].isin(ineligible_climate_zone_codes).sum())}."
+    )
+    eligible_climate_zone_code_arr = np.asarray(
+        eligible_climate_zone_codes,
+        dtype=np.int16,
+    )
     # load up the land cover data that we are going to use to make sure that we are only drawing
     # meaningful land cover types
     _log("Opening NLCD zarr dataset...")
@@ -303,24 +384,24 @@ def main():
     )
     lc_ok_by_time = lc_ok_by_year.sel(year=sar_year, method="nearest")
     _log("Land cover masks prepared.")
+    _log("Preparing static climate-zone eligibility mask for random SAR sampling...")
+    climate_zone_ok = xr.apply_ufunc(
+        np.isin,
+        climate_zone_ds["climate_zone"].astype(np.int16),
+        kwargs={"test_elements": eligible_climate_zone_code_arr},
+        dask="parallelized",
+        output_dtypes=[bool],
+    )
+    _log("Climate-zone eligibility mask prepared.")
     if sample_at_sites:
         _log("Sampling all variables at sites with shared site selection.")
-        lfmc_df = lfmc_df.copy()
-        lfmc_df["date"] = pd.to_datetime(lfmc_df["date"], errors="coerce")
-        lfmc_df = lfmc_df.dropna(subset=["date", "latitude", "longitude"])
-        all_lats = lfmc_df["latitude"]
-        all_lons = lfmc_df["longitude"]
-        all_lat_lon = pd.DataFrame({"latitude": all_lats, "longitude": all_lons})
-        all_lat_lon = all_lat_lon.drop_duplicates().reset_index(drop=True)
-        lfmc_site_ranges = (
-            lfmc_df.groupby(["latitude", "longitude"], as_index=False)
-            .agg(lfmc_start=("date", "min"), lfmc_end=("date", "max"))
-        )
-        all_lat_lon = all_lat_lon.merge(
-            lfmc_site_ranges,
-            on=["latitude", "longitude"],
-            how="left",
-        )
+        all_lat_lon = lfmc_site_ranges[
+            lfmc_site_ranges["climate_zone_code"].isin(eligible_climate_zone_codes)
+        ].copy().reset_index(drop=True)
+        if len(all_lat_lon) == 0:
+            raise RuntimeError(
+                "No LFMC sites remain after applying the climate-zone eligibility filter."
+            )
         _log(f"Sites: {len(all_lat_lon)} unique LFMC locations.")
         site_lats = all_lat_lon["latitude"].to_numpy()
         site_lons = all_lat_lon["longitude"].to_numpy()
@@ -477,17 +558,30 @@ def main():
                 y=xr.DataArray(batch_ys, dims="points"),
                 method="nearest",
             ).transpose("time", "points")
+            sampled_batch_climate_ok = climate_zone_ok.sel(
+                x=xr.DataArray(batch_xs, dims="points"),
+                y=xr.DataArray(batch_ys, dims="points"),
+                method="nearest",
+            ).transpose("points")
             if ProgressBar:
                 with ProgressBar():
                     sampled_batch_stack = sampled_batch_stack.compute()
                     sampled_batch_lc_ok = sampled_batch_lc_ok.compute()
+                    sampled_batch_climate_ok = sampled_batch_climate_ok.compute()
             else:
                 sampled_batch_stack = sampled_batch_stack.compute()
                 sampled_batch_lc_ok = sampled_batch_lc_ok.compute()
+                sampled_batch_climate_ok = sampled_batch_climate_ok.compute()
             batch_values = sampled_batch_stack.values
             batch_lc_mask = sampled_batch_lc_ok.values
+            batch_climate_mask = np.asarray(
+                sampled_batch_climate_ok.values,
+                dtype=bool,
+            ).reshape(-1)
             batch_counts = np.sum(
-                (~np.isnan(batch_values)) & batch_lc_mask[:, None, :],
+                (~np.isnan(batch_values))
+                & batch_lc_mask[:, None, :]
+                & batch_climate_mask[None, None, :],
                 axis=0,
                 dtype=np.int64,
             )
@@ -587,23 +681,38 @@ def main():
             y=xr.DataArray(union_ys, dims="points"),
             method="nearest",
         ).transpose("time", "points")
+        sampled_random_climate_ok = climate_zone_ok.sel(
+            x=xr.DataArray(union_xs, dims="points"),
+            y=xr.DataArray(union_ys, dims="points"),
+            method="nearest",
+        ).transpose("points")
         if ProgressBar:
             with ProgressBar():
                 sampled_random_stack = sampled_random_stack.compute()
                 sampled_random_lc_ok = sampled_random_lc_ok.compute()
+                sampled_random_climate_ok = sampled_random_climate_ok.compute()
         else:
             sampled_random_stack = sampled_random_stack.compute()
             sampled_random_lc_ok = sampled_random_lc_ok.compute()
+            sampled_random_climate_ok = sampled_random_climate_ok.compute()
         random_values = sampled_random_stack.values
         random_dates = sampled_random_stack.coords["time"].values
         random_lc_mask = sampled_random_lc_ok.values
+        random_climate_mask = np.asarray(
+            sampled_random_climate_ok.values,
+            dtype=bool,
+        ).reshape(-1)
 
         rand_vars_iter = tqdm(list(enumerate(vars_to_sample)), desc="Random vars", unit="var") if tqdm else enumerate(vars_to_sample)
         for var_idx, var in rand_vars_iter:
             selected_flat_idxs = np.sort(selected_flat_by_var[var])
             union_positions = np.searchsorted(union_selected_flat, selected_flat_idxs)
             var_values = random_values[:, var_idx, union_positions]
-            var_valid = (~np.isnan(var_values)) & random_lc_mask[:, union_positions]
+            var_valid = (
+                (~np.isnan(var_values))
+                & random_lc_mask[:, union_positions]
+                & random_climate_mask[None, union_positions]
+            )
             time_idx, point_idx = np.where(var_valid)
             sampled_vals = var_values[time_idx, point_idx]
             sampled_dates = random_dates[time_idx]
