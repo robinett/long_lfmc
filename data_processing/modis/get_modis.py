@@ -1,162 +1,135 @@
-import earthaccess
-import sys
 import argparse
-import xarray as xr
 import os
+from pathlib import Path
+
+import earthaccess
 import pandas as pd
+import xarray as xr
+
+
+DEFAULT_GRID_PATH = '/scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4'
+DEFAULT_OUTPUT_ROOT = '/scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_earthaccess'
+TILES_V = [4, 4, 4, 4, 5, 5, 5, 5, 6, 6]
+TILES_H = [8, 9, 10, 11, 7, 8, 9, 10, 8, 9]
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--start_date', type=str, required=True, help='Start date in YYYY-MM-DD format')
+    parser.add_argument('--end_date', type=str, required=True, help='End date in YYYY-MM-DD format')
+    parser.add_argument('--output_root', type=str, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument('--grid_path', type=str, default=DEFAULT_GRID_PATH)
+    parser.add_argument('--skip_existing', action='store_true')
+    return parser.parse_args()
+
+
+def expected_filenames_for_month(month_days, short_name):
+    expected = {}
+    for date in month_days:
+        date_tag = f"A{date.strftime('%Y%j')}"
+        for v, h in zip(TILES_V, TILES_H):
+            tile_tag = f'h{h:02d}v{v:02d}'
+            fname = f'{short_name}.{date_tag}.{tile_tag}.061.hdf'
+            expected[fname] = (date_tag, tile_tag)
+    return expected
+
+
+def filter_missing_links(out_dir: Path, links, short_name: str, month_days, skip_existing: bool):
+    if not skip_existing:
+        return links
+    expected = expected_filenames_for_month(month_days, short_name)
+    existing = {path.name for path in out_dir.glob(f'{short_name}*.hdf')}
+    missing_expected = set(expected) - existing
+    if not missing_expected:
+        print(f'All expected {short_name} files already exist under {out_dir}; skipping download')
+        return []
+    filtered = [url for url in links if Path(url).name in missing_expected]
+    print(f'{short_name}: existing={len(existing)} missing_expected={len(missing_expected)} download_candidates={len(filtered)}')
+    return filtered
+
+
+def collect_links(results, month_days, short_name: str):
+    links = []
+    desired = len(month_days) * len(TILES_V)
+    for date in month_days:
+        date_tag = f"A{date.strftime('%Y%j')}"
+        for v, h in zip(TILES_V, TILES_H):
+            found = False
+            tile_tag = f'h{h:02d}v{v:02d}'
+            for res in results:
+                for url in res.data_links():
+                    if date_tag in url and tile_tag in url and url.endswith('.hdf'):
+                        links.append(url)
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                print(f'Warning: No {short_name} link found for {date_tag} {tile_tag}')
+    print(f'Found {len(links)} {short_name} links, out of {desired} desired.')
+    return links
+
 
 def main():
-    # pass the start and end dates in from the submitting script
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--start_date",
-        type=str,
-        help="Start date in YYYY-MM-DD format",
-        required=True
-    )
-    parser.add_argument(
-        "--end_date",
-        type=str,
-        help="End date in YYYY-MM-DD format",
-        required=True
-    )
-    start_date = parser.parse_args().start_date
-    end_date = parser.parse_args().end_date
+    args = parse_args()
+    start_date = args.start_date
+    end_date = args.end_date
     start_date_pd = pd.to_datetime(start_date)
     end_date_pd = pd.to_datetime(end_date)
     print('start date:', start_date)
     print('end date:', end_date)
+    print('output_root:', args.output_root)
+    print('skip_existing:', args.skip_existing)
     date_range = pd.date_range(start=start_date_pd, end=end_date_pd, freq='ME')
-    # do we need to login?
-    login = True
-    if login:
-        print('logging in')
-        auth = earthaccess.login()
-    # do we want to see collections?
-    see_collections = False
-    if see_collections:
-        print('getting collections')
-        collections = earthaccess.search_datasets(
-            short_name='MCD43A4'
-        )
-        # Step 2: See how many were returned
-        print('Found {} collection(s)'.format(len(collections)))
-        # Step 3: Inspect metadata for the first collection
-        collection = collections[0]
-        print('first collection:')
-        print(collection)
-        sys.exit()
-        # Print summary information
-        print("Title:", collection["umm"]["EntryTitle"])
-        print("Version:", collection["umm"]["Version"])
-        print("Start Date:", collection["umm"]["TemporalExtent"]["RangeDateTime"]["BeginningDateTime"])
-        print("End Date:",collection["umm"]["TemporalExtent"]["RangeDateTime"]["EndingDateTime"])
-    # download the data
+
+    print('logging in')
+    earthaccess.login()
+
     print('searching for data')
-    #bounding_box = (-124.73,25.85,-93.51,49.00)
-    grid = xr.open_dataset(
-        '/scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4'
-    )
+    grid = xr.open_dataset(args.grid_path)
     min_lat = grid['lat'].min().values - 1.0
     max_lat = grid['lat'].max().values + 1.0
     min_lon = grid['lon'].min().values - 1.0
     max_lon = grid['lon'].max().values + 1.0
     bounding_box = (min_lon, min_lat, max_lon, max_lat)
-    #bounding_box = (-180.0,0.0,0.0,90.0)
     print('bounding box:', bounding_box)
-    # get the lat/lon bounds of this
-    #start_date = '2003-01-01'
-    #end_date = '2003-12-31'
-    for d,date in enumerate(date_range):
-        out_dir = os.path.join(
-            '/scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_earthaccess',
-            date.strftime("%Y")
-        )
-        this_start = pd.to_datetime(f'{date.year}-{date.month}-01')
-        this_end = date
-        print(
-            f'Downloading MODIS data from {this_start} to {this_end}'
-        )
-        this_year_days = pd.date_range(start=this_start, end=this_end, freq='D')
-        tiles_v = [4,4,4,4,5,5,5,5,6,6]
-        tiles_h = [8,9,10,11,7,8,9,10,8,9]
-        data_links = []
-        # create directory if it doesn't exist
-        os.makedirs(out_dir, exist_ok=True)
+
+    for month_end in date_range:
+        out_dir = Path(args.output_root) / month_end.strftime('%Y')
+        this_start = pd.Timestamp(f'{month_end.year}-{month_end.month:02d}-01')
+        this_end = month_end
+        print(f'Downloading MODIS data from {this_start.date()} to {this_end.date()}')
+        month_days = pd.date_range(start=this_start, end=this_end, freq='D')
+        out_dir.mkdir(parents=True, exist_ok=True)
+
         results_data = earthaccess.search_data(
             short_name='MCD43A4',
             version='061',
-            temporal=(this_start,this_end),
+            temporal=(this_start, this_end),
             bounding_box=bounding_box,
+            downloadable=True,
         )
-        data_links = []
-        num_desired_links = len(this_year_days) * len(tiles_v)
-        for date in this_year_days:
-            this_date_strf = f'A{date.strftime("%Y%j")}'
-            for v,h in zip(tiles_v, tiles_h):
-                found = 0
-                this_tile_strf = f'h{h:02d}v{v:02d}'
-                for res in results_data:
-                    this_urls = res.data_links()
-                    for this_url in this_urls:
-                        if this_date_strf in this_url and this_tile_strf in this_url and this_url.endswith('.hdf'):
-                            data_links.append(this_url)
-                            found = 1
-                        if found:
-                            break
-                if not found:
-                    print(f"Warning: No data link found for {this_date_strf} {this_tile_strf}")
-        #if len(data_links) != num_desired_links:
-        #    print(f"Issue:: {len(data_links)} of {num_desired_links} desired data links found.")
-        #    sys.exit()
-        #else:
-        #    print(f'Found {len(data_links)} data links, as desired.')
-        print(f'Found {len(data_links)} data links, out of {num_desired_links} desired.')
-        # now for quality results
+        data_links = collect_links(results_data, month_days, 'MCD43A4')
+        data_links = filter_missing_links(out_dir, data_links, 'MCD43A4', month_days, args.skip_existing)
+
         results_quality = earthaccess.search_data(
             short_name='MCD43A2',
             version='061',
-            temporal=(this_start,this_end),
-            bounding_box=bounding_box
+            temporal=(this_start, this_end),
+            bounding_box=bounding_box,
+            downloadable=True,
         )
-        quality_links = []
-        for date in this_year_days:
-            this_date_strf = f'A{date.strftime("%Y%j")}'
-            for v,h in zip(tiles_v, tiles_h):
-                found = 0
-                this_tile_strf = f'h{h:02d}v{v:02d}'
-                for res in results_quality:
-                    this_urls = res.data_links()
-                    #sys.exit()
-                    for this_url in this_urls:
-                        if this_date_strf in this_url and this_tile_strf in this_url and this_url.endswith('.hdf'):
-                            quality_links.append(this_url)
-                            found = 1
-                        if found:
-                            break
-                if not found:
-                    print(f"Warning: No quality link found for {this_date_strf} {this_tile_strf}")
-        #if len(quality_links) != num_desired_links:
-        #    print(f"Issue:: {len(quality_links)} of {num_desired_links} desired quality links found.")
-        #    sys.exit()
-        #else:
-        #    print(f'Found {len(quality_links)} quality links, as desired.')
-        print(f'Found {len(quality_links)} quality links, out of {num_desired_links} desired.')
-        if len(data_links) == 0 or len(quality_links) == 0:
-            print('No files to download, skipping download step.')
+        quality_links = collect_links(results_quality, month_days, 'MCD43A2')
+        quality_links = filter_missing_links(out_dir, quality_links, 'MCD43A2', month_days, args.skip_existing)
+
+        if len(data_links) == 0 and len(quality_links) == 0:
+            print('No files to download for this month, skipping download step.')
             continue
-        files_data = earthaccess.download(
-            data_links,
-            out_dir,
-            threads=8,
-            show_progress=True
-        )
-        files_quality = earthaccess.download(
-            quality_links,
-            out_dir,
-            threads=8,
-            show_progress=True
-        )
+        if len(data_links) > 0:
+            earthaccess.download(data_links, str(out_dir), threads=8, show_progress=True)
+        if len(quality_links) > 0:
+            earthaccess.download(quality_links, str(out_dir), threads=8, show_progress=True)
+
 
 if __name__ == "__main__":
     main()
