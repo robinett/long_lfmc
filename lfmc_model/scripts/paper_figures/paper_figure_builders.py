@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import contextlib
+import glob
 import hashlib
 import io
 import os
@@ -11,6 +12,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import torch
 from shapely.geometry import Point
 
 here = os.path.dirname(os.path.abspath(__file__))
@@ -35,6 +37,7 @@ from compare_timeseries import (  # noqa: E402
 from eval_compare_models import _prepare_train_landcover_fraction_summary  # noqa: E402
 from eval_deep import (  # noqa: E402
     build_site_month_anomaly_eval_df,
+    build_point_landcover_lookup,
     build_lfmc_space_time_tables,
     build_lfmc_y2y_df,
     compute_basic_metrics,
@@ -49,7 +52,9 @@ from paper_figure_plotting import (  # noqa: E402
     plot_landcover_comparison_panels,
     plot_landcover_metric_grouped,
     plot_monthly_variability_bars,
+    plot_sar_sampling_summary,
     plot_scatter_triptych,
+    plot_site_observation_map,
     plot_stacked_timeseries_panels,
 )
 
@@ -122,6 +127,7 @@ def _model_cache_token(runtime: Dict[str, object], model_key: str) -> str:
             str(model_cfg.get("outputs_root", "")),
             str(model_cfg.get("input_data_name", "")),
             str(model_cfg.get("model_num_tasks", "")),
+            str(model_cfg.get("ensemble_member_name_prefix", "")),
         ]
     )
     token = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
@@ -135,6 +141,46 @@ def _model_ensemble_root(model_cfg: Dict[str, object]) -> Optional[str]:
     return None
 
 
+def _model_input_dir(runtime: Dict[str, object], model_key: str) -> str:
+    cfg = runtime["cfg"]
+    model_cfg = _model_cfg(cfg, model_key)
+    return os.path.join(cfg["paths"]["inputs_root"], str(model_cfg["input_data_name"]))
+
+
+def _load_lfmc_site_observation_table(runtime: Dict[str, object], model_key: str) -> pd.DataFrame:
+    input_dir = _model_input_dir(runtime, model_key)
+    info_path = os.path.join(input_dir, "info.parquet")
+    source_path = os.path.join(input_dir, "source.pt")
+    if not (os.path.exists(info_path) and os.path.exists(source_path)):
+        child_candidates = sorted(
+            child
+            for child in glob.glob(os.path.join(input_dir, "*"))
+            if os.path.isdir(child)
+            and os.path.exists(os.path.join(child, "info.parquet"))
+            and os.path.exists(os.path.join(child, "source.pt"))
+        )
+        if len(child_candidates) == 0:
+            raise FileNotFoundError(
+                f"Could not find info.parquet/source.pt under input dir: {input_dir}"
+            )
+        input_dir = child_candidates[0]
+        info_path = os.path.join(input_dir, "info.parquet")
+        source_path = os.path.join(input_dir, "source.pt")
+        print(f"Using representative input member for {model_key}: {input_dir}")
+    info = pd.read_parquet(info_path)
+    source = torch.load(source_path, map_location="cpu")
+    source = np.asarray(source).reshape(-1)
+    lfmc = info.loc[source == 0, ["latitude", "longitude"]].copy()
+    site_counts = (
+        lfmc.groupby(["latitude", "longitude"], as_index=False)
+        .size()
+        .rename(columns={"size": "n_obs", "latitude": "latitude", "longitude": "longitude"})
+        .sort_values(["n_obs", "latitude", "longitude"], ascending=[False, True, True])
+        .reset_index(drop=True)
+    )
+    return site_counts
+
+
 def _load_named_eval_context(runtime: Dict[str, object], model_key: str) -> Dict[str, object]:
     if model_key in runtime["eval_contexts"]:
         return runtime["eval_contexts"][model_key]
@@ -146,6 +192,7 @@ def _load_named_eval_context(runtime: Dict[str, object], model_key: str) -> Dict
             ensemble_outputs_root=_model_ensemble_root(model_cfg),
             outputs_root=None if bool(model_cfg.get("is_ensemble", False)) else _model_outputs_root(model_cfg),
             ascending=True,
+            ensemble_member_name_prefix=model_cfg.get("ensemble_member_name_prefix"),
         )
     context["name"] = model_cfg["display_name"]
     context["paper_model_key"] = model_key
@@ -170,6 +217,7 @@ def _timeseries_model_entries(runtime: Dict[str, object], model_keys: Sequence[s
                 "model_type": "standard",
                 "model_num_tasks": int(model_cfg.get("model_num_tasks", 3)),
                 "is_ensemble": bool(model_cfg.get("is_ensemble", False)),
+                "ensemble_member_name_prefix": model_cfg.get("ensemble_member_name_prefix"),
                 "paper_color": model_cfg["color"],
             }
         )
@@ -1071,6 +1119,8 @@ def _site_has_same_year_lfmc_sar_overlap(
         start_date=None,
         end_date=None,
     )
+    if vv_vh_obs is None:
+        return False
     sar_years = set()
     for key in ["vv_dates", "vh_dates"]:
         dates = pd.to_datetime(vv_vh_obs.get(key, []), errors="coerce")
@@ -1183,6 +1233,10 @@ def _select_timeseries_sites(
             )
         ]
         site_df = site_df[site_df["site"].isin(keep_sites)].reset_index(drop=True)
+    if len(site_df) == 0:
+        if require_sar_overlap_same_year:
+            raise ValueError("No eligible sites with same-year LFMC/SAR overlap were found for timeseries selection")
+        raise ValueError("No eligible sites were found for timeseries selection")
     selected = _paper_select_sites_for_anchor(
         runtime=runtime,
         site_df=site_df,
@@ -1190,6 +1244,8 @@ def _select_timeseries_sites(
         min_measurements=min_measurements,
         metric_col="r2",
     )
+    if sum(len(site_list) for site_list in selected.values()) == 0:
+        raise ValueError("No sites were selected after applying timeseries percentile and measurement filters")
     return entries, anchor_entry, selected
 
 
@@ -1261,6 +1317,96 @@ def _build_coincident_lfmc_sar_obs_df(
     coincident_df.to_csv(cache_path, index=False, compression="gzip")
     runtime["coincident_obs_tables"][model_key] = coincident_df
     return coincident_df.copy()
+
+
+def _load_named_sar_sample_csv(path: str, value_col: str) -> pd.DataFrame:
+    df = pd.read_csv(path, usecols=["date", "latitude", "longitude", value_col])
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.normalize()
+    df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    df = df.dropna(subset=["date", "latitude", "longitude", value_col]).reset_index(drop=True)
+    return df.drop_duplicates(subset=["date", "latitude", "longitude"]).reset_index(drop=True)
+
+
+def _sar_sampling_point_key(latitude: pd.Series, longitude: pd.Series) -> pd.Series:
+    lat_text = latitude.map(lambda value: f"{float(value):.6f}")
+    lon_text = longitude.map(lambda value: f"{float(value):.6f}")
+    return lat_text + "_" + lon_text
+
+
+def _ordered_landcover_categories(cfg: Dict[str, object], present_categories: Sequence[str]) -> List[str]:
+    base_order = list(cfg["filters"]["landcover_order"])
+    present = [str(category) for category in present_categories if pd.notna(category)]
+    extras = sorted([category for category in present if category not in base_order])
+    ordered = [category for category in base_order if category in present]
+    ordered.extend([category for category in extras if category not in ordered])
+    return ordered
+
+
+def _build_sar_sampling_summary_df(runtime: Dict[str, object], fig_cfg: Dict[str, object]) -> pd.DataFrame:
+    path_cfg = fig_cfg["sar_sample_paths"]
+    sample_specs = [
+        {
+            "sample_type": "coincident",
+            "vv_path": str(path_cfg["vv_coincident"]),
+            "vh_path": str(path_cfg["vh_coincident"]),
+        },
+        {
+            "sample_type": "random",
+            "vv_path": str(path_cfg["vv_random"]),
+            "vh_path": str(path_cfg["vh_random"]),
+        },
+    ]
+    combined_frames = []
+    for spec in sample_specs:
+        vv_df = _load_named_sar_sample_csv(spec["vv_path"], "vv")
+        vh_df = _load_named_sar_sample_csv(spec["vh_path"], "vh")
+        combined_df = vv_df.merge(
+            vh_df,
+            on=["date", "latitude", "longitude"],
+            how="inner",
+        )
+        if len(combined_df) == 0:
+            continue
+        combined_df["sample_type"] = spec["sample_type"]
+        combined_frames.append(combined_df)
+    if len(combined_frames) == 0:
+        return pd.DataFrame(
+            columns=[
+                "sample_type",
+                "date",
+                "latitude",
+                "longitude",
+                "vv",
+                "vh",
+                "year",
+                "point_key",
+                "dominant_landcover",
+                "dominant_landcover_frac",
+            ]
+        )
+    combined_df = pd.concat(combined_frames, ignore_index=True)
+    combined_df["year"] = pd.to_datetime(combined_df["date"], errors="coerce").dt.year.astype(int)
+    combined_df["point_key"] = _sar_sampling_point_key(
+        combined_df["latitude"],
+        combined_df["longitude"],
+    )
+    lookup_path = os.path.join(
+        runtime["cache_dir"],
+        "supplementary_figure_04_point_landcover_lookup.csv",
+    )
+    point_lookup_df = build_point_landcover_lookup(
+        combined_df[["point_key", "latitude", "longitude", "year"]].drop_duplicates().reset_index(drop=True),
+        lookup_path,
+    )
+    combined_df = combined_df.merge(
+        point_lookup_df[["point_key", "year", "dominant_landcover", "dominant_landcover_frac"]],
+        on=["point_key", "year"],
+        how="left",
+    )
+    combined_df["dominant_landcover"] = combined_df["dominant_landcover"].fillna("unknown")
+    return combined_df
 
 
 def _build_timeseries_panel(
@@ -1673,9 +1819,35 @@ def _build_shared_figure_1_panels(
     return panels
 
 
-def build_figure_1(runtime: Dict[str, object]) -> str:
+def build_figure_2(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
-    fig_cfg = cfg["figures"]["figure_1"]
+    fig_cfg = cfg["figures"]["figure_2"]
+    model_key = fig_cfg["model_key"]
+    site_df = _load_lfmc_site_observation_table(runtime, model_key)
+    save_path, table_path = _figure_output_paths(
+        runtime,
+        filename=fig_cfg["filename"],
+        stem="figure_02_site_map",
+    )
+    site_df.to_csv(table_path, index=False)
+    plot_site_observation_map(
+        site_df=site_df,
+        save_path=save_path,
+        fontsize=int(cfg["plotting"]["fontsize"]),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"]["dpi"]),
+        gmba_basic_shapefile=cfg["paths"].get("gmba_basic_shapefile"),
+        cmap=str(fig_cfg.get("cmap", "viridis")),
+        marker_size=float(fig_cfg.get("marker_size", 34.0)),
+        log_color_scale=bool(fig_cfg.get("log_color_scale", False)),
+        cbar_vmax=fig_cfg.get("cbar_vmax"),
+    )
+    return save_path
+
+
+def build_figure_3(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["figure_3"]
     model_key = fig_cfg["model_key"]
     model_entries, anchor_entry, selected = _select_shared_figure_1_sites(
         runtime=runtime,
@@ -1695,7 +1867,7 @@ def build_figure_1(runtime: Dict[str, object]) -> str:
     save_path, table_path = _figure_output_paths(
         runtime,
         filename=fig_cfg["filename"],
-        stem="figure_02_sites",
+        stem="figure_03_sites",
     )
     site_rows = []
     for criterion, site_list in selected.items():
@@ -1762,9 +1934,9 @@ def build_supplementary_figure_2(runtime: Dict[str, object]) -> str:
     return save_path
 
 
-def build_figure_2(runtime: Dict[str, object]) -> str:
+def build_figure_4(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
-    fig_cfg = cfg["figures"]["figure_2"]
+    fig_cfg = cfg["figures"]["figure_4"]
     min_obs = int(cfg["variability"]["min_obs"])
     min_years = int(cfg["variability"]["min_years"])
     context = _load_named_eval_context(runtime, fig_cfg["model_key"])
@@ -1776,7 +1948,7 @@ def build_figure_2(runtime: Dict[str, object]) -> str:
         min_years=min_years,
     )
     if len(month_anom_df) == 0 or len(valid_month_groups) == 0:
-        raise ValueError("No source-centered monthly anomaly rows available for Figure 2")
+        raise ValueError("No source-centered monthly anomaly rows available for Figure 4")
     overall_metrics = compute_basic_metrics(lfmc_df["obs"].values, lfmc_df["pred"].values)
     site_mean_metrics = compute_basic_metrics(
         site_summary_df["obs_mean"].values,
@@ -1849,7 +2021,7 @@ def build_figure_2(runtime: Dict[str, object]) -> str:
             "cbar_extend": "max",
         },
         {
-            "title": "Deviation from\nmonthly average",
+            "title": "Deviation from monthly average",
             "kind": "hexbin",
             "x": month_anom_df["obs_dev"].values,
             "y": month_anom_df["pred_dev"].values,
@@ -1873,7 +2045,7 @@ def build_figure_2(runtime: Dict[str, object]) -> str:
     save_path, table_path = _figure_output_paths(
         runtime,
         filename=fig_cfg["filename"],
-        stem="figure_03_site_tables",
+        stem="figure_04_site_tables",
     )
     combined_table = site_summary_df.merge(
         anomaly_df.groupby(["latitude", "longitude"], as_index=False).agg(
@@ -1964,9 +2136,9 @@ def build_supplementary_figure_1(runtime: Dict[str, object]) -> str:
     return save_path
 
 
-def build_figure_3(runtime: Dict[str, object]) -> str:
+def build_figure_5(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
-    fig_cfg = cfg["figures"]["figure_3"]
+    fig_cfg = cfg["figures"]["figure_5"]
     min_obs = int(cfg["variability"]["min_obs"])
     min_years = int(cfg["variability"]["min_years"])
     context = _load_named_eval_context(runtime, fig_cfg["model_key"])
@@ -1976,14 +2148,14 @@ def build_figure_3(runtime: Dict[str, object]) -> str:
         min_years=min_years,
     )
     if len(month_df) == 0:
-        raise ValueError("No monthly variability rows available for Figure 3")
+        raise ValueError("No monthly variability rows available for Figure 5")
     month_df["month_label"] = [
         MONTH_LABELS[int(month) - 1] for month in month_df["month"].to_numpy(dtype=int)
     ]
     save_path, table_path = _figure_output_paths(
         runtime,
         filename=fig_cfg["filename"],
-        stem="figure_04_monthly_variability",
+        stem="figure_05_monthly_variability",
     )
     month_df.to_csv(table_path, index=False)
     plot_monthly_variability_bars(
@@ -1997,9 +2169,9 @@ def build_figure_3(runtime: Dict[str, object]) -> str:
     return save_path
 
 
-def build_figure_4(runtime: Dict[str, object]) -> str:
+def build_figure_6(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
-    fig_cfg = cfg["figures"]["figure_4"]
+    fig_cfg = cfg["figures"]["figure_6"]
     min_obs = int(cfg["variability"]["min_obs"])
     min_years = int(cfg["variability"]["min_years"])
     metric_df = _landcover_metric_table(
@@ -2009,7 +2181,7 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
         min_years=min_years,
     )
     if len(metric_df) == 0:
-        raise ValueError("No landcover rows available for Figure 4")
+        raise ValueError("No landcover rows available for Figure 6")
     categories = metric_df["dominant_landcover"].astype(str).tolist()
     values = np.column_stack(
         [
@@ -2042,7 +2214,7 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
     save_path, table_path = _figure_output_paths(
         runtime,
         filename=fig_cfg["filename"],
-        stem="figure_04_landcover_metrics",
+        stem="figure_06_landcover_metrics",
     )
     metric_df.to_csv(table_path, index=False)
     plot_landcover_metric_grouped(
@@ -2071,11 +2243,11 @@ def build_supplementary_figure_3(runtime: Dict[str, object]) -> str:
     model_keys = fig_cfg["model_keys"]
     selected = runtime.get("_figure_1_selected_sites")
     if selected is None:
-        figure_1_cfg = cfg["figures"]["figure_1"]
+        figure_3_cfg = cfg["figures"]["figure_3"]
         _, _, selected = _select_shared_figure_1_sites(
             runtime=runtime,
-            model_key=figure_1_cfg["model_key"],
-            fig_cfg=figure_1_cfg,
+            model_key=figure_3_cfg["model_key"],
+            fig_cfg=figure_3_cfg,
             require_sar_overlap_same_year=False,
         )
         runtime["_figure_1_selected_sites"] = selected
@@ -2099,7 +2271,7 @@ def build_supplementary_figure_3(runtime: Dict[str, object]) -> str:
                 plot_vv=False,
                 plot_vh=False,
                 include_model_keys=model_keys,
-                top_n_obs_years=int(cfg["figures"]["figure_1"].get("years_to_plot", 3)),
+                top_n_obs_years=int(cfg["figures"]["figure_3"].get("years_to_plot", 3)),
             )
         )
     save_path, table_path = _figure_output_paths(
@@ -2128,9 +2300,51 @@ def build_supplementary_figure_3(runtime: Dict[str, object]) -> str:
     return save_path
 
 
-def build_figure_6(runtime: Dict[str, object]) -> str:
+def build_supplementary_figure_4(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
-    fig_cfg = cfg["figures"]["figure_6"]
+    fig_cfg = cfg["figures"]["supplementary_figure_4"]
+    combined_df = _build_sar_sampling_summary_df(runtime, fig_cfg)
+    if len(combined_df) == 0:
+        raise ValueError("No combined VV/VH sample rows were available for Supplementary Figure 4")
+    map_df = (
+        combined_df[["sample_type", "latitude", "longitude"]]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+    bar_df = (
+        combined_df.groupby(["sample_type", "dominant_landcover"], as_index=False)
+        .size()
+        .rename(columns={"size": "n_samples"})
+    )
+    categories = _ordered_landcover_categories(
+        cfg,
+        bar_df["dominant_landcover"].astype(str).tolist(),
+    )
+    save_path, table_path = _figure_output_paths(
+        runtime,
+        filename=fig_cfg["filename"],
+        stem="supplementary_figure_04_sar_sampling",
+    )
+    combined_df.to_csv(table_path, index=False)
+    plot_sar_sampling_summary(
+        map_df=map_df,
+        bar_df=bar_df,
+        categories=categories,
+        save_path=save_path,
+        fontsize=int(cfg["plotting"]["fontsize"]),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"]["dpi"]),
+        category_order=list(fig_cfg.get("category_order", ["coincident", "random"])),
+        category_labels=dict(fig_cfg.get("category_labels", {})),
+        category_colors=dict(fig_cfg.get("category_colors", {})),
+        map_marker_size=float(fig_cfg.get("map_marker_size", 26.0)),
+    )
+    return save_path
+
+
+def build_figure_7(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["figure_7"]
     min_obs = int(cfg["variability"]["min_obs"])
     min_years = int(cfg["variability"]["min_years"])
     landcover_categories = list(cfg["filters"]["landcover_order"])
@@ -2267,7 +2481,7 @@ def build_figure_6(runtime: Dict[str, object]) -> str:
     save_path, table_path = _figure_output_paths(
         runtime,
         filename=fig_cfg["filename"],
-        stem="figure_05_landcover_comparison",
+        stem="figure_07_landcover_comparison",
     )
     pd.DataFrame.from_records(merged_rows).to_csv(table_path, index=False)
     plot_landcover_comparison_panels(
@@ -2311,7 +2525,6 @@ def build_figure_6(runtime: Dict[str, object]) -> str:
     )
     return save_path
 
-
 def init_runtime(cfg: Dict[str, object]) -> Dict[str, object]:
     output_root = cfg["paths"]["output_root"]
     figures_dir = os.path.join(output_root, "figures")
@@ -2349,13 +2562,17 @@ def init_runtime(cfg: Dict[str, object]) -> Dict[str, object]:
 def build_enabled_figures(cfg: Dict[str, object], only_figures: Optional[Sequence[str]] = None) -> Dict[str, str]:
     runtime = init_runtime(cfg)
     figure_builders = {
-        "figure_1": build_figure_1,
+        "figure_1": None,
+        "figure_2": build_figure_2,
+        "figure_3": build_figure_3,
+        "figure_4": build_figure_4,
+        "figure_5": build_figure_5,
+        "figure_6": build_figure_6,
+        "figure_7": build_figure_7,
         "supplementary_figure_1": build_supplementary_figure_1,
         "supplementary_figure_2": build_supplementary_figure_2,
-        "figure_2": build_figure_2,
-        "figure_4": build_figure_4,
         "supplementary_figure_3": build_supplementary_figure_3,
-        "figure_6": build_figure_6,
+        "supplementary_figure_4": build_supplementary_figure_4,
     }
     outputs = {}
     for fig_key, builder in figure_builders.items():
@@ -2364,6 +2581,8 @@ def build_enabled_figures(cfg: Dict[str, object], only_figures: Optional[Sequenc
             continue
         if only_figures is not None and fig_key not in only_figures:
             continue
+        if builder is None:
+            raise NotImplementedError(f"{fig_key} is a conceptual placeholder and has no builder yet")
         print(f"Building {fig_key} ...")
         outputs[fig_key] = builder(runtime)
         print(f"Wrote {fig_key}: {outputs[fig_key]}")

@@ -3,6 +3,9 @@
 import os
 from typing import Dict, List, Optional, Sequence
 
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import geopandas as gpd
 import matplotlib as mpl
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
@@ -18,6 +21,8 @@ LANDCOVER_DISPLAY = {
     "evergreen_forest": "Evergreen Forest",
     "deciduous_forest": "Deciduous Forest",
     "grass": "Grass",
+    "mixed_forest": "Mixed Forest",
+    "unknown": "Unknown",
 }
 
 
@@ -336,6 +341,338 @@ def plot_stacked_timeseries_panels(
             bottom=bottom,
             hspace=0.26,
         )
+        _ensure_parent_dir(save_path)
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_site_observation_map(
+    site_df: pd.DataFrame,
+    save_path: str,
+    fontsize: int,
+    figsize: Sequence[float],
+    dpi: int,
+    gmba_basic_shapefile: Optional[str] = None,
+    cmap: str = "viridis",
+    marker_size: float = 34.0,
+    log_color_scale: bool = False,
+    cbar_vmax: Optional[float] = None,
+) -> None:
+    if len(site_df) == 0:
+        raise ValueError("No site rows provided for site observation map")
+    work = site_df.copy()
+    work["longitude"] = pd.to_numeric(work["longitude"], errors="coerce")
+    work["latitude"] = pd.to_numeric(work["latitude"], errors="coerce")
+    work["n_obs"] = pd.to_numeric(work["n_obs"], errors="coerce")
+    work = work.dropna(subset=["longitude", "latitude", "n_obs"]).reset_index(drop=True)
+    if len(work) == 0:
+        raise ValueError("No finite site rows remain after cleaning for site observation map")
+
+    counts = work["n_obs"].to_numpy(dtype=float)
+    site_gdf = gpd.GeoDataFrame(
+        work.copy(),
+        geometry=gpd.points_from_xy(work["longitude"], work["latitude"]),
+        crs="EPSG:4326",
+    ).to_crs("EPSG:5070")
+    xs = site_gdf.geometry.x.to_numpy(dtype=float)
+    ys = site_gdf.geometry.y.to_numpy(dtype=float)
+    x_pad = max(1.5e5, 0.06 * float(np.ptp(xs)) if len(xs) > 1 else 1.5e5)
+    y_pad = max(1.5e5, 0.06 * float(np.ptp(ys)) if len(ys) > 1 else 1.5e5)
+    extent = [
+        float(np.min(xs) - x_pad),
+        float(np.max(xs) + x_pad),
+        float(np.min(ys) - y_pad),
+        float(np.max(ys) + y_pad),
+    ]
+
+    with plt.rc_context(_paper_rc_params(fontsize)):
+        fig = plt.figure(figsize=tuple(figsize))
+        proj = ccrs.AlbersEqualArea(
+            central_longitude=-96,
+            central_latitude=23,
+            false_easting=0,
+            false_northing=0,
+            standard_parallels=(29.5, 45.5),
+            globe=ccrs.Globe(datum="NAD83"),
+        )
+        ax = plt.axes(projection=proj)
+        ax.set_extent(extent, crs=proj)
+        ax.add_feature(
+            cfeature.LAND.with_scale("50m"),
+            facecolor="#f4f1ea",
+            edgecolor="none",
+        )
+        ax.add_feature(
+            cfeature.OCEAN.with_scale("50m"),
+            facecolor="#e6eef5",
+            edgecolor="none",
+        )
+        ax.coastlines(resolution="50m", linewidth=0.6, color="#4c5c68")
+        ax.add_feature(
+            cfeature.BORDERS.with_scale("50m"),
+            linewidth=0.45,
+            edgecolor="#5f6c72",
+        )
+        try:
+            ax.add_feature(
+                cfeature.NaturalEarthFeature(
+                    "cultural",
+                    "admin_1_states_provinces_lines",
+                    "50m",
+                ),
+                linewidth=0.35,
+                edgecolor="#8f9398",
+                facecolor="none",
+            )
+        except Exception:
+            pass
+
+        positive_counts = counts[counts > 0]
+        norm = None
+        cbar_extend = "neither"
+        if log_color_scale and positive_counts.size > 0:
+            vmax = (
+                float(cbar_vmax)
+                if cbar_vmax is not None
+                else float(np.max(positive_counts))
+            )
+            norm = LogNorm(vmin=float(np.min(positive_counts)), vmax=vmax)
+            if np.any(positive_counts > vmax):
+                cbar_extend = "max"
+        elif cbar_vmax is not None:
+            norm = Normalize(vmin=0.0, vmax=float(cbar_vmax))
+            if np.any(counts > float(cbar_vmax)):
+                cbar_extend = "max"
+
+        scatter = ax.scatter(
+            xs,
+            ys,
+            c=counts,
+            s=float(marker_size),
+            cmap=cmap,
+            norm=norm,
+            alpha=0.92,
+            edgecolor="#1f1f1f",
+            linewidth=0.18,
+            transform=proj,
+            zorder=3,
+        )
+        cbar = fig.colorbar(
+            scatter,
+            ax=ax,
+            shrink=0.82,
+            pad=0.02,
+            extend=cbar_extend,
+        )
+        cbar.set_label("Number of observations")
+
+        stats_lines = [
+            f"Sites: {len(work):,}",
+            f"Total LFMC observations: {int(np.nansum(counts)):,}",
+            f"Median observations/site: {int(np.nanmedian(counts)):,}",
+        ]
+        ax.text(
+            0.985,
+            0.98,
+            "\n".join(stats_lines),
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            bbox={
+                "boxstyle": "round",
+                "facecolor": "white",
+                "alpha": 0.92,
+                "edgecolor": "0.55",
+            },
+            fontsize=max(fontsize - 2, 8),
+        )
+
+        _ensure_parent_dir(save_path)
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_sar_sampling_summary(
+    map_df: pd.DataFrame,
+    bar_df: pd.DataFrame,
+    categories: Sequence[str],
+    save_path: str,
+    fontsize: int,
+    figsize: Sequence[float],
+    dpi: int,
+    category_order: Sequence[str],
+    category_labels: Dict[str, str],
+    category_colors: Dict[str, str],
+    map_marker_size: float = 26.0,
+) -> None:
+    if len(map_df) == 0:
+        raise ValueError("No map rows provided for SAR sampling summary")
+    if len(bar_df) == 0:
+        raise ValueError("No bar rows provided for SAR sampling summary")
+    work_map = map_df.copy()
+    work_map["longitude"] = pd.to_numeric(work_map["longitude"], errors="coerce")
+    work_map["latitude"] = pd.to_numeric(work_map["latitude"], errors="coerce")
+    work_map = work_map.dropna(subset=["longitude", "latitude", "sample_type"]).reset_index(drop=True)
+    if len(work_map) == 0:
+        raise ValueError("No finite map rows remain after cleaning for SAR sampling summary")
+    map_gdf = gpd.GeoDataFrame(
+        work_map.copy(),
+        geometry=gpd.points_from_xy(work_map["longitude"], work_map["latitude"]),
+        crs="EPSG:4326",
+    ).to_crs("EPSG:5070")
+    map_gdf["x_proj"] = map_gdf.geometry.x.to_numpy(dtype=float)
+    map_gdf["y_proj"] = map_gdf.geometry.y.to_numpy(dtype=float)
+    xs = map_gdf["x_proj"].to_numpy(dtype=float)
+    ys = map_gdf["y_proj"].to_numpy(dtype=float)
+    x_pad = max(1.5e5, 0.06 * float(np.ptp(xs)) if len(xs) > 1 else 1.5e5)
+    y_pad = max(1.5e5, 0.06 * float(np.ptp(ys)) if len(ys) > 1 else 1.5e5)
+    extent = [
+        float(np.min(xs) - x_pad),
+        float(np.max(xs) + x_pad),
+        float(np.min(ys) - y_pad),
+        float(np.max(ys) + y_pad),
+    ]
+    work_bar = bar_df.copy()
+    work_bar["n_samples"] = pd.to_numeric(work_bar["n_samples"], errors="coerce").fillna(0.0)
+    with plt.rc_context(_paper_rc_params(fontsize)):
+        fig = plt.figure(figsize=tuple(figsize))
+        proj = ccrs.AlbersEqualArea(
+            central_longitude=-96,
+            central_latitude=23,
+            false_easting=0,
+            false_northing=0,
+            standard_parallels=(29.5, 45.5),
+            globe=ccrs.Globe(datum="NAD83"),
+        )
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.28, 1.0])
+        ax_map = fig.add_subplot(gs[0, 0], projection=proj)
+        ax_bar = fig.add_subplot(gs[0, 1])
+
+        ax_map.set_extent(extent, crs=proj)
+        ax_map.add_feature(
+            cfeature.LAND.with_scale("50m"),
+            facecolor="#f4f1ea",
+            edgecolor="none",
+        )
+        ax_map.add_feature(
+            cfeature.OCEAN.with_scale("50m"),
+            facecolor="#e6eef5",
+            edgecolor="none",
+        )
+        ax_map.coastlines(resolution="50m", linewidth=0.6, color="#4c5c68")
+        ax_map.add_feature(
+            cfeature.BORDERS.with_scale("50m"),
+            linewidth=0.45,
+            edgecolor="#5f6c72",
+        )
+        try:
+            ax_map.add_feature(
+                cfeature.NaturalEarthFeature(
+                    "cultural",
+                    "admin_1_states_provinces_lines",
+                    "50m",
+                ),
+                linewidth=0.35,
+                edgecolor="#8f9398",
+                facecolor="none",
+            )
+        except Exception:
+            pass
+
+        legend_handles = []
+        stats_lines = []
+        for sample_type in category_order:
+            subset = map_gdf[map_gdf["sample_type"] == sample_type].copy()
+            if len(subset) == 0:
+                continue
+            label = category_labels.get(sample_type, str(sample_type))
+            color = category_colors.get(sample_type, "#4c5c68")
+            handle = ax_map.scatter(
+                subset["x_proj"].to_numpy(dtype=float),
+                subset["y_proj"].to_numpy(dtype=float),
+                s=float(map_marker_size),
+                color=color,
+                alpha=0.88,
+                edgecolor="#1f1f1f",
+                linewidth=0.22,
+                transform=proj,
+                zorder=3,
+                label=label,
+            )
+            legend_handles.append(handle)
+            stats_lines.append(f"{label}: {len(subset):,} locations")
+        if legend_handles:
+            legend = ax_map.legend(
+                handles=legend_handles,
+                frameon=True,
+                loc="lower left",
+            )
+            legend.get_frame().set_alpha(0.96)
+            legend.get_frame().set_edgecolor("0.55")
+        ax_map.set_title("a) VV/VH sampling locations", loc="left", pad=4)
+        ax_map.text(
+            0.985,
+            0.98,
+            "\n".join(stats_lines),
+            transform=ax_map.transAxes,
+            ha="right",
+            va="top",
+            bbox={
+                "boxstyle": "round",
+                "facecolor": "white",
+                "alpha": 0.92,
+                "edgecolor": "0.55",
+            },
+            fontsize=max(fontsize - 2, 8),
+        )
+
+        x = np.arange(len(categories))
+        width = 0.82 / float(max(len(category_order), 1))
+        ymax = 1.0
+        for sample_idx, sample_type in enumerate(category_order):
+            label = category_labels.get(sample_type, str(sample_type))
+            color = category_colors.get(sample_type, "#4c5c68")
+            offset = (sample_idx - ((len(category_order) - 1) / 2.0)) * width
+            values = np.asarray(
+                [
+                    work_bar.loc[
+                        (work_bar["sample_type"] == sample_type)
+                        & (work_bar["dominant_landcover"] == category),
+                        "n_samples",
+                    ].sum()
+                    for category in categories
+                ],
+                dtype=float,
+            )
+            bars = ax_bar.bar(
+                x + offset,
+                values,
+                width=width,
+                label=label,
+                color=color,
+                zorder=2,
+            )
+            labels = [f"N={int(value):,}" if value > 0 else "" for value in values]
+            _annotate_bars(
+                ax_bar,
+                bars,
+                labels,
+                fontsize=max(fontsize - 5, 7),
+            )
+            ymax = max(ymax, float(np.max(values)) if values.size > 0 else 1.0)
+        ax_bar.set_xticks(x, _format_landcover_labels(categories))
+        ax_bar.tick_params(axis="x", rotation=25)
+        for tick in ax_bar.get_xticklabels():
+            tick.set_horizontalalignment("right")
+        ax_bar.set_xlabel("Dominant land cover")
+        ax_bar.set_ylabel("Number of combined VV/VH samples")
+        ax_bar.set_ylim(0.0, ymax * 1.16)
+        ax_bar.set_title("b) Combined VV/VH samples by land cover", loc="left", pad=4)
+        legend = ax_bar.legend(frameon=True, loc="upper right")
+        legend.get_frame().set_alpha(1.0)
+        legend.get_frame().set_edgecolor("0.4")
+
+        fig.subplots_adjust(left=0.05, right=0.985, bottom=0.2, top=0.93, wspace=0.12)
         _ensure_parent_dir(save_path)
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)

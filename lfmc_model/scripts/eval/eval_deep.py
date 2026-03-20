@@ -154,15 +154,20 @@ def is_complete_model_dir(model_dir):
     return True
 
 
-def select_ensemble_member_dirs(outputs_root):
+def select_ensemble_member_dirs(outputs_root, member_name_prefix=None):
     candidates = []
     for name in os.listdir(outputs_root):
         model_dir = os.path.join(outputs_root, name)
-        if name.startswith("transformer_") and is_complete_model_dir(model_dir):
+        if (
+            name.startswith("transformer_")
+            and (member_name_prefix is None or name.startswith(member_name_prefix))
+            and is_complete_model_dir(model_dir)
+        ):
             candidates.append(model_dir)
     if len(candidates) == 0:
+        prefix_suffix = "" if member_name_prefix is None else f" with prefix {member_name_prefix!r}"
         raise FileNotFoundError(
-            f"No complete transformer_* model dirs found under ensemble root {outputs_root}"
+            f"No complete transformer_* model dirs found under ensemble root {outputs_root}{prefix_suffix}"
         )
     return sorted(candidates)
 
@@ -1112,6 +1117,123 @@ def build_site_landcover_lookup(lfmc_df, save_path):
     return lookup_df
 
 
+def build_point_landcover_lookup(point_df, save_path, key_col="point_key", year_col="year"):
+    required_cols = [key_col, "latitude", "longitude", year_col]
+    missing_cols = [col for col in required_cols if col not in point_df.columns]
+    if len(missing_cols) > 0:
+        raise KeyError(
+            f"Point dataframe is missing required columns for land-cover lookup: {missing_cols}"
+        )
+    requested_points = (
+        point_df[[key_col, "latitude", "longitude", year_col]]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+    requested_points[key_col] = requested_points[key_col].astype(str)
+    requested_points[year_col] = pd.to_numeric(requested_points[year_col], errors="coerce")
+    requested_points = requested_points[requested_points[year_col].notna()].copy()
+    requested_points[year_col] = requested_points[year_col].astype(int)
+    required_lookup_cols = [
+        key_col,
+        year_col,
+        "latitude",
+        "longitude",
+        "dominant_landcover",
+        "dominant_landcover_frac",
+    ]
+    if os.path.exists(save_path):
+        existing_df = pd.read_csv(save_path, dtype={key_col: str})
+        if all(col in existing_df.columns for col in required_lookup_cols):
+            existing_df[key_col] = existing_df[key_col].astype(str)
+            existing_df[year_col] = pd.to_numeric(existing_df[year_col], errors="coerce")
+            existing_df = existing_df[existing_df[year_col].notna()].copy()
+            existing_df[year_col] = existing_df[year_col].astype(int)
+            existing_df = (
+                existing_df[required_lookup_cols]
+                .drop_duplicates(subset=[key_col, year_col])
+                .reset_index(drop=True)
+            )
+            cached_keys = set(
+                zip(
+                    existing_df[key_col].tolist(),
+                    existing_df[year_col].tolist(),
+                )
+            )
+            requested_keys = list(
+                zip(
+                    requested_points[key_col].tolist(),
+                    requested_points[year_col].tolist(),
+                )
+            )
+            missing_mask = [key not in cached_keys for key in requested_keys]
+            if not any(missing_mask):
+                print(f"Using cached point land-cover lookup: {save_path}")
+                return existing_df
+            print(
+                f"Cached point land-cover lookup missing {int(np.sum(missing_mask))} point-years; "
+                "computing only missing point-years."
+            )
+            requested_points = requested_points[np.asarray(missing_mask, dtype=bool)].reset_index(drop=True)
+        else:
+            print(
+                f"Existing point land-cover lookup missing required columns; rebuilding: {save_path}"
+            )
+            existing_df = pd.DataFrame(columns=required_lookup_cols)
+    else:
+        existing_df = pd.DataFrame(columns=required_lookup_cols)
+
+    if len(requested_points) == 0:
+        return existing_df
+
+    nlcd_ds = get_nlcd_frac_ds()
+    landcover_vars = list(nlcd_ds.data_vars)
+    records = []
+    iter_points = tqdm(
+        requested_points.iterrows(),
+        total=len(requested_points),
+        desc="Computing point land cover",
+        unit="point",
+    )
+    for _, row in iter_points:
+        point_key = str(row[key_col])
+        lat = float(row["latitude"])
+        lon = float(row["longitude"])
+        year = int(row[year_col])
+        x, y = _WGS84_TO_5070.transform(lon, lat)
+        point_cube = nlcd_ds.sel(x=x, y=y, method="nearest").load()
+        if "year" in point_cube.dims or "year" in point_cube.coords:
+            point_cube = point_cube.sel(year=pd.Timestamp(year, 1, 1), method="nearest")
+        frac_vals = np.array([float(point_cube[var].values) for var in landcover_vars], dtype=float)
+        if np.all(~np.isfinite(frac_vals)):
+            dominant_landcover = "unknown"
+            dominant_frac = np.nan
+        else:
+            dominant_idx = int(np.nanargmax(frac_vals))
+            dominant_landcover = landcover_vars[dominant_idx]
+            dominant_frac = float(frac_vals[dominant_idx])
+        records.append(
+            {
+                key_col: point_key,
+                year_col: year,
+                "latitude": lat,
+                "longitude": lon,
+                "dominant_landcover": dominant_landcover,
+                "dominant_landcover_frac": dominant_frac,
+            }
+        )
+        partial_lookup_df = pd.DataFrame.from_records(records)
+        checkpoint_df = pd.concat([existing_df, partial_lookup_df], ignore_index=True)
+        checkpoint_df = checkpoint_df.drop_duplicates(subset=[key_col, year_col], keep="last").reset_index(drop=True)
+        checkpoint_df.to_csv(save_path, index=False)
+        iter_points.set_postfix_str(f"checkpointed {len(records)}/{len(requested_points)}")
+    new_lookup_df = pd.DataFrame.from_records(records)
+    lookup_df = pd.concat([existing_df, new_lookup_df], ignore_index=True)
+    lookup_df = lookup_df.drop_duplicates(subset=[key_col, year_col], keep="last").reset_index(drop=True)
+    lookup_df.to_csv(save_path, index=False)
+    print(f"Wrote point land-cover lookup: {save_path}")
+    return lookup_df
+
+
 def compute_landcover_y2y_metrics(lfmc_df, min_obs, min_years, plot_dir):
     if len(lfmc_df) == 0:
         return pd.DataFrame(), pd.DataFrame(), np.nan
@@ -1879,9 +2001,20 @@ def _build_ensemble_eval_df(member_eval_dfs):
     return eval_df
 
 
-def load_eval_context(model_dir=None, ensemble_outputs_root=None, outputs_root=None, model_df_index=None, sort_metric=DEFAULT_SORT_METRIC, ascending=True):
+def load_eval_context(
+    model_dir=None,
+    ensemble_outputs_root=None,
+    outputs_root=None,
+    model_df_index=None,
+    sort_metric=DEFAULT_SORT_METRIC,
+    ascending=True,
+    ensemble_member_name_prefix=None,
+):
     if ensemble_outputs_root is not None:
-        member_dirs = select_ensemble_member_dirs(ensemble_outputs_root)
+        member_dirs = select_ensemble_member_dirs(
+            ensemble_outputs_root,
+            member_name_prefix=ensemble_member_name_prefix,
+        )
         print(f"Using ensemble root {ensemble_outputs_root} with {len(member_dirs)} members")
         member_eval_dfs = [load_fold_predictions(member_dir) for member_dir in member_dirs]
         eval_df = _build_ensemble_eval_df(member_eval_dfs)
@@ -1891,6 +2024,7 @@ def load_eval_context(model_dir=None, ensemble_outputs_root=None, outputs_root=N
             "member_dirs": member_dirs,
             "eval_df": eval_df,
             "member_eval_dfs": member_eval_dfs,
+            "ensemble_member_name_prefix": ensemble_member_name_prefix,
         }
     if model_dir is None:
         model_dir = select_model_dir(

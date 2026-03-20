@@ -326,15 +326,20 @@ def is_complete_ensemble_member_dir(model_dir):
     return is_complete_model_dir(model_dir) and os.path.isdir(os.path.join(model_dir, "fold_9998"))
 
 
-def select_ensemble_member_dirs(outputs_root):
+def select_ensemble_member_dirs(outputs_root, member_name_prefix=None):
     member_dirs = []
     for name in os.listdir(outputs_root):
         model_dir = os.path.join(outputs_root, name)
-        if name.startswith("transformer_") and is_complete_ensemble_member_dir(model_dir):
+        if (
+            name.startswith("transformer_")
+            and (member_name_prefix is None or name.startswith(member_name_prefix))
+            and is_complete_ensemble_member_dir(model_dir)
+        ):
             member_dirs.append(model_dir)
     if len(member_dirs) == 0:
+        prefix_suffix = "" if member_name_prefix is None else f" with prefix {member_name_prefix!r}"
         raise FileNotFoundError(
-            f"No complete ensemble member dirs found under {outputs_root}"
+            f"No complete ensemble member dirs found under {outputs_root}{prefix_suffix}"
         )
     member_dirs = sorted(member_dirs, key=lambda x: os.path.getmtime(x))
     return member_dirs
@@ -386,7 +391,10 @@ def build_model_entries(model_configs, model_df_index=None):
     entries = []
     for config in model_configs:
         if config.get("is_ensemble", False):
-            member_dirs = select_ensemble_member_dirs(config["outputs_root"])
+            member_dirs = select_ensemble_member_dirs(
+                config["outputs_root"],
+                member_name_prefix=config.get("ensemble_member_name_prefix"),
+            )
             print(timestamped_message(f"Using ensemble for {config['name']}: {len(member_dirs)} members"))
             member_site_errors = {}
             member_site_error_list = []
@@ -411,6 +419,7 @@ def build_model_entries(model_configs, model_df_index=None):
                     "model_num_tasks": int(config.get("model_num_tasks", 3)),
                     "model_dir": config["outputs_root"],
                     "is_ensemble": True,
+                    "ensemble_member_name_prefix": config.get("ensemble_member_name_prefix"),
                     "member_dirs": member_dirs,
                     "member_site_errors": member_site_errors,
                     "site_error": site_error,
