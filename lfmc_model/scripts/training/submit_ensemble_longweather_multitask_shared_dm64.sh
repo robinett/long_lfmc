@@ -303,17 +303,21 @@ if [[ "${resume_from_tensors}" == "true" ]]; then
     echo "No prebuilt tensor directories were registered; cannot regenerate canonical fold info." >&2
     exit 1
   fi
-  rm -f "${fold_info_path}"
-  fold_job_id="$(
-    sbatch \
-      --parsable \
-      --job-name="fold_lfmc_365_shared" \
-      "${repo_root}/lfmc_model/scripts/training/generate_longweather_fold_info.sbatch" \
-      --input-data-dir "${fold_input_dir}" \
-      --out-path "${fold_info_path}" \
-      --split-seed "${split_seed}"
-  )"
-  echo "Canonical fold-info regeneration job: ${fold_job_id}"
+  if [[ -f "${fold_info_path}" ]]; then
+    fold_job_id="EXISTING"
+    echo "Reusing existing canonical fold info at ${fold_info_path}"
+  else
+    fold_job_id="$(
+      sbatch \
+        --parsable \
+        --job-name="fold_lfmc_365_shared" \
+        "${repo_root}/lfmc_model/scripts/training/generate_longweather_fold_info.sbatch" \
+        --input-data-dir "${fold_input_dir}" \
+        --out-path "${fold_info_path}" \
+        --split-seed "${split_seed}"
+    )"
+    echo "Canonical fold-info generation job: ${fold_job_id}"
+  fi
   echo "Registered ${preprocess_submitted} prebuilt tensor directories."
 else
   echo "Submitted ${preprocess_submitted} preprocessing chains."
@@ -328,7 +332,11 @@ echo "Canonical fold info will be written to ${fold_info_path}"
 echo "Waiting for preprocessing completion and canonical folds before submitting GPU training jobs."
 
 while [[ "${train_submitted}" -lt "${ensemble_size}" ]]; do
-  fold_state="$(job_state "${fold_job_id}")"
+  if [[ "${fold_job_id}" == "EXISTING" ]]; then
+    fold_state="COMPLETED"
+  else
+    fold_state="$(job_state "${fold_job_id}")"
+  fi
   if job_failed "${fold_state}"; then
     echo "Canonical fold job ${fold_job_id} failed with state=${fold_state}."
     exit 1
