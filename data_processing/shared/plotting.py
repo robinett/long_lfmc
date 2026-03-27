@@ -60,7 +60,11 @@ def plot_from_xarray(
     proj_in, proj_out,
     fname, cmap='rainbow',
     extent=None,
+    extent_crs=None,
     title=None,
+    cbar_label=None,
+    vmin=None,
+    vmax=None,
 ):
     # --- load ---
     if load_type == 'fname':
@@ -139,7 +143,8 @@ def plot_from_xarray(
         west_us = [-120, -93, 23, 52]
         ax.set_extent(west_us, crs=get_proj('EPSG:4326'))
     else:
-        ax.set_extent(extent, crs=coded_in)
+        extent_proj = coded_in if extent_crs is None else get_proj(extent_crs)
+        ax.set_extent(extent, crs=extent_proj)
 
     # --- plot as image (2D -> cmap ok) ---
     im = da.plot.imshow(
@@ -148,6 +153,9 @@ def plot_from_xarray(
         cmap=cmap,
         robust=True,
         add_colorbar=True,
+        cbar_kwargs=None if cbar_label is None else {"label": cbar_label},
+        vmin=vmin,
+        vmax=vmax,
         rasterized=True
     )
 
