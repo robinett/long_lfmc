@@ -22,6 +22,7 @@ def get_args():
     parser.add_argument("--manifest_only", action="store_true")
     parser.add_argument("--ensemble_root", type=str, default=None)
     parser.add_argument("--input_data_name", type=str, default=None)
+    parser.add_argument("--ensemble_member_name_prefix", type=str, default=None)
     parser.add_argument("--inputs_root", type=str, default=None)
     parser.add_argument("--run_root", type=str, default=None)
     parser.add_argument("--grid_path", type=str, default=None)
@@ -47,6 +48,8 @@ def _build_manifest_command(args):
         cmd.extend(["--ensemble_root", str(args.ensemble_root)])
     if args.input_data_name is not None:
         cmd.extend(["--input_data_name", str(args.input_data_name)])
+    if args.ensemble_member_name_prefix is not None:
+        cmd.extend(["--ensemble_member_name_prefix", str(args.ensemble_member_name_prefix)])
     if args.inputs_root is not None:
         cmd.extend(["--inputs_root", str(args.inputs_root)])
     if args.run_root is not None:
@@ -259,11 +262,19 @@ def main():
         env["GPU_MEM"] = str(
             get_cfg(cfg, "submission", "gpu_mem", default="32G")
         )
+        env["CLEANUP_PREPARED_TENSORS_AFTER_SUCCESS"] = str(
+            get_cfg(cfg, "submission", "cleanup_prepared_tensors_after_success", default=False)
+        ).lower()
+        env["WAIT_FOR_VALIDATION_COMPLETION"] = str(
+            get_cfg(cfg, "submission", "wait_for_validation_completion", default=False)
+        ).lower()
         env["MODEL_TYPE"] = str(get_cfg(cfg, "ensemble", "model_type", default="standard"))
         if args.ensemble_root is not None:
             env["ENSEMBLE_ROOT"] = str(args.ensemble_root)
         if args.input_data_name is not None:
             env["INPUT_DATA_NAME"] = str(args.input_data_name)
+        if args.ensemble_member_name_prefix is not None:
+            env["ENSEMBLE_MEMBER_NAME_PREFIX"] = str(args.ensemble_member_name_prefix)
         if args.inputs_root is not None:
             env["INPUTS_ROOT"] = str(args.inputs_root)
         if args.run_root is not None:

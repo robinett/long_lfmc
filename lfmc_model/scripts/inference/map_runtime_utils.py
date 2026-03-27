@@ -242,9 +242,15 @@ def load_ensemble_runtimes(
     fold: int = 9998,
     fallback_num_tasks: int = DEFAULT_FALLBACK_NUM_TASKS,
     max_members: Optional[int] = None,
+    member_name_prefix: Optional[str] = None,
+    selection_key: Optional[str] = None,
 ) -> Tuple[List[str], List[Dict[str, object]]]:
     member_dirs = _select_member_subset(
-        select_ensemble_member_dirs(ensemble_root),
+        select_ensemble_member_dirs(
+            ensemble_root,
+            member_name_prefix=member_name_prefix,
+            selection_key=selection_key,
+        ),
         max_members=max_members,
     )
     runtime_cache: Dict[Tuple[str, str, str], Dict[str, object]] = {}
@@ -495,7 +501,8 @@ def load_tile_payload(tile_meta_path: str) -> Dict[str, np.ndarray]:
 
 
 def save_prepared_tensor_payload(prepared_path: str, tensor_payload: Dict[str, object]) -> None:
-    os.makedirs(os.path.dirname(prepared_path), exist_ok=True)
+    prepared_dir = os.path.dirname(prepared_path)
+    os.makedirs(prepared_dir, exist_ok=True)
     info_df = tensor_payload["info_df"].copy().reset_index(drop=True)
     payload_to_save = {
         "safe_start": str(pd.Timestamp(tensor_payload["safe_start"]).date()),
@@ -507,7 +514,15 @@ def save_prepared_tensor_payload(prepared_path: str, tensor_payload: Dict[str, o
         "lon": info_df["lon"].to_numpy(dtype=np.float64),
         "date": pd.to_datetime(info_df["date"]).to_numpy(dtype="datetime64[ns]"),
     }
-    torch.save(payload_to_save, prepared_path)
+    temp_path = (
+        f"{prepared_path}.tmp_{os.getpid()}_{pd.Timestamp.utcnow().value}"
+    )
+    try:
+        torch.save(payload_to_save, temp_path)
+        os.replace(temp_path, prepared_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 def load_prepared_tensor_payload(prepared_path: str) -> Dict[str, object]:
@@ -1374,10 +1389,21 @@ def _resolve_landcover_source_year(
 def build_dominant_landcover_metadata(
     landcover_path: str,
     output_years: Sequence[int],
+    target_x: Optional[Sequence[float]] = None,
+    target_y: Optional[Sequence[float]] = None,
 ) -> Dict[str, object]:
     landcover_ds = xr.open_zarr(landcover_path)
     if "year" not in landcover_ds.coords:
         raise ValueError(f"Landcover store is missing 'year' coordinate: {landcover_path}")
+    if (target_x is None) != (target_y is None):
+        raise ValueError("target_x and target_y must both be provided together")
+    if target_x is not None and target_y is not None:
+        target_x = np.asarray(target_x, dtype=np.float64)
+        target_y = np.asarray(target_y, dtype=np.float64)
+        landcover_ds = landcover_ds.sel(
+            x=xr.DataArray(target_x, dims=("x",)),
+            y=xr.DataArray(target_y, dims=("y",)),
+        )
     landcover_var_names = [
         var_name
         for var_name in landcover_ds.data_vars
@@ -1502,8 +1528,17 @@ def initialize_output_store(
         int(QUALITY_FLAG_VALUES["final"]),
         int(QUALITY_FLAG_VALUES["low_latency"]),
     ]
-    root[OUTPUT_QUALITY_FLAG_NAME].attrs["flag_meanings"] = "final low_latency"
-    root[OUTPUT_QUALITY_FLAG_NAME].attrs["product_tier"] = product_tier
+    root[OUTPUT_QUALITY_FLAG_NAME].attrs["flag_meanings"] = (
+        "final_high_quality low_latency_preliminary"
+    )
+    root.attrs["quality_flag_key"] = json.dumps(
+        {
+            str(int(QUALITY_FLAG_VALUES["final"])): "high-quality, final",
+            str(int(QUALITY_FLAG_VALUES["low_latency"])): "low-latency, preliminary",
+            "2": "forced prediction on unapproved land cover",
+        },
+        sort_keys=True,
+    )
     for coord_name in ["y", "x"]:
         vals = np.asarray(model_grid[coord_name].values)
         root.create_dataset(
@@ -1517,7 +1552,7 @@ def initialize_output_store(
         )
         root[coord_name].attrs["_ARRAY_DIMENSIONS"] = [coord_name]
         root[coord_name].attrs["dimension_names"] = [coord_name]
-    for coord_name in ["lat", "lon", "random_vals"]:
+    for coord_name in ["lat", "lon"]:
         if coord_name not in model_grid:
             continue
         vals = np.asarray(model_grid[coord_name].values)
@@ -1582,9 +1617,14 @@ def initialize_output_store(
         root[OUTPUT_DOMINANT_LANDCOVER_NAME].attrs["output_year_to_source_year"] = dict(
             landcover_metadata["output_year_to_source_year"]
         )
-    root.attrs["product_tier"] = product_tier
+        root.attrs["dominant_landcover_code_key"] = json.dumps(
+            dict(landcover_metadata["code_to_name"]),
+            sort_keys=True,
+        )
     root.attrs["quality_flag_values"] = {
-        name: int(value) for name, value in QUALITY_FLAG_VALUES.items()
+        "final_high_quality": int(QUALITY_FLAG_VALUES["final"]),
+        "low_latency_preliminary": int(QUALITY_FLAG_VALUES["low_latency"]),
+        "forced_unapproved_landcover": 2,
     }
 
 
@@ -1619,9 +1659,15 @@ def select_measurement_rich_month(
     fold: Optional[int] = None,
     split: str = "test",
     max_members: Optional[int] = None,
+    member_name_prefix: Optional[str] = None,
+    selection_key: Optional[str] = None,
 ) -> Tuple[pd.Timestamp, pd.Timestamp, Dict[str, object]]:
     member_dirs = _select_member_subset(
-        select_ensemble_member_dirs(ensemble_root),
+        select_ensemble_member_dirs(
+            ensemble_root,
+            member_name_prefix=member_name_prefix,
+            selection_key=selection_key,
+        ),
         max_members=max_members,
     )
     member_site_errors = []

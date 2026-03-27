@@ -1,0 +1,70 @@
+ensemble:
+  outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_shared_ensemble
+  input_data_name: ensemble/lfmc_vh_vv_365_shared_ensemble
+  member_name_prefix: transformer_dm128_
+  selection_key: multitask_shared_dm128_curated16
+  inputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs
+  fold: 9998
+  fallback_num_tasks: 3
+  model_type: standard
+
+data:
+  grid_path: /scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4
+  requested_start_date: 2023-07-01
+  requested_end_date: 2023-08-31
+
+paths:
+  run_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_shared_dm128_2023_07_08
+  tile_metadata_subdir: tile_metadata
+  prepared_subdir: prepared_tensors
+  shard_subdir: shards
+  merged_subdir: merged
+  merged_store_name: lfmc_maps.zarr
+  validation_subdir: validation
+  plots_subdir: plots
+
+chunking:
+  tile_size: 100
+  months_per_block: 1
+  time_chunk_days: 31
+  y_chunk: 256
+  x_chunk: 256
+
+submission:
+  validation_test: false
+  validation_prediction_split: val
+  interactive_validation_pipeline: false
+  forward_batch_size: 2048
+  use_cuda_autocast: false
+  validation_site_n: 10
+  array_concurrency: 128
+  tasks_per_job: 40
+  merge_blocks_per_job: 2
+  use_gpu_forward: true
+  dynamic_gpu_work_queue: true
+  gpu_fine_tasks_per_job: 1
+  gpu_max_jobs: 8
+  gpu_lock_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/gpu_locks
+  gpu_submit_sleep_seconds: 60
+  gpu_time_limit: "02:00:00"
+  gpu_cpus_per_task: 8
+  gpu_mem: 24G
+  serc_partition: serc
+  owners_gpu_max_jobs: 500
+  owners_partition: owners
+  owners_gpu_time_limit: "02:00:00"
+  owners_gpu_cpus_per_task: 8
+  owners_gpu_mem: 24G
+  gpu_max_retries: 20
+  gpu_retry_states: PREEMPTED,REVOKED,BOOT_FAIL,NODE_FAIL,TIMEOUT
+  gpu_time_margin_seconds: 600
+  gpu_claim_stale_seconds: 1800
+  gpu_idle_sleep_seconds: 15
+  gpu_next_task_safety_factor: 1.15
+  serc_only_endgame: true
+  serc_endgame_minutes_threshold: 60
+  serc_endgame_min_samples: 4
+  serc_endgame_recent_completion_count: 32
+
+product:
+  tier: final

@@ -6,6 +6,7 @@ import json
 import os
 import sys
 
+from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -34,6 +35,13 @@ shared_plotting_spec = importlib.util.spec_from_file_location(
 shared_plotting = importlib.util.module_from_spec(shared_plotting_spec)
 assert shared_plotting_spec.loader is not None
 shared_plotting_spec.loader.exec_module(shared_plotting)
+
+
+MAP_EXTENT_WUS_LONLAT = [-125.5, -92.0, 24.0, 50.0]
+LFMC_BROWN_GREEN_CMAP = LinearSegmentedColormap.from_list(
+    "lfmc_brown_green",
+    ["#8c510a", "#d8b365", "#f6e8c3", "#c7eae5", "#5ab4ac", "#01665e"],
+)
 
 
 def get_args():
@@ -68,6 +76,29 @@ def _pick_sample_pixels(day_vals: np.ndarray, n_sites: int) -> np.ndarray:
         return valid_idx
     positions = np.linspace(0, len(valid_idx) - 1, n_sites).astype(int)
     return valid_idx[positions]
+
+
+def _write_map_plot(
+    da: xr.DataArray,
+    save_path: str,
+    title: str,
+    cmap,
+    cbar_label: str,
+):
+    shared_plotting.plot_from_xarray(
+        load_type="da",
+        type_obj=da,
+        var=str(da.name),
+        proj_in="EPSG:5070",
+        proj_out="EPSG:5070",
+        fname=save_path,
+        cmap=cmap,
+        extent=MAP_EXTENT_WUS_LONLAT,
+        extent_crs="EPSG:4326",
+        title=title,
+        cbar_label=cbar_label,
+    )
+    print(f"[validate_map_outputs] wrote map plot to {save_path}")
 
 
 def _extract_point_series(
@@ -166,6 +197,8 @@ def _load_site_error_for_validation(run_config, safe_start, safe_end):
         safe_end,
         fold=int(run_config.get("fold", 9998)),
         split=validation_split,
+        member_name_prefix=run_config.get("ensemble_member_name_prefix"),
+        selection_key=run_config.get("ensemble_selection_key"),
     )
     if run_config.get("validation_month") is not None:
         month_start = pd.Timestamp(run_config["validation_month"]["start_date"]).normalize()
@@ -340,24 +373,25 @@ def main():
     os.makedirs(plots_root, exist_ok=True)
 
     map_day = _pick_map_day(ds, month_start, month_end)
-    day_da = ds[OUTPUT_MEAN_NAME].sel(time=map_day)
-    day_field = day_da.values
+    day_mean_da = ds[OUTPUT_MEAN_NAME].sel(time=map_day)
+    day_field = day_mean_da.values
     valid_mask = np.isfinite(day_field)
-    lons = model_grid["lon"].values[valid_mask]
-    lats = model_grid["lat"].values[valid_mask]
-    vals = day_field[valid_mask]
     map_path = os.path.join(plots_root, f"map_{map_day.date().isoformat()}.png")
-    shared_plotting.plot_from_xarray(
-        load_type="da",
-        type_obj=day_da,
-        var=OUTPUT_MEAN_NAME,
-        proj_in="EPSG:5070",
-        proj_out="EPSG:4326",
-        fname=map_path,
-        cmap="viridis",
+    _write_map_plot(
+        da=day_mean_da.rename(OUTPUT_MEAN_NAME),
+        save_path=map_path,
         title=f"{OUTPUT_MEAN_NAME} on {map_day.date()}",
+        cmap=LFMC_BROWN_GREEN_CMAP,
+        cbar_label="LFMC (%)",
     )
-    print(f"[validate_map_outputs] wrote map plot to {map_path}")
+    std_map_path = os.path.join(plots_root, f"map_std_{map_day.date().isoformat()}.png")
+    _write_map_plot(
+        da=ds[OUTPUT_STD_NAME].sel(time=map_day).rename(OUTPUT_STD_NAME),
+        save_path=std_map_path,
+        title=f"{OUTPUT_STD_NAME} on {map_day.date()}",
+        cmap="magma",
+        cbar_label="LFMC uncertainty (std, %)",
+    )
 
     sample_idx = _pick_sample_pixels(day_field.reshape(-1), n_sites=int(args.n_map_sites))
     y_idx, x_idx = np.unravel_index(sample_idx, day_field.shape)

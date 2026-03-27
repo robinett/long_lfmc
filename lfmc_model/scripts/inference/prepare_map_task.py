@@ -53,13 +53,19 @@ def main():
         run_config = json.load(f)
 
     print(f"[prepare_map_task] job_task_id={task_id} preparing {len(task_rows)} fine tasks")
-    _, runtimes = load_ensemble_runtimes(
+    member_dirs, runtimes = load_ensemble_runtimes(
         ensemble_root=run_config["ensemble_root"],
         input_data_name=run_config["input_data_name"],
         inputs_root=run_config.get("inputs_root"),
         fold=int(run_config.get("fold", 9998)),
         fallback_num_tasks=int(run_config.get("fallback_num_tasks", 3)),
+        member_name_prefix=run_config.get("ensemble_member_name_prefix"),
+        selection_key=run_config.get("ensemble_selection_key"),
     )
+    if member_dirs != run_config["member_dirs"]:
+        raise ValueError(
+            "[prepare_map_task] resolved ensemble member dirs differ from persisted run_config member_dirs"
+        )
     reference_runtime = build_static_superset_runtime(runtimes[0], runtimes)
     differing_member_indices = [
         member_idx

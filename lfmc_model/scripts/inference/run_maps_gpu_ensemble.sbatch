@@ -35,12 +35,24 @@ if [[ -z "${GPU_TASK_ID:-}" ]]; then
 fi
 
 model_type="${MODEL_TYPE:-standard}"
+dynamic_work_queue="${DYNAMIC_GPU_WORK_QUEUE:-false}"
+gpu_job_time_limit_seconds="${GPU_JOB_TIME_LIMIT_SECONDS:-}"
 
 echo "Running GPU forward task ${GPU_TASK_ID}"
 echo "manifest_path=${MANIFEST_PATH}"
 echo "model_type=${model_type}"
+echo "dynamic_work_queue=${dynamic_work_queue}"
+echo "gpu_job_time_limit_seconds=${gpu_job_time_limit_seconds}"
 
-python3 -u "${script_dir}/run_map_task_gpu.py" \
-    --manifest_path "${MANIFEST_PATH}" \
-    --task_id "${GPU_TASK_ID}" \
+run_args=(
+    --manifest_path "${MANIFEST_PATH}"
     --model_type "${model_type}"
+)
+
+if [[ "${dynamic_work_queue}" == "true" ]]; then
+    run_args+=(--worker_id "${GPU_TASK_ID}" --dynamic_work_queue)
+else
+    run_args+=(--task_id "${GPU_TASK_ID}")
+fi
+
+python3 -u "${script_dir}/run_map_task_gpu.py" "${run_args[@]}"

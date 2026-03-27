@@ -8,10 +8,12 @@ import shutil
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+import zarr
 
 from map_runtime_utils import (
     DEFAULT_MODEL_GRID_PATH,
     OUTPUT_DOMINANT_LANDCOVER_NAME,
+    OUTPUT_LANDCOVER_YEAR_NAME,
     OUTPUT_MEAN_NAME,
     OUTPUT_QUALITY_FLAG_NAME,
     OUTPUT_STD_NAME,
@@ -45,10 +47,71 @@ def _load_run_context(manifest_path: str):
 
 def _build_time_index(run_config: dict):
     return pd.date_range(
-        pd.Timestamp(run_config["safe_start_date"]).normalize(),
-        pd.Timestamp(run_config["safe_end_date"]).normalize(),
+        pd.Timestamp(
+            run_config.get("output_store_start_date", run_config["safe_start_date"])
+        ).normalize(),
+        pd.Timestamp(
+            run_config.get("output_store_end_date", run_config["safe_end_date"])
+        ).normalize(),
         freq="D",
     )
+
+
+def _verify_existing_store(
+    out_zarr_path: str,
+    run_config: dict,
+    grid_path: str | None,
+) -> pd.DatetimeIndex:
+    resolved_grid_path = (
+        grid_path if grid_path is not None else run_config.get("grid_path", DEFAULT_MODEL_GRID_PATH)
+    )
+    model_grid = open_model_grid(resolved_grid_path)
+    expected_time_index = _build_time_index(run_config)
+    root = zarr.open_group(out_zarr_path, mode="r")
+
+    expected_time_vals = np.asarray(expected_time_index.values, dtype="datetime64[ns]").astype("int64")
+    actual_time_vals = np.asarray(root["time"][:], dtype=np.int64)
+    if expected_time_vals.shape != actual_time_vals.shape or not np.array_equal(expected_time_vals, actual_time_vals):
+        raise ValueError(
+            f"Existing store time coordinate does not match expected output-store window: {out_zarr_path}"
+        )
+
+    for coord_name in ["y", "x"]:
+        expected_vals = np.asarray(model_grid[coord_name].values)
+        actual_vals = np.asarray(root[coord_name][:])
+        if expected_vals.shape != actual_vals.shape or not np.array_equal(expected_vals, actual_vals):
+            raise ValueError(
+                f"Existing store coordinate {coord_name!r} does not match the configured model grid"
+            )
+
+    expected_shape = (
+        len(expected_time_index),
+        int(model_grid.sizes["y"]),
+        int(model_grid.sizes["x"]),
+    )
+    for var_name in [OUTPUT_MEAN_NAME, OUTPUT_STD_NAME]:
+        if tuple(root[var_name].shape) != expected_shape:
+            raise ValueError(
+                f"Existing store variable {var_name!r} has shape {tuple(root[var_name].shape)}; "
+                f"expected {expected_shape}"
+            )
+
+    expected_landcover_years = np.asarray(
+        run_config.get("landcover_output_years", []),
+        dtype=np.int32,
+    )
+    if expected_landcover_years.size > 0:
+        if OUTPUT_LANDCOVER_YEAR_NAME not in root:
+            raise ValueError("Existing store is missing landcover_year coordinate")
+        actual_landcover_years = np.asarray(root[OUTPUT_LANDCOVER_YEAR_NAME][:], dtype=np.int32)
+        if (
+            expected_landcover_years.shape != actual_landcover_years.shape
+            or not np.array_equal(expected_landcover_years, actual_landcover_years)
+        ):
+            raise ValueError(
+                "Existing store landcover_year coordinate does not match expected output years"
+            )
+    return expected_time_index
 
 
 def _initialize_store(
@@ -57,13 +120,16 @@ def _initialize_store(
     grid_path: str | None,
     overwrite: bool,
 ):
-    if os.path.exists(out_zarr_path) and not overwrite:
-        raise FileExistsError(
-            f"Output zarr already exists: {out_zarr_path}. Use --overwrite to replace it."
-        )
     if os.path.exists(out_zarr_path) and overwrite:
         print(f"[merge_map_shards] Removing existing store {out_zarr_path}")
         shutil.rmtree(out_zarr_path)
+    if os.path.exists(out_zarr_path) and not overwrite:
+        print(f"[merge_map_shards] Reusing existing compatible store {out_zarr_path}")
+        return _verify_existing_store(
+            out_zarr_path=out_zarr_path,
+            run_config=run_config,
+            grid_path=grid_path,
+        )
 
     resolved_grid_path = (
         grid_path if grid_path is not None else run_config.get("grid_path", DEFAULT_MODEL_GRID_PATH)
@@ -81,6 +147,8 @@ def _initialize_store(
         landcover_metadata = build_dominant_landcover_metadata(
             landcover_path=landcover_path,
             output_years=landcover_output_years,
+            target_x=np.asarray(model_grid["x"].values, dtype=np.float64),
+            target_y=np.asarray(model_grid["y"].values, dtype=np.float64),
         )
     print(
         f"[merge_map_shards] Initializing store {out_zarr_path} with "

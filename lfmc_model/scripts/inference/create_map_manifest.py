@@ -69,6 +69,7 @@ def get_args():
     parser.add_argument("--config_path", type=str, default=default_map_config_path())
     parser.add_argument("--ensemble_root", type=str, default=None)
     parser.add_argument("--input_data_name", type=str, default=None)
+    parser.add_argument("--ensemble_member_name_prefix", type=str, default=None)
     parser.add_argument("--inputs_root", type=str, default=None)
     parser.add_argument("--run_root", type=str, default=None)
     parser.add_argument("--source_registry_path", type=str, default=None)
@@ -93,6 +94,24 @@ def main():
     cfg = load_map_config(args.config_path)
     ensemble_root = config_or_override(args.ensemble_root, cfg, "ensemble", "outputs_root")
     input_data_name = config_or_override(args.input_data_name, cfg, "ensemble", "input_data_name")
+    ensemble_member_name_prefix = config_or_override(
+        args.ensemble_member_name_prefix,
+        cfg,
+        "ensemble",
+        "member_name_prefix",
+        default=None,
+    )
+    if ensemble_member_name_prefix in {"", "None"}:
+        ensemble_member_name_prefix = None
+    ensemble_selection_key = config_or_override(
+        None,
+        cfg,
+        "ensemble",
+        "selection_key",
+        default=None,
+    )
+    if ensemble_selection_key in {"", "None"}:
+        ensemble_selection_key = None
     inputs_root = config_or_override(args.inputs_root, cfg, "ensemble", "inputs_root", default=None)
     fold = int(config_or_override(None, cfg, "ensemble", "fold", default=9998))
     fallback_num_tasks = int(
@@ -122,6 +141,20 @@ def main():
         cfg,
         "data",
         "requested_start_date",
+        default=None,
+    )
+    output_store_start_raw = config_or_override(
+        None,
+        cfg,
+        "data",
+        "output_store_start_date",
+        default=None,
+    )
+    output_store_end_raw = config_or_override(
+        None,
+        cfg,
+        "data",
+        "output_store_end_date",
         default=None,
     )
     requested_end_raw = config_or_override(
@@ -210,6 +243,8 @@ def main():
     print(f"[create_map_manifest] config_path={cfg['_config_path']}")
     print(f"[create_map_manifest] ensemble_root={ensemble_root}")
     print(f"[create_map_manifest] input_data_name={input_data_name}")
+    if ensemble_member_name_prefix is not None:
+        print(f"[create_map_manifest] ensemble_member_name_prefix={ensemble_member_name_prefix}")
     member_dirs, runtimes = load_ensemble_runtimes(
         ensemble_root=ensemble_root,
         input_data_name=input_data_name,
@@ -217,6 +252,8 @@ def main():
         fold=fold,
         fallback_num_tasks=fallback_num_tasks,
         max_members=max_ensemble_members,
+        member_name_prefix=ensemble_member_name_prefix,
+        selection_key=ensemble_selection_key,
     )
     print(f"[create_map_manifest] ensemble members={len(member_dirs)}")
     if max_ensemble_members is not None:
@@ -265,6 +302,26 @@ def main():
         f"[create_map_manifest] shared valid window: "
         f"{safe_start.date()} to {safe_end.date()}"
     )
+    output_store_start = (
+        pd.Timestamp(output_store_start_raw).normalize()
+        if output_store_start_raw not in {None, "", "None"}
+        else safe_start
+    )
+    output_store_end = (
+        pd.Timestamp(output_store_end_raw).normalize()
+        if output_store_end_raw not in {None, "", "None"}
+        else safe_end
+    )
+    if output_store_start > safe_start or output_store_end < safe_end:
+        raise ValueError(
+            "Configured output_store_start_date/output_store_end_date must fully cover the "
+            f"safe run window {safe_start.date()} to {safe_end.date()}; got "
+            f"{output_store_start.date()} to {output_store_end.date()}"
+        )
+    print(
+        f"[create_map_manifest] output store window: "
+        f"{output_store_start.date()} to {output_store_end.date()}"
+    )
     climate_layouts = [_runtime_climate_codes(runtime) for runtime in runtimes]
     allowed_climate_codes = sorted(set.intersection(*climate_layouts)) if climate_layouts else []
     if len(allowed_climate_codes) == 0:
@@ -279,6 +336,7 @@ def main():
 
     blocks = month_blocks(safe_start, safe_end, months_per_block=months_per_block)
     block_years = sorted({block_start.year for block_start, _ in blocks})
+    output_store_years = list(range(output_store_start.year, output_store_end.year + 1))
     if source_registry_path is not None:
         source_resolution = resolve_inference_sources(
             registry_path=source_registry_path,
@@ -335,6 +393,8 @@ def main():
             fold=fold,
             split=validation_prediction_split,
             max_members=max_ensemble_members,
+            member_name_prefix=ensemble_member_name_prefix,
+            selection_key=ensemble_selection_key,
         )
         month_start, month_end = validation_month_window_with_previous(
             best_month_start=best_month_start,
@@ -565,9 +625,22 @@ def main():
         f"num_merge_tasks={merge_task_n}"
     )
 
-    out_zarr_path = os.path.join(
-        merged_dir,
-        config_or_override(None, cfg, "paths", "merged_store_name"),
+    persistent_out_zarr_path = config_or_override(
+        None,
+        cfg,
+        "paths",
+        "persistent_out_zarr_path",
+        default=None,
+    )
+    if persistent_out_zarr_path in {"", "None"}:
+        persistent_out_zarr_path = None
+    out_zarr_path = (
+        str(persistent_out_zarr_path)
+        if persistent_out_zarr_path is not None
+        else os.path.join(
+            merged_dir,
+            config_or_override(None, cfg, "paths", "merged_store_name"),
+        )
     )
     run_config = {
         "run_name": run_name,
@@ -579,6 +652,8 @@ def main():
         "source_resolution": json_safe_source_resolution(source_resolution),
         "ensemble_root": ensemble_root,
         "input_data_name": input_data_name,
+        "ensemble_member_name_prefix": ensemble_member_name_prefix,
+        "ensemble_selection_key": ensemble_selection_key,
         "member_dirs": member_dirs,
         "max_ensemble_members": max_ensemble_members,
         "inputs_root": inputs_root,
@@ -598,6 +673,8 @@ def main():
         "requested_end_date": str(requested_end.date()),
         "safe_start_date": str(safe_start.date()),
         "safe_end_date": str(safe_end.date()),
+        "output_store_start_date": str(output_store_start.date()),
+        "output_store_end_date": str(output_store_end.date()),
         "tile_size": tile_size,
         "months_per_block": months_per_block,
         "time_chunk_days": time_chunk_days,
@@ -624,7 +701,7 @@ def main():
             if source_resolution is not None
             else dss["landcover_frac"].encoding.get("source", DEFAULT_SCRATCH_ROOT)
         ),
-        "landcover_output_years": [int(year) for year in active_years],
+        "landcover_output_years": [int(year) for year in output_store_years],
         "static_path": (
             source_resolution["static_path"]
             if source_resolution is not None
@@ -644,6 +721,7 @@ def main():
         "validation_dir": validation_dir,
         "plots_dir": plots_dir,
         "out_zarr_path": out_zarr_path,
+        "persistent_out_zarr_path": persistent_out_zarr_path,
         "product_tier": product_tier,
         "quality_flag_value": int(QUALITY_FLAG_VALUES[product_tier]),
         "output_var_names": [

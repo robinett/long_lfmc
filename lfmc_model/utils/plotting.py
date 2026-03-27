@@ -1829,6 +1829,99 @@ def plot_timeseries_by_site(
         plt.savefig(os.path.join(out_dir, f"timeseries_{lat:.4f}_{lon:.4f}.png"), dpi=250)
         plt.close(fig)
 
+
+def plot_pixel_grid_timeseries(
+    dates,
+    mean_cube,
+    save_path,
+    std_cube=None,
+    site_label=None,
+    center_lat=None,
+    center_lon=None,
+    y_label="LFMC ensemble mean (%)",
+):
+    dates = pd.to_datetime(dates)
+    mean_cube = np.asarray(mean_cube, dtype=np.float32)
+    std_cube = None if std_cube is None else np.asarray(std_cube, dtype=np.float32)
+    if mean_cube.ndim != 3:
+        raise ValueError(f"mean_cube must have shape (time, y, x); got {mean_cube.shape}")
+    if mean_cube.shape[1:] != (3, 3):
+        raise ValueError(f"plot_pixel_grid_timeseries expects a 3x3 grid; got {mean_cube.shape[1:]}")
+    if std_cube is not None and std_cube.shape != mean_cube.shape:
+        raise ValueError(
+            f"std_cube must match mean_cube shape; got {std_cube.shape} vs {mean_cube.shape}"
+        )
+
+    fig, ax = plt.subplots(figsize=(11, 4.8))
+    neighbor_colors = [
+        "#9c755f", "#76b7b2", "#edc948",
+        "#b07aa1", None,      "#ff9da7",
+        "#59a14f", "#4e79a7", "#e15759",
+    ]
+    for y_idx in range(3):
+        for x_idx in range(3):
+            series = mean_cube[:, y_idx, x_idx]
+            if np.all(~np.isfinite(series)):
+                continue
+            rel_y = 1 - y_idx
+            rel_x = x_idx - 1
+            if y_idx == 1 and x_idx == 1:
+                ax.plot(
+                    dates,
+                    series,
+                    color="#111111",
+                    linewidth=2.3,
+                    label="center pixel",
+                    zorder=3,
+                )
+                if std_cube is not None:
+                    center_std = std_cube[:, y_idx, x_idx]
+                    lo = series - center_std
+                    hi = series + center_std
+                    ax.fill_between(
+                        dates,
+                        lo,
+                        hi,
+                        color="#111111",
+                        alpha=0.14,
+                        linewidth=0.0,
+                        zorder=2,
+                    )
+            else:
+                color = neighbor_colors[y_idx * 3 + x_idx]
+                ax.plot(
+                    dates,
+                    series,
+                    color=color,
+                    linewidth=1.3,
+                    alpha=0.95,
+                    label=f"neighbor ({rel_x:+d}, {rel_y:+d})",
+                    zorder=1,
+                )
+
+    title_parts = []
+    if site_label is not None:
+        title_parts.append(str(site_label))
+    if center_lat is not None and center_lon is not None:
+        title_parts.append(f"center ({float(center_lat):.4f}, {float(center_lon):.4f})")
+    ax.set_title(" | ".join(title_parts) if len(title_parts) > 0 else "3x3 pixel-grid timeseries")
+    ax.set_xlabel("Date")
+    ax.set_ylabel(y_label)
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
+    legend = ax.legend(
+        ncol=3,
+        fontsize=8,
+        frameon=True,
+        loc="upper left",
+    )
+    _style_legend(legend)
+    fig.autofmt_xdate(rotation=45)
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=250)
+    plt.close(fig)
+
 #def plot_timeseries_by_site(preds_df, out_dir, data_col_name,y_label):
 #    # get the unique lat/lon combinations from our dataset
 #    unique_locs = preds_df[['lat', 'lon']].drop_duplicates()
