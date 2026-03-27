@@ -1,0 +1,21 @@
+server:
+  host: 127.0.0.1
+  port: 8000
+
+data:
+  dataset_label: Long LFMC Prototype
+  data_source: local
+  local_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_shared_dm128_2023_07_08/run_20260323_205249/merged/lfmc_maps.zarr
+  source_store: s3://rseg/long-lfmc-test/lfmc_maps.zarr
+  source_endpoint_url: https://data.source.coop
+  grid_crs: EPSG:5070
+  display_variable: lfmc_ens_mean
+  spread_variable: lfmc_ens_std
+  quality_variable: quality_flag
+  landcover_variable: dominant_landcover_code
+  initial_date: 2023-07-01
+
+assets:
+  asset_mode: local
+  local_asset_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_assets/local_two_date_native_grid
+  manifest_filename: manifest.json

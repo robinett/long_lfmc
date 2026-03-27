@@ -1,0 +1,52 @@
+dataset:
+  dataset_label: Long LFMC Prototype
+  local_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_shared_dm128_2023_07_08/run_20260323_205249/merged/lfmc_maps.zarr
+  grid_crs: EPSG:5070
+  initial_date: 2023-07-01
+  dates:
+    - 2023-07-01
+    - 2023-08-01
+
+output:
+  asset_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_assets/local_two_date_native_grid
+  manifest_filename: manifest.json
+  clear_output_root: true
+
+tiles:
+  tile_size: 512
+  min_zoom: 0
+  max_zoom: 3
+  extra_view_resolutions:
+    - 250.0
+    - 125.0
+    - 62.5
+    - 31.25
+    - 15.625
+
+layers:
+  mean:
+    variable: lfmc_ens_mean
+    label: LFMC
+    unit: percent
+    min: 40.0
+    max: 220.0
+    palette:
+      - [37, 59, 54]
+      - [109, 142, 96]
+      - [208, 196, 135]
+      - [202, 126, 74]
+      - [109, 39, 27]
+    stops: [0.0, 0.18, 0.40, 0.68, 1.0]
+  uncertainty:
+    variable: lfmc_ens_std
+    label: Uncertainty
+    unit: percent
+    min: 0.0
+    max: 25.0
+    palette:
+      - [241, 244, 248]
+      - [198, 216, 230]
+      - [135, 177, 199]
+      - [85, 125, 151]
+      - [35, 68, 90]
+    stops: [0.0, 0.2, 0.45, 0.72, 1.0]
