@@ -24,6 +24,16 @@ def _log(msg):
     print(f"[{_ts()}] {msg}")
 
 
+def _squeeze_single_band(data_array):
+    if "band" not in data_array.dims:
+        return data_array
+    if data_array.sizes["band"] != 1:
+        raise ValueError(
+            f"Expected a single-band climate zone raster, got band size {data_array.sizes['band']}."
+        )
+    return data_array.isel(band=0, drop=True)
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(
         description="Select SAR supervision samples for multitask LFMC training."
@@ -562,6 +572,9 @@ def main():
                 x=xr.DataArray(batch_xs, dims="points"),
                 y=xr.DataArray(batch_ys, dims="points"),
                 method="nearest",
+            )
+            sampled_batch_climate_ok = _squeeze_single_band(
+                sampled_batch_climate_ok
             ).transpose("points")
             if ProgressBar:
                 with ProgressBar():
@@ -685,6 +698,9 @@ def main():
             x=xr.DataArray(union_xs, dims="points"),
             y=xr.DataArray(union_ys, dims="points"),
             method="nearest",
+        )
+        sampled_random_climate_ok = _squeeze_single_band(
+            sampled_random_climate_ok
         ).transpose("points")
         if ProgressBar:
             with ProgressBar():
