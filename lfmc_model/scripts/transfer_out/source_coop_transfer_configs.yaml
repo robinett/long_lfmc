@@ -1,0 +1,14 @@
+source_coop:
+  region: us-west-2
+  bucket: us-west-2.opendata.source.coop
+  product_prefix: rseg/long-lfmc-test/
+  credentials_path: /home/users/trobinet/long_lfmc/lfmc_model/scripts/transfer_out/source_credentials.json
+  verify_after_upload: true
+  delete_extra_remote_files: false
+  acl: none
+
+datasets:
+  example_lfmc_maps:
+    description: Example LFMC map Zarr store for Source Cooperative upload.
+    source_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_shared_dm128_2023_07_08/run_20260323_205249/merged/lfmc_maps.zarr
+    destination_relpath: lfmc_maps.zarr

@@ -19,6 +19,7 @@
 **/logs/
 **/testing/
 **/old/
+lfmc_model/scripts/transfer_out/source_credentials.json
 
 # Ignore dotfiles EXCEPT .gitignore
 **/.*
