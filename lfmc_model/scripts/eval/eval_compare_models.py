@@ -12,11 +12,14 @@ from tqdm import tqdm
 here = os.path.abspath(os.path.dirname(__file__))
 project_root = os.path.abspath(os.path.join(here, "../../.."))
 sys.path.append(os.path.join(project_root, "lfmc_model", "utils"))
+sys.path.append(os.path.join(project_root, "lfmc_model", "scripts", "paper_figures"))
 
 from plotting import bar_plot
 from eval_deep import (
     _build_row_keys,
     _format_metric_with_std,
+    build_lfmc_space_time_tables,
+    build_site_month_anomaly_eval_df,
     _metric_std,
     build_site_landcover_lookup,
     build_lfmc_y2y_df,
@@ -28,6 +31,7 @@ from eval_deep import (
     load_eval_context,
     prepare_lfmc_landcover_eval_df,
 )
+from paper_figure_plotting import plot_landcover_comparison_panels
 
 
 LANDCOVER_CLASS_ORDER = [
@@ -53,6 +57,8 @@ def get_args():
     parser.add_argument("--model_b_outputs_root", type=str, default=None)
     parser.add_argument("--model_a_ensemble_outputs_root", type=str, default=None)
     parser.add_argument("--model_b_ensemble_outputs_root", type=str, default=None)
+    parser.add_argument("--model_a_ensemble_member_name_prefix", type=str, default=None)
+    parser.add_argument("--model_b_ensemble_member_name_prefix", type=str, default=None)
     parser.add_argument("--plot_dir", type=str, default=None)
     parser.add_argument("--fontsize", type=int, default=16)
     return parser.parse_args()
@@ -77,6 +83,10 @@ def resolve_plot_dir(model_a_name, model_b_name, plot_dir):
 
 def comparison_model_color(model_name):
     name = str(model_name).strip().lower().replace("-", "_")
+    if "dm64" in name:
+        return "#7ca596"
+    if "dm128" in name:
+        return "#d07c55"
     if name in {"lfmc", "lfmc_ens", "single_task", "singletask"}:
         return SINGLE_TASK_COLOR
     if name in {"lfmc_vh_vv", "lfmc_vv_vh", "lfmc_vh_vv_ens", "lfmc_vh_vv_ens_fullrandom", "multitask"}:
@@ -84,12 +94,19 @@ def comparison_model_color(model_name):
     return None
 
 
-def _load_named_context(name, model_dir=None, outputs_root=None, ensemble_outputs_root=None):
+def _load_named_context(
+    name,
+    model_dir=None,
+    outputs_root=None,
+    ensemble_outputs_root=None,
+    ensemble_member_name_prefix=None,
+):
     context = load_eval_context(
         model_dir=model_dir,
         outputs_root=outputs_root,
         ensemble_outputs_root=ensemble_outputs_root,
         ascending=True,
+        ensemble_member_name_prefix=ensemble_member_name_prefix,
     )
     context["name"] = name
     return context
@@ -308,9 +325,15 @@ def _get_training_member_dirs(context):
 
 
 def _ordered_landcover_categories(categories):
+    categories = list(categories)
+    ordered = []
+    if "overall" in categories:
+        ordered.append("overall")
     present_classes = [cls for cls in LANDCOVER_CLASS_ORDER if cls in categories]
-    remaining_classes = sorted([cls for cls in categories if cls not in present_classes])
-    return present_classes + remaining_classes
+    remaining_classes = sorted(
+        [cls for cls in categories if cls not in present_classes and cls != "overall"]
+    )
+    return ordered + present_classes + remaining_classes
 
 
 def _load_train_info_union(model_dir):
@@ -425,95 +448,304 @@ def _prepare_train_landcover_fraction_summary(context, plot_dir):
     return out
 
 
-def _landcover_metric_tables(context, plot_dir):
+def _overall_metric_std(context):
+    member_eval_dfs = context["member_eval_dfs"]
+    if member_eval_dfs is None or len(member_eval_dfs) == 0:
+        return {"rmse": np.nan, "r2": np.nan}
+    vals = []
+    for member_eval_df in member_eval_dfs:
+        member_lfmc_df = member_eval_df[member_eval_df["target"] == "lfmc"].reset_index(drop=True)
+        if len(member_lfmc_df) == 0:
+            continue
+        vals.append(
+            compute_basic_metrics(
+                member_lfmc_df["obs"].values,
+                member_lfmc_df["pred"].values,
+            )["r2"]
+        )
+    return {"r2": _metric_std(vals)}
+
+
+def _space_time_metric_stds(context):
+    member_eval_dfs = context["member_eval_dfs"]
+    if member_eval_dfs is None or len(member_eval_dfs) == 0:
+        nan_metric = {"rmse": np.nan, "r2": np.nan}
+        return nan_metric, nan_metric
+    mean_vals = []
+    anomaly_vals = []
+    for member_eval_df in member_eval_dfs:
+        member_lfmc_df = member_eval_df[member_eval_df["target"] == "lfmc"].reset_index(drop=True)
+        if len(member_lfmc_df) == 0:
+            continue
+        site_summary_df, anomaly_df = build_lfmc_space_time_tables(member_lfmc_df)
+        if len(site_summary_df) > 0:
+            mean_vals.append(
+                compute_basic_metrics(
+                    site_summary_df["obs_mean"].values,
+                    site_summary_df["pred_mean"].values,
+                )["r2"]
+            )
+        if len(anomaly_df) > 0:
+            anomaly_vals.append(
+                compute_basic_metrics(
+                    anomaly_df["obs_anom"].values,
+                    anomaly_df["pred_anom"].values,
+                )["r2"]
+            )
+    return {"r2": _metric_std(mean_vals)}, {"r2": _metric_std(anomaly_vals)}
+
+
+def _monthly_source_centered_metric_std(context, min_obs, min_years):
+    member_eval_dfs = context["member_eval_dfs"]
+    if member_eval_dfs is None or len(member_eval_dfs) == 0:
+        return {"rmse": np.nan, "r2": np.nan}
+    vals = []
+    for member_eval_df in member_eval_dfs:
+        month_anom_df, valid_month_groups = build_site_month_anomaly_eval_df(
+            lfmc_df=build_lfmc_y2y_df(member_eval_df),
+            min_obs=min_obs,
+            min_years=min_years,
+        )
+        if len(month_anom_df) == 0 or len(valid_month_groups) == 0:
+            continue
+        vals.append(
+            compute_basic_metrics(
+                month_anom_df["obs_dev"].values,
+                month_anom_df["pred_dev"].values,
+            )["r2"]
+        )
+    return {"r2": _metric_std(vals)}
+
+
+def _attach_shared_landcover_lookup(member_eval_df, site_lookup_df):
+    member_lfmc_df = build_lfmc_y2y_df(member_eval_df)
+    if len(member_lfmc_df) == 0:
+        return pd.DataFrame()
+    member_lfmc_df = member_lfmc_df.copy()
+    member_lfmc_df["site_key"] = member_lfmc_df["site_key"].astype(str)
+    member_lfmc_df = member_lfmc_df.merge(
+        site_lookup_df[["site_key", "dominant_landcover", "dominant_landcover_frac"]],
+        on="site_key",
+        how="left",
+    )
+    member_lfmc_df = member_lfmc_df[member_lfmc_df["dominant_landcover"].notna()].copy()
+    if len(member_lfmc_df) == 0:
+        return pd.DataFrame()
+    member_lfmc_df["site_obs_mean"] = member_lfmc_df.groupby("site_key")["obs"].transform("mean")
+    member_lfmc_df["site_pred_mean"] = member_lfmc_df.groupby("site_key")["pred"].transform("mean")
+    member_lfmc_df["site_obs_anom"] = member_lfmc_df["obs"] - member_lfmc_df["site_obs_mean"]
+    member_lfmc_df["site_pred_anom"] = member_lfmc_df["pred"] - member_lfmc_df["site_pred_mean"]
+    grp_cols = ["site_key", "month"]
+    member_lfmc_df["seasonal_obs_mean"] = member_lfmc_df.groupby(grp_cols)["obs"].transform("mean")
+    member_lfmc_df["seasonal_pred_mean"] = member_lfmc_df.groupby(grp_cols)["pred"].transform("mean")
+    member_lfmc_df["seasonal_obs_anom"] = member_lfmc_df["obs"] - member_lfmc_df["seasonal_obs_mean"]
+    member_lfmc_df["seasonal_pred_anom"] = member_lfmc_df["pred"] - member_lfmc_df["seasonal_pred_mean"]
+    return member_lfmc_df
+
+
+def _landcover_metric_tables(context, plot_dir, min_obs=20, min_years=5):
     lfmc_lc_df = prepare_lfmc_landcover_eval_df(context["eval_df"], plot_dir)
     if len(lfmc_lc_df) == 0:
         return pd.DataFrame()
+    site_lookup_path = os.path.join(plot_dir, "lfmc_site_landcover_lookup.csv")
+    site_lookup_df = build_site_landcover_lookup(
+        build_lfmc_y2y_df(context["eval_df"]),
+        site_lookup_path,
+    )
+    site_lookup_df = site_lookup_df.copy()
+    site_lookup_df["site_key"] = site_lookup_df["site_key"].astype(str)
     metric_df = compute_landcover_decomposition_metrics(lfmc_lc_df)
+    member_eval_dfs = context["member_eval_dfs"]
+    if member_eval_dfs is not None and len(member_eval_dfs) > 0:
+        member_metric_frames = []
+        for member_eval_df in member_eval_dfs:
+            member_lfmc_lc_df = _attach_shared_landcover_lookup(member_eval_df, site_lookup_df)
+            if len(member_lfmc_lc_df) > 0:
+                member_metric_frames.append(compute_landcover_decomposition_metrics(member_lfmc_lc_df))
+        if len(member_metric_frames) > 0:
+            for metric_name in ["overall_r2", "site_mean_r2", "site_anom_r2"]:
+                std_lookup = {}
+                for landcover in metric_df["dominant_landcover"].tolist():
+                    vals = []
+                    for member_metric_df in member_metric_frames:
+                        row = member_metric_df[member_metric_df["dominant_landcover"] == landcover]
+                        if len(row) > 0:
+                            vals.append(float(row.iloc[0][metric_name]))
+                    std_lookup[landcover] = _metric_std(vals)
+                metric_df[f"{metric_name}_std"] = metric_df["dominant_landcover"].map(std_lookup)
     y2y_df, _, _ = compute_landcover_y2y_metrics(
         lfmc_df=build_lfmc_y2y_df(context["eval_df"]),
-        min_obs=20,
-        min_years=5,
+        min_obs=min_obs,
+        min_years=min_years,
         plot_dir=plot_dir,
     )
     if len(y2y_df) > 0:
         metric_df = metric_df.merge(
-            y2y_df[["dominant_landcover", "pct_variability_captured_source_centered", "n_groups"]],
+            y2y_df[
+                [
+                    "dominant_landcover",
+                    "pct_variability_captured_source_centered",
+                    "n_groups",
+                    "total_obs",
+                ]
+            ],
             on="dominant_landcover",
             how="left",
         )
     else:
         metric_df["pct_variability_captured_source_centered"] = np.nan
         metric_df["n_groups"] = np.nan
+        metric_df["total_obs"] = np.nan
     metric_df["fraction_yearly_variability_captured"] = (
         metric_df["pct_variability_captured_source_centered"] / 100.0
     )
+    if member_eval_dfs is not None and len(member_eval_dfs) > 0:
+        fraction_lookup = {}
+        for landcover in metric_df["dominant_landcover"].tolist():
+            vals = []
+            for member_eval_df in member_eval_dfs:
+                member_y2y_df, _, _ = compute_landcover_y2y_metrics(
+                    lfmc_df=build_lfmc_y2y_df(member_eval_df),
+                    min_obs=min_obs,
+                    min_years=min_years,
+                    plot_dir=plot_dir,
+                )
+                row = member_y2y_df[member_y2y_df["dominant_landcover"] == landcover]
+                if len(row) > 0:
+                    vals.append(float(row.iloc[0]["pct_variability_captured_source_centered"]) / 100.0)
+            fraction_lookup[landcover] = _metric_std(vals)
+        metric_df["fraction_yearly_variability_captured_std"] = metric_df["dominant_landcover"].map(
+            fraction_lookup
+        )
+    month_anom_df, valid_month_groups = build_site_month_anomaly_eval_df(
+        lfmc_df=build_lfmc_y2y_df(context["eval_df"]),
+        min_obs=min_obs,
+        min_years=min_years,
+    )
+    if len(month_anom_df) > 0 and len(valid_month_groups) > 0:
+        month_anom_df = month_anom_df.merge(
+            site_lookup_df[["site_key", "dominant_landcover"]],
+            on="site_key",
+            how="left",
+        )
+        month_anom_df = month_anom_df[month_anom_df["dominant_landcover"].notna()].copy()
+        month_r2_df = (
+            month_anom_df.groupby("dominant_landcover", dropna=False)
+            .apply(
+                lambda df: pd.Series(
+                    {
+                        "monthly_dev_r2": compute_basic_metrics(
+                            df["obs_dev"].values,
+                            df["pred_dev"].values,
+                        )["r2"],
+                    }
+                )
+            )
+            .reset_index()
+        )
+        metric_df = metric_df.merge(
+            month_r2_df,
+            on="dominant_landcover",
+            how="left",
+        )
+        if member_eval_dfs is not None and len(member_eval_dfs) > 0:
+            std_lookup = {}
+            for landcover in metric_df["dominant_landcover"].tolist():
+                vals = []
+                for member_eval_df in member_eval_dfs:
+                    member_month_anom_df, member_valid_groups = build_site_month_anomaly_eval_df(
+                        lfmc_df=build_lfmc_y2y_df(member_eval_df),
+                        min_obs=min_obs,
+                        min_years=min_years,
+                    )
+                    if len(member_month_anom_df) == 0 or len(member_valid_groups) == 0:
+                        continue
+                    member_month_anom_df = member_month_anom_df.merge(
+                        site_lookup_df[["site_key", "dominant_landcover"]],
+                        on="site_key",
+                        how="left",
+                    )
+                    member_month_anom_df = member_month_anom_df[
+                        member_month_anom_df["dominant_landcover"] == landcover
+                    ].copy()
+                    if len(member_month_anom_df) == 0:
+                        continue
+                    vals.append(
+                        compute_basic_metrics(
+                            member_month_anom_df["obs_dev"].values,
+                            member_month_anom_df["pred_dev"].values,
+                        )["r2"]
+                    )
+                std_lookup[landcover] = _metric_std(vals)
+            metric_df["monthly_dev_r2_std"] = metric_df["dominant_landcover"].map(std_lookup)
+    else:
+        metric_df["monthly_dev_r2"] = np.nan
+        metric_df["monthly_dev_r2_std"] = np.nan
+    metric_df["overall_n"] = metric_df["n_points"]
+    metric_df["site_anom_n"] = metric_df["n_points"]
+    metric_df["site_mean_n"] = metric_df["n_sites"]
+    metric_df["monthly_dev_n"] = metric_df["total_obs"]
     return metric_df
 
 
-def _landcover_metric_stds(context, plot_dir):
-    member_eval_dfs = context["member_eval_dfs"]
-    if member_eval_dfs is None or len(member_eval_dfs) == 0:
-        return {}
-    overall_lookup = {}
-    fraction_lookup = {}
-    member_metric_frames = []
-    member_fraction_frames = []
-    for member_eval_df in member_eval_dfs:
-        member_lfmc_lc_df = prepare_lfmc_landcover_eval_df(member_eval_df, plot_dir)
-        if len(member_lfmc_lc_df) > 0:
-            member_metric_frames.append(compute_landcover_decomposition_metrics(member_lfmc_lc_df))
-        member_y2y_df, _, _ = compute_landcover_y2y_metrics(
-            lfmc_df=build_lfmc_y2y_df(member_eval_df),
-            min_obs=20,
-            min_years=5,
-            plot_dir=plot_dir,
-        )
-        if len(member_y2y_df) > 0:
-            member_fraction_frames.append(member_y2y_df)
-    landcovers = set()
-    for frame in member_metric_frames:
-        landcovers.update(frame["dominant_landcover"].tolist())
-    for landcover in sorted(landcovers):
-        overall_vals = []
-        fraction_vals = []
-        for frame in member_metric_frames:
-            row = frame[frame["dominant_landcover"] == landcover]
-            if len(row) > 0:
-                overall_vals.append(float(row.iloc[0]["overall_r2"]))
-        for frame in member_fraction_frames:
-            row = frame[frame["dominant_landcover"] == landcover]
-            if len(row) > 0:
-                fraction_vals.append(float(row.iloc[0]["pct_variability_captured_source_centered"]) / 100.0)
-        overall_lookup[landcover] = _metric_std(overall_vals)
-        fraction_lookup[landcover] = _metric_std(fraction_vals)
-    return {
-        "overall_r2_std": overall_lookup,
-        "fraction_yearly_variability_captured_std": fraction_lookup,
-    }
+def _prepend_overall_landcover_metrics(context, metric_df, min_obs, min_years):
+    lfmc_df = context["eval_df"][context["eval_df"]["target"] == "lfmc"].reset_index(drop=True)
+    site_summary_df, anomaly_df = build_lfmc_space_time_tables(lfmc_df)
+    month_anom_df, _ = build_site_month_anomaly_eval_df(
+        lfmc_df=build_lfmc_y2y_df(context["eval_df"]),
+        min_obs=min_obs,
+        min_years=min_years,
+    )
+    overall_std = _overall_metric_std(context)
+    mean_std, anomaly_std = _space_time_metric_stds(context)
+    monthly_std = _monthly_source_centered_metric_std(context, min_obs=min_obs, min_years=min_years)
+    overall_metric = compute_basic_metrics(lfmc_df["obs"].values, lfmc_df["pred"].values)
+    anomaly_metric = compute_basic_metrics(anomaly_df["obs_anom"].values, anomaly_df["pred_anom"].values)
+    mean_metric = compute_basic_metrics(site_summary_df["obs_mean"].values, site_summary_df["pred_mean"].values)
+    monthly_metric = compute_basic_metrics(month_anom_df["obs_dev"].values, month_anom_df["pred_dev"].values)
+    overall_row = {column: np.nan for column in metric_df.columns}
+    overall_row["dominant_landcover"] = "overall"
+    overall_row["overall_r2"] = overall_metric.get("r2", np.nan)
+    overall_row["site_anom_r2"] = anomaly_metric.get("r2", np.nan)
+    overall_row["site_mean_r2"] = mean_metric.get("r2", np.nan)
+    overall_row["monthly_dev_r2"] = monthly_metric.get("r2", np.nan)
+    overall_row["overall_r2_std"] = overall_std.get("r2", np.nan)
+    overall_row["site_anom_r2_std"] = anomaly_std.get("r2", np.nan)
+    overall_row["site_mean_r2_std"] = mean_std.get("r2", np.nan)
+    overall_row["monthly_dev_r2_std"] = monthly_std.get("r2", np.nan)
+    overall_row["overall_n"] = overall_metric.get("n", np.nan)
+    overall_row["site_anom_n"] = anomaly_metric.get("n", np.nan)
+    overall_row["site_mean_n"] = mean_metric.get("n", np.nan)
+    overall_row["monthly_dev_n"] = monthly_metric.get("n", np.nan)
+    overall_row["n_points"] = overall_metric.get("n", np.nan)
+    overall_row["n_sites"] = mean_metric.get("n", np.nan)
+    overall_row["total_obs"] = monthly_metric.get("n", np.nan)
+    overall_row["n_groups"] = np.nan
+    overall_row["pct_variability_captured_source_centered"] = np.nan
+    overall_row["fraction_yearly_variability_captured"] = np.nan
+    overall_row["fraction_yearly_variability_captured_std"] = np.nan
+    return pd.concat([pd.DataFrame([overall_row]), metric_df], ignore_index=True)
 
 
-def build_landcover_comparison_df(context_a, context_b, plot_dir):
-    df_a = _landcover_metric_tables(context_a, plot_dir).copy()
-    df_b = _landcover_metric_tables(context_b, plot_dir).copy()
-    std_a = _landcover_metric_stds(context_a, plot_dir)
-    std_b = _landcover_metric_stds(context_b, plot_dir)
+def build_landcover_comparison_df(context_a, context_b, plot_dir, min_obs=20, min_years=5):
+    df_a = _prepend_overall_landcover_metrics(
+        context_a,
+        _landcover_metric_tables(context_a, plot_dir, min_obs=min_obs, min_years=min_years).copy(),
+        min_obs=min_obs,
+        min_years=min_years,
+    )
+    df_b = _prepend_overall_landcover_metrics(
+        context_b,
+        _landcover_metric_tables(context_b, plot_dir, min_obs=min_obs, min_years=min_years).copy(),
+        min_obs=min_obs,
+        min_years=min_years,
+    )
     if len(df_a) == 0 and len(df_b) == 0:
         return pd.DataFrame()
     if len(df_a) > 0:
         df_a["model"] = context_a["name"]
-        if len(std_a) > 0:
-            df_a["overall_r2_std"] = df_a["dominant_landcover"].map(std_a["overall_r2_std"])
-            df_a["fraction_yearly_variability_captured_std"] = df_a["dominant_landcover"].map(
-                std_a["fraction_yearly_variability_captured_std"]
-            )
     if len(df_b) > 0:
         df_b["model"] = context_b["name"]
-        if len(std_b) > 0:
-            df_b["overall_r2_std"] = df_b["dominant_landcover"].map(std_b["overall_r2_std"])
-            df_b["fraction_yearly_variability_captured_std"] = df_b["dominant_landcover"].map(
-                std_b["fraction_yearly_variability_captured_std"]
-            )
     return pd.concat([df_a, df_b], ignore_index=True, sort=False)
 
 
@@ -648,6 +880,43 @@ def plot_training_landcover_fraction_comparison(compare_df, model_names, save_pa
     )
 
 
+def plot_paper_style_landcover_comparison(compare_df, model_names, save_path, fontsize):
+    model_colors = [comparison_model_color(name) for name in model_names]
+    panels = []
+    for title, ylabel, metric_name, metric_std_name, count_col in [
+        ("Overall", "LFMC R²", "overall_r2", "overall_r2_std", "overall_n"),
+        ("Anomaly", "LFMC R²", "site_anom_r2", "site_anom_r2_std", "site_anom_n"),
+        ("Mean", "LFMC R²", "site_mean_r2", "site_mean_r2_std", "site_mean_n"),
+        ("Monthly Anomaly", "LFMC R²", "monthly_dev_r2", "monthly_dev_r2_std", "monthly_dev_n"),
+    ]:
+        categories, values, errors, counts = _comparison_plot_arrays(
+            compare_df,
+            metric_name,
+            metric_std_name,
+            count_col,
+            model_names,
+        )
+        panels.append(
+            {
+                "title": title,
+                "ylabel": ylabel,
+                "values": values,
+                "errors": errors,
+                "counts": counts,
+            }
+        )
+    plot_landcover_comparison_panels(
+        categories=categories,
+        model_labels=model_names,
+        colors=model_colors,
+        panels=panels,
+        save_path=save_path,
+        fontsize=fontsize,
+        figsize=(12, 14),
+        dpi=300,
+    )
+
+
 def main():
     args = get_args()
     plot_dir = resolve_plot_dir(args.model_a_name, args.model_b_name, args.plot_dir)
@@ -657,12 +926,14 @@ def main():
         model_dir=args.model_a_model_dir,
         outputs_root=args.model_a_outputs_root,
         ensemble_outputs_root=args.model_a_ensemble_outputs_root,
+        ensemble_member_name_prefix=args.model_a_ensemble_member_name_prefix,
     )
     context_b = _load_named_context(
         args.model_b_name,
         model_dir=args.model_b_model_dir,
         outputs_root=args.model_b_outputs_root,
         ensemble_outputs_root=args.model_b_ensemble_outputs_root,
+        ensemble_member_name_prefix=args.model_b_ensemble_member_name_prefix,
     )
     merged_lfmc = align_lfmc_frames(context_a["eval_df"], context_b["eval_df"])
     aligned_a = pd.DataFrame({"obs": merged_lfmc["obs_a"], "pred": merged_lfmc["pred_a"]})
@@ -769,6 +1040,17 @@ def main():
         print(f"Wrote land-cover comparison CSV: {compare_csv_path}")
         print(f"Wrote land-cover R² comparison plot: {r2_plot_path}")
         print(f"Wrote land-cover variability comparison plot: {frac_plot_path}")
+        panel_plot_path = os.path.join(
+            plot_dir,
+            "lfmc_landcover_model_comparison_panels.png",
+        )
+        plot_paper_style_landcover_comparison(
+            compare_df,
+            model_names,
+            panel_plot_path,
+            args.fontsize,
+        )
+        print(f"Wrote paper-style land-cover comparison plot: {panel_plot_path}")
     vv_vh_summary_df = pd.DataFrame.from_records(
         [
             {"model": args.model_a_name, **vv_summary_a},

@@ -15,6 +15,7 @@ from pyproj import Transformer
 from tqdm import tqdm
 
 from compare_models_at_sites import get_site_error
+from ensemble_member_selection import apply_ensemble_member_selection
 
 here = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.join(here, "..", "..", "..")
@@ -326,7 +327,14 @@ def is_complete_ensemble_member_dir(model_dir):
     return is_complete_model_dir(model_dir) and os.path.isdir(os.path.join(model_dir, "fold_9998"))
 
 
-def select_ensemble_member_dirs(outputs_root, member_name_prefix=None):
+def select_ensemble_member_dirs(
+    outputs_root,
+    member_name_prefix=None,
+    selection_key=None,
+    member_name_allowlist=None,
+    member_name_suffix_allowlist=None,
+    member_training_id_allowlist=None,
+):
     member_dirs = []
     for name in os.listdir(outputs_root):
         model_dir = os.path.join(outputs_root, name)
@@ -342,6 +350,19 @@ def select_ensemble_member_dirs(outputs_root, member_name_prefix=None):
             f"No complete ensemble member dirs found under {outputs_root}{prefix_suffix}"
         )
     member_dirs = sorted(member_dirs, key=lambda x: os.path.getmtime(x))
+    member_dirs = apply_ensemble_member_selection(
+        member_dirs,
+        outputs_root=outputs_root,
+        member_name_prefix=member_name_prefix,
+        selection_key=selection_key,
+        member_name_allowlist=member_name_allowlist,
+        member_name_suffix_allowlist=member_name_suffix_allowlist,
+        member_training_id_allowlist=member_training_id_allowlist,
+    )
+    if len(member_dirs) == 0:
+        raise FileNotFoundError(
+            f"No ensemble member dirs remain after applying selection under {outputs_root}"
+        )
     return member_dirs
 
 

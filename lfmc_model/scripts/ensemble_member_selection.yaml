@@ -1,0 +1,44 @@
+selections:
+  multitask_shared_dm128_curated16:
+    auto_match: true
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_shared_ensemble
+    member_name_prefix: transformer_dm128_
+    member_training_ids:
+      - 1000
+      - 1001
+      - 1004
+      - 1005
+      - 1006
+      - 1009
+      - 1011
+      - 1014
+      - 1017
+      - 1018
+      - 1021
+      - 1023
+      - 1025
+      - 1028
+      - 1030
+      - 1031
+
+  single_task_shared_dm128_figures16:
+    auto_match: false
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_365_shared_ensemble
+    member_name_prefix: transformer_dm128_
+    member_name_suffixes:
+      - seed000
+      - seed001
+      - seed002
+      - seed003
+      - seed004
+      - seed005
+      - seed006
+      - seed007
+      - seed008
+      - seed009
+      - seed010
+      - seed011
+      - seed012
+      - seed013
+      - seed014
+      - seed015

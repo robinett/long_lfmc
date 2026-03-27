@@ -11,6 +11,8 @@ from pyproj import Transformer
 from sklearn.metrics import r2_score
 from tqdm import tqdm
 
+from compare_timeseries import select_ensemble_member_dirs as select_timeseries_ensemble_member_dirs
+
 here = os.path.abspath(os.path.dirname(__file__))
 project_root = os.path.abspath(os.path.join(here, "../../.."))
 sys.path.append(os.path.join(project_root, "lfmc_model", "utils"))
@@ -154,22 +156,22 @@ def is_complete_model_dir(model_dir):
     return True
 
 
-def select_ensemble_member_dirs(outputs_root, member_name_prefix=None):
-    candidates = []
-    for name in os.listdir(outputs_root):
-        model_dir = os.path.join(outputs_root, name)
-        if (
-            name.startswith("transformer_")
-            and (member_name_prefix is None or name.startswith(member_name_prefix))
-            and is_complete_model_dir(model_dir)
-        ):
-            candidates.append(model_dir)
-    if len(candidates) == 0:
-        prefix_suffix = "" if member_name_prefix is None else f" with prefix {member_name_prefix!r}"
-        raise FileNotFoundError(
-            f"No complete transformer_* model dirs found under ensemble root {outputs_root}{prefix_suffix}"
-        )
-    return sorted(candidates)
+def select_ensemble_member_dirs(
+    outputs_root,
+    member_name_prefix=None,
+    selection_key=None,
+    member_name_allowlist=None,
+    member_name_suffix_allowlist=None,
+    member_training_id_allowlist=None,
+):
+    return select_timeseries_ensemble_member_dirs(
+        outputs_root,
+        member_name_prefix=member_name_prefix,
+        selection_key=selection_key,
+        member_name_allowlist=member_name_allowlist,
+        member_name_suffix_allowlist=member_name_suffix_allowlist,
+        member_training_id_allowlist=member_training_id_allowlist,
+    )
 
 
 def select_model_dir(outputs_root, model_df_index=None, sort_metric=DEFAULT_SORT_METRIC, ascending=True):
