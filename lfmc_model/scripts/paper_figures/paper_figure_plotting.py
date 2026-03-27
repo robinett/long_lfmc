@@ -251,22 +251,6 @@ def plot_stacked_timeseries_panels(
                 if right_limits is not None:
                     ax_r.set_ylim(*right_limits)
                 ax_r.grid(False)
-            if panel.get("annotation_text"):
-                ax.text(
-                    0.01,
-                    0.96,
-                    str(panel["annotation_text"]),
-                    transform=ax.transAxes,
-                    va="top",
-                    ha="left",
-                    bbox={
-                        "boxstyle": "round",
-                        "facecolor": "white",
-                        "alpha": 0.9,
-                        "edgecolor": "0.5",
-                    },
-                    fontsize=max(fontsize - 2, 8),
-                )
         if use_month_aligned_axis:
             locator = mdates.MonthLocator(bymonth=[1, 4, 7, 10])
             formatter = mdates.DateFormatter("%b")

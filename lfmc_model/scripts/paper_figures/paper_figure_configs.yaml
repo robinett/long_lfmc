@@ -5,18 +5,31 @@ paths:
 
 models:
   multitask:
-    display_name: Multitask LFMC Model
-    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_ens
-    input_data_name: ensemble/lfmc_vh_vv_365_ens
+    display_name: Multitask LFMC Model (16-member ensemble)
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_shared_ensemble
+    input_data_name: ensemble/lfmc_vh_vv_365_shared_ensemble
     is_ensemble: true
+    ensemble_member_name_prefix: transformer_dm128_
+    ensemble_selection_key: multitask_shared_dm128_curated16
     model_num_tasks: 3
     color: "#cf5c36"
-  single_task:
-    display_name: Single-task LFMC Model
-    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_365_ens
-    input_data_name: lfmc_365
+  multitask_random16:
+    display_name: Multitask LFMC Model (Curated 16)
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_shared_ensemble
+    input_data_name: ensemble/lfmc_vh_vv_365_shared_ensemble
     is_ensemble: true
+    ensemble_member_name_prefix: transformer_dm128_
+    ensemble_selection_key: multitask_shared_dm128_curated16
     model_num_tasks: 3
+    color: "#f4a259"
+  single_task:
+    display_name: Single-task LFMC Model (16-member ensemble)
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_365_shared_ensemble
+    input_data_name: lfmc_365_shared
+    is_ensemble: true
+    ensemble_member_name_prefix: transformer_dm128_
+    ensemble_selection_key: single_task_shared_dm128_figures16
+    model_num_tasks: 1
     color: "#2f5d50"
 
 filters:
@@ -49,6 +62,21 @@ timeseries_selection:
 figures:
   figure_1:
     enabled: false
+    description: Conceptual figure placeholder; no code-built figure yet.
+    filename: figure_01_conceptual_placeholder.png
+
+  figure_2:
+    enabled: false
+    model_key: multitask
+    figsize: [10.4, 7.6]
+    filename: figure_02_multitask_site_map.png
+    cmap: viridis
+    marker_size: 17
+    cbar_vmax: 250
+    log_color_scale: false
+
+  figure_3:
+    enabled: false
     model_key: multitask
     num_sites_per_criterion: 1
     min_measurements: 10
@@ -61,13 +89,48 @@ figures:
     plot_vv: false
     plot_vh: false
     figsize: [12.0, 10.5]
-    filename: figure_02_multitask_timeseries.png
+    filename: figure_03_multitask_timeseries.png
+
+  figure_4:
+    enabled: false
+    model_key: multitask
+    hexbin_gridsize: 60
+    figsize: [12.2, 11.3]
+    filename: figure_04_performance_scatters.png
+
+  figure_5:
+    enabled: false
+    model_key: multitask
+    figsize: [10.8, 5.4]
+    filename: figure_05_monthly_variability.png
+    bar_color: "#cf5c36"
+
+  figure_6:
+    enabled: false
+    model_key: multitask
+    metric_colors:
+      - "#cf5c36"
+      - "#f4a259"
+      - "#5b8e7d"
+      - "#3d405b"
+    figsize: [11.5, 5.6]
+    filename: figure_06_landcover_breakdown.png
+
+  figure_7:
+    enabled: true
+    model_keys:
+      - multitask
+      - single_task
+    figsize: [11.8, 13.2]
+    filename: figure_07_landcover_model_comparison.png
+
   supplementary_figure_1:
     enabled: false
     model_key: multitask
     hexbin_gridsize: 60
     figsize: [11.8, 5.2]
     filename: supplementary_figure_01_lfmc_vs_sar_obs.png
+
   supplementary_figure_2:
     enabled: false
     model_key: multitask
@@ -83,41 +146,57 @@ figures:
     plot_vh: true
     figsize: [12.0, 10.5]
     filename: supplementary_figure_02_vv_vh_timeseries.png
-  figure_2:
-    enabled: false
-    model_key: multitask
-    hexbin_gridsize: 60
-    figsize: [12.2, 11.3]
-    filename: figure_03_performance_scatters.png
-  figure_4:
-    enabled: true
-    model_key: multitask
-    metric_colors:
-      - "#cf5c36"
-      - "#f4a259"
-      - "#5b8e7d"
-      - "#3d405b"
-    figsize: [11.5, 5.6]
-    filename: figure_04_landcover_breakdown.png
+
   supplementary_figure_3:
     enabled: false
     anchor_model_key: multitask
     model_keys:
       - multitask
       - single_task
+    selection_mode: medium_by_landcover
     num_sites_per_criterion: 1
     min_measurements: 10
-    criteria_order:
-      - good
-      - average
-      - poor
+    landcover_order:
+      - shrub
+      - evergreen_forest
+      - deciduous_forest
+      - grass
     padding_days: 60
     figsize: [12.0, 10.5]
     filename: supplementary_figure_03_model_comparison_timeseries.png
-  figure_6:
-    enabled: true
+
+  supplementary_figure_4:
+    enabled: false
+    figsize: [13.0, 5.9]
+    filename: supplementary_figure_04_sar_sampling_summary.png
+    map_marker_size: 17
+    sar_ensemble_root: /scratch/users/trobinet/long_lfmc/final_lfmc/sar/ensemble/lfmc_vh_vv_365_shared_ensemble
+    example_member_seed: 0
+    category_order:
+      - coincident
+      - random
+    category_labels:
+      coincident: LFMC-coincident
+      random: Random
+    category_colors:
+      coincident: "#cf5c36"
+      random: "#5b8e7d"
+
+  supplementary_figure_5:
+    enabled: false
+    model_key: multitask
+    metric_colors:
+      - "#cf5c36"
+      - "#f4a259"
+      - "#5b8e7d"
+      - "#3d405b"
+    figsize: [10.8, 5.6]
+    filename: supplementary_figure_05_landcover_no_site_mean.png
+
+  supplementary_figure_6:
+    enabled: false
     model_keys:
+      - multitask_random16
       - multitask
-      - single_task
     figsize: [11.8, 13.2]
-    filename: figure_05_landcover_model_comparison.png
+    filename: supplementary_figure_06_multitask_random16_vs_32.png

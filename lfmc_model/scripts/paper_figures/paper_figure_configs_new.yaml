@@ -1,0 +1,118 @@
+paths:
+  output_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/plots/paper_figures_new
+  inputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs
+  gmba_basic_shapefile: /scratch/users/trobinet/long_lfmc/final_lfmc/gmba_mountins/GMBA_Inventory_v2.0_standard_basic/GMBA_Inventory_v2.0_standard_basic.shp
+
+plotting:
+  dpi: 350
+  fontsize: 14
+  forward_batch_size: 4096
+
+variability:
+  site_min_obs: 10
+  monthly_min_obs: 20
+  monthly_min_years: 3
+
+filters:
+  landcover_order:
+    - shrub
+    - evergreen_forest
+    - deciduous_forest
+    - grass
+
+models:
+  multitask_16:
+    display_name: Multitask LFMC Model (16-member ensemble)
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_shared_ensemble
+    input_data_name: ensemble/lfmc_vh_vv_365_shared_ensemble
+    is_ensemble: true
+    ensemble_member_name_prefix: transformer_dm128_
+    ensemble_selection_key: multitask_shared_dm128_curated16
+    model_num_tasks: 3
+    color: "#cf5c36"
+  single_task_16:
+    display_name: Single-task LFMC Model (16-member ensemble)
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_365_shared_ensemble
+    input_data_name: lfmc_365_shared
+    is_ensemble: true
+    ensemble_member_name_prefix: transformer_dm128_
+    ensemble_selection_key: single_task_shared_dm128_figures16
+    model_num_tasks: 1
+    color: "#2f5d50"
+
+timeseries_selection:
+  r2_percentiles:
+    good: 95
+    average: 50
+    poor: 5
+
+figures:
+  figure_1:
+    enabled: false
+    description: Manual conceptual figure assembled outside the repo and copied into the paper figure output directory.
+    source_path:
+    filename: figure_01_conceptual.png
+
+  figure_2:
+    enabled: true
+    model_key: multitask_16
+    num_sites_per_criterion: 1
+    min_measurements: 10
+    years_to_plot: 3
+    criteria_order:
+      - good
+      - average
+      - poor
+    padding_days: 60
+    plot_vv: false
+    plot_vh: false
+    figsize: [12.0, 10.5]
+    filename: figure_02_multitask_timeseries.png
+
+  figure_3:
+    enabled: true
+    model_key: multitask_16
+    hexbin_gridsize: 60
+    figsize: [12.2, 11.3]
+    filename: figure_03_performance_scatters.png
+
+  figure_4:
+    enabled: true
+    model_key: multitask_16
+    metric_colors:
+      - "#cf5c36"
+      - "#f4a259"
+      - "#5b8e7d"
+      - "#3d405b"
+    figsize: [11.5, 5.6]
+    filename: figure_04_landcover_breakdown.png
+
+  figure_5:
+    enabled: true
+    model_keys:
+      - multitask_16
+      - single_task_16
+    figsize: [11.8, 13.2]
+    filename: figure_05_landcover_model_comparison.png
+
+  figure_6:
+    enabled: false
+    description: Manual sample-map figure assembled outside the repo and copied into the paper figure output directory.
+    source_path:
+    filename: figure_06_dataset_sample_maps.png
+
+  supplementary_figure_1:
+    enabled: false
+    model_key: multitask_16
+    num_sites_per_criterion: 1
+    min_measurements: 10
+    years_to_plot: 3
+    criteria_order:
+      - good
+      - average
+      - poor
+    padding_days: 60
+    plot_vv: true
+    plot_vh: true
+    figsize: [12.0, 10.5]
+    filename: supplementary_figure_01_vv_vh_timeseries.png
