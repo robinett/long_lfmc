@@ -1,0 +1,75 @@
+paths:
+  source_archive_zarr_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_all_vars.zarr"
+  final_output_zarr_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_vars_and_anoms.zarr"
+  climatology_output_zarr_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_vars_and_anoms_climatology.zarr"
+  plots_dir: "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/plots/daymet_vars_and_anoms"
+  coord_dir: "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_vars_and_anoms_coord"
+  smoke_dir: "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/smoke_test_vars_and_anoms"
+
+processing:
+  source_variable_order:
+    - "prcp"
+    - "srad"
+    - "swe"
+    - "tmax"
+    - "vp"
+  standard_variable_order:
+    - "tmax"
+    - "vpd"
+    - "prcp"
+    - "srad"
+    - "swe"
+  anomaly_variable_order:
+    - "tmax_daily_anom"
+    - "vpd_daily_anom"
+    - "prcp_rolling30_anom"
+    - "srad_daily_anom"
+    - "swe_daily_anom"
+  climatology_variable_order:
+    - "tmax_daily_clim"
+    - "vpd_daily_clim"
+    - "prcp_rolling30_daily_clim"
+    - "srad_daily_clim"
+    - "swe_daily_clim"
+  write_chunks:
+    time: 32
+    variable: 1
+    y: 512
+    x: 512
+  vpd_clip_min_pa: 0.0
+  prcp_rolling_window_days: 30
+  overwrite_final_store: true
+  overwrite_climatology_store: true
+  overwrite_coord_dir: true
+
+qc:
+  map_dates:
+    - "2001-01-15"
+    - "2003-08-15"
+  sample_points:
+    - label: "pt1"
+      x_index: 2200
+      y_index: 1800
+    - label: "pt2"
+      x_index: 2600
+      y_index: 2200
+    - label: "pt3"
+      x_index: 3600
+      y_index: 1800
+  plot_year: 2003
+
+smoke_test:
+  enabled: true
+  time_start: "2000-01-01"
+  time_end: "2004-12-31"
+  x_slice:
+    start: 900
+    stop: 940
+  y_slice:
+    start: 2200
+    stop: 2240
+  source_archive_zarr_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/smoke_test_vars_and_anoms/daymet_source_smoke.zarr"
+  final_output_zarr_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/smoke_test_vars_and_anoms/daymet_vars_and_anoms_smoke.zarr"
+  climatology_output_zarr_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/smoke_test_vars_and_anoms/daymet_vars_and_anoms_climatology_smoke.zarr"
+  plots_dir: "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/smoke_test_vars_and_anoms/plots"
+  coord_dir: "/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/smoke_test_vars_and_anoms/coord"
