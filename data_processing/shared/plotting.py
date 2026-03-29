@@ -261,6 +261,53 @@ def plot_multiple_xarray_datasets(
     plt.savefig(savename,dpi=300,bbox_inches='tight')
     plt.close()
 
+
+def plot_timeseries_lines(
+    lines,
+    fname,
+    title=None,
+    xlabel='Date',
+    ylabel=None,
+    legend_loc='best',
+):
+    """
+    Plot one or more simple timeseries lines and save to disk.
+
+    Parameters
+    ----------
+    lines : list[dict]
+        Each dict must contain:
+          - x: x values
+          - y: y values
+          - label: legend label (optional)
+        Optional styling keys:
+          - color
+          - linestyle
+          - linewidth
+    fname : str
+        Output figure path.
+    """
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    for line in lines:
+        ax.plot(
+            line['x'],
+            line['y'],
+            label=line.get('label'),
+            color=line.get('color'),
+            linestyle=line.get('linestyle', '-'),
+            linewidth=line.get('linewidth', 1.5),
+        )
+    if title is not None:
+        ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
+    if any(line.get('label') for line in lines):
+        ax.legend(loc=legend_loc, frameon=False)
+    fig.autofmt_xdate()
+    plt.savefig(fname, dpi=300, bbox_inches='tight')
+    plt.close(fig)
+
 def plot_timeseries(times,vals,xlabel,ylabel,save_name,title=None,time_bound=None):
     # get rid of NaNs
     times = times[~np.isnan(vals)]

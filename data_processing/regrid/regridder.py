@@ -95,7 +95,8 @@ def reproject_and_regrid_whole_directory(
     chunk_size=500,
     fill_value='none',
     chunk_buffer=200,
-    single_file=False
+    single_file=False,
+    resampling=Resampling.nearest
 ):
     """
     Parameters
@@ -206,7 +207,8 @@ def reproject_and_regrid_whole_directory(
                 target_chunks,
                 plot_tests=False,
                 target_dir_last_ext=target_dir_last_ext,
-                chunk_buffer=chunk_buffer
+                chunk_buffer=chunk_buffer,
+                resampling=resampling
             )
             # make sure that we have a crs written to the output
             if 'crs' not in this_regridded_ds.coords:
@@ -271,7 +273,8 @@ def reproject_and_regrid_single_file(
     target_chunks,
     plot_tests=False,
     target_dir_last_ext='',
-    chunk_buffer=200
+    chunk_buffer=200,
+    resampling=Resampling.nearest
 ):
     # create what will be the final dataset. this is just the target
     # grid without the data that was included in this.
@@ -355,7 +358,7 @@ def reproject_and_regrid_single_file(
         #print('reprojecting')
         this_padded_src_chunk_reproj = this_padded_src_chunk.rio.reproject_match(
             this_target_chunk,
-            resampling=Resampling.nearest
+            resampling=resampling
         )
         if plot_tests:
             print('plotting the regridded chunk')
@@ -589,24 +592,25 @@ def get_padded_chunk(
     target_x_max_buf = target_x_max + buffer_x
     target_y_min_buf = target_y_min - buffer_y
     target_y_max_buf = target_y_max + buffer_y
-    # transform the target bounds to the source crs
+    # Transform all four buffered target corners to source CRS so rotated or
+    # non-linear projections keep the full source footprint for this chunk.
     transformer = Transformer.from_crs(
         target_chunk.rio.crs,
         src_ds.rio.crs,
         always_xy=True
     )
-    (src_x_min,src_y_min) = transformer.transform(
-        target_x_min_buf,
-        target_y_min_buf
-    )
-    (src_x_max,src_y_max) = transformer.transform(
-        target_x_max_buf,
-        target_y_max_buf
-    )
-    src_x_min = min(src_x_min,src_x_max)
-    src_x_max = max(src_x_min,src_x_max)
-    src_y_min = min(src_y_min,src_y_max)
-    src_y_max = max(src_y_min,src_y_max)
+    src_corners = [
+        transformer.transform(target_x_min_buf, target_y_min_buf),
+        transformer.transform(target_x_min_buf, target_y_max_buf),
+        transformer.transform(target_x_max_buf, target_y_min_buf),
+        transformer.transform(target_x_max_buf, target_y_max_buf),
+    ]
+    src_x_vals = [corner[0] for corner in src_corners]
+    src_y_vals = [corner[1] for corner in src_corners]
+    src_x_min = min(src_x_vals)
+    src_x_max = max(src_x_vals)
+    src_y_min = min(src_y_vals)
+    src_y_max = max(src_y_vals)
     # get the subset
     # make this robust to coordinates possibly descending by default in
     # src_ds as opposed to asscending
@@ -625,6 +629,4 @@ def get_padded_chunk(
         src_y_dim_name: y_slice
     })
     return src_subset
-
-
 
