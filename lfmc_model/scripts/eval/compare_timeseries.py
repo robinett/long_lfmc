@@ -32,7 +32,16 @@ DEFAULT_PLOT_DIR = (
 )
 DEFAULT_OAK_ROOT = "/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets"
 DEFAULT_SCRATCH_ROOT = "/scratch/users/trobinet/long_lfmc/final_lfmc"
-DAYMET_ZARR_PATH = os.path.join(DEFAULT_SCRATCH_ROOT, "daymet", "daymet_all_vars.zarr")
+DAYMET_ZARR_PATH = os.path.join(
+    DEFAULT_SCRATCH_ROOT,
+    "daymet",
+    "daymet_long_inputs_with_vpd.zarr",
+)
+DAYMET_ANOM_ZARR_PATH = os.path.join(
+    DEFAULT_SCRATCH_ROOT,
+    "daymet",
+    "daymet_anomalies_all_vars.zarr",
+)
 MODIS_ZARR_PATH = os.path.join(
     DEFAULT_SCRATCH_ROOT,
     "modis",
@@ -45,6 +54,16 @@ STATIC_NC_PATH = os.path.join(
     "static",
     "static_features_500m_epsg5070_float32.nc",
 )
+SOILS_NC_PATH = os.path.join(
+    DEFAULT_SCRATCH_ROOT,
+    "soils",
+    "soilgrids_top_500m_epsg5070.nc",
+)
+CANOPY_HEIGHT_NC_PATH = os.path.join(
+    DEFAULT_SCRATCH_ROOT,
+    "canopy_height",
+    "gedi_canopy_height_2019_500m_epsg5070.nc",
+)
 CLIMATE_NC_PATH = os.path.join(
     DEFAULT_SCRATCH_ROOT,
     "climate_zones",
@@ -53,7 +72,18 @@ CLIMATE_NC_PATH = os.path.join(
 SHORT_LAG_DAYS = list(range(31))
 LONG_LAG_DAYS = list(range(181))
 VAR_LOCS = {
-    "daymet": ["prcp", "srad", "swe", "tmax", "vp"],
+    "daymet": [
+        "prcp",
+        "srad",
+        "swe",
+        "tmax",
+        "vpd",
+        "srad_anom",
+        "prcp_rolling30_anom",
+        "swe_anom",
+        "tmax_anom",
+        "vpd_anom",
+    ],
     "modis": [
         "Nadir_Reflectance_Band1_interp",
         "Nadir_Reflectance_Band2_interp",
@@ -63,8 +93,9 @@ VAR_LOCS = {
         "Nadir_Reflectance_Band6_interp",
         "Nadir_Reflectance_Band7_interp",
     ],
-    "static": ["slope", "elevation", "canopy_height", "clay", "sand"],
-    "climate_zone": [f"climate_zone_{i}" for i in range(1, 30)],
+    "static": ["slope", "elevation"],
+    "soils": ["clay", "sand"],
+    "canopy_height": ["canopy_height"],
     "landcover_frac": [
         "barren",
         "crops",
@@ -114,6 +145,19 @@ _STATE_SHAPES = None
 
 def timestamped_message(message: str) -> str:
     return f"[{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+
+
+def _merge_daymet_datasets(daymet_ds, anomaly_ds):
+    if anomaly_ds is None:
+        return daymet_ds
+    anomaly_ds = anomaly_ds.reindex(time=daymet_ds["time"])
+    return xr.concat(
+        [daymet_ds, anomaly_ds],
+        dim="variable",
+        compat="override",
+        coords="minimal",
+        join="exact",
+    )
 
 
 def _format_seconds(seconds: float) -> str:
@@ -283,20 +327,26 @@ def get_inference_datasets():
         return _INFERENCE_DSS
     required_paths = [
         DAYMET_ZARR_PATH,
+        DAYMET_ANOM_ZARR_PATH,
         MODIS_ZARR_PATH,
         NLCD_ZARR_PATH,
         STATIC_NC_PATH,
-        CLIMATE_NC_PATH,
+        SOILS_NC_PATH,
+        CANOPY_HEIGHT_NC_PATH,
     ]
     for path in required_paths:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Missing required inference dataset: {path}")
     print(timestamped_message("Opening inference datasets..."))
     _INFERENCE_DSS = {
-        "daymet": xr.open_zarr(DAYMET_ZARR_PATH, consolidated=False),
+        "daymet": _merge_daymet_datasets(
+            xr.open_zarr(DAYMET_ZARR_PATH, consolidated=False),
+            xr.open_zarr(DAYMET_ANOM_ZARR_PATH, consolidated=False),
+        ),
         "modis": xr.open_zarr(MODIS_ZARR_PATH),
         "static": xr.open_dataset(STATIC_NC_PATH),
-        "climate_zone": xr.open_dataset(CLIMATE_NC_PATH),
+        "soils": xr.open_dataset(SOILS_NC_PATH),
+        "canopy_height": xr.open_dataset(CANOPY_HEIGHT_NC_PATH),
         "landcover_frac": xr.open_zarr(NLCD_ZARR_PATH),
     }
     return _INFERENCE_DSS
