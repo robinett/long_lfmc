@@ -13,7 +13,7 @@ set -euo pipefail
 cd "/home/users/trobinet/long_lfmc/lfmc_model/scripts/training"
 mkdir -p "/home/users/trobinet/long_lfmc/lfmc_model/scripts/training/logs"
 
-source /home/users/trobinet/uv_activations/activate_lfmc_model.sh
+source /home/users/trobinet/uv_activations/activate_lfmc_model_py312.sh
 
 lock_file="${LOCK_FILE:-}"
 if [[ -n "${lock_file}" ]]; then

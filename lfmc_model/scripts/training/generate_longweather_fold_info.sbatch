@@ -12,6 +12,6 @@ set -euo pipefail
 cd "/home/users/trobinet/long_lfmc/lfmc_model/scripts/training"
 mkdir -p "/home/users/trobinet/long_lfmc/lfmc_model/scripts/training/logs"
 
-source /home/users/trobinet/uv_activations/activate_lfmc_model.sh
+source /home/users/trobinet/uv_activations/activate_lfmc_model_py312.sh
 
 python3 -u /home/users/trobinet/long_lfmc/lfmc_model/scripts/training/generate_longweather_fold_info.py "$@"
