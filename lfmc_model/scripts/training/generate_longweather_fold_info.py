@@ -7,9 +7,7 @@ import os
 from train_multitarget_longweather_vvvh import _fold_locs_to_jsonable, create_site_split, load_data
 from train_multitarget_longweather_vvvh import (
     _assign_remaining_sites_to_test_folds,
-    _build_site_lookup,
     _dedupe_sites_in_order,
-    _extract_climate_zone_codes_from_static_tensor,
     _validate_sites_assigned_exactly_once,
 )
 
@@ -33,28 +31,12 @@ def main():
     source = datasets[4]
     info = datasets[5]
     stratifier = datasets[6]
-    static_data = datasets[2]
-    climate_zone_codes = _extract_climate_zone_codes_from_static_tensor(
-        static_data,
-        var_names["static_vars"],
-    )
     source_np = source.detach().cpu().numpy().reshape(-1) if hasattr(source, 'detach') else source.reshape(-1)
     lfmc_mask = source_np == 0
     lfmc_info = info.loc[lfmc_mask].reset_index(drop=True)
     lfmc_stratifier = stratifier[lfmc_mask]
-    lfmc_climate_zone_codes = climate_zone_codes[lfmc_mask]
     lfmc_source = source_np[lfmc_mask]
     all_sites = _dedupe_sites_in_order(lfmc_info[["latitude", "longitude"]].to_numpy())
-    site_climate_lookup = _build_site_lookup(
-        lfmc_climate_zone_codes,
-        lfmc_info,
-        column_name="climate_zone_code",
-    )
-    site_stratifier_lookup = _build_site_lookup(
-        lfmc_stratifier,
-        lfmc_info,
-        column_name="stratifier",
-    )
 
     num_insitu_obs = int((lfmc_source == 0).sum())
     num_vv_obs = 0
@@ -84,17 +66,15 @@ def main():
             seed=int(args.split_seed),
             used_sites=used_sites,
             stratifier=lfmc_stratifier,
-            climate_zone_codes=lfmc_climate_zone_codes,
-            enforce_climate_train_support=True,
         )
         used_sites.extend(this_locs)
         fold_locs[fold + 1] = this_locs
     fold_locs = _assign_remaining_sites_to_test_folds(
         fold_locs=fold_locs,
         all_sites=all_sites,
-        site_climate_lookup=site_climate_lookup,
-        site_stratifier_lookup=site_stratifier_lookup,
-        enforce_climate_train_support=True,
+        site_climate_lookup=None,
+        site_stratifier_lookup=None,
+        enforce_climate_train_support=False,
     )
 
     remove_last = False
