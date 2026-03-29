@@ -150,7 +150,7 @@ def default_dataset_paths() -> Dict[str, str]:
     final_dir = paths["final_dir"]
     scratch_dir = final_dir
     return {
-        "daymet": os.path.join(final_dir, "daymet", "daymet_all_vars.zarr"),
+        "daymet": os.path.join(final_dir, "daymet", "daymet_vars_and_anoms.zarr"),
         "modis": os.path.join(
             final_dir,
             "modis",
@@ -158,7 +158,12 @@ def default_dataset_paths() -> Dict[str, str]:
             "modis_interp_5d.zarr",
         ),
         "static": os.path.join(final_dir, "static", "static_features_500m_epsg5070_float32.nc"),
-        "climate_zone": os.path.join(final_dir, "climate_zones", "climate_zone_per_pixel_fullgrid.nc4"),
+        "soils": os.path.join(final_dir, "soils", "soilgrids_top_500m_epsg5070.nc"),
+        "canopy_height": os.path.join(
+            final_dir,
+            "canopy_height",
+            "gedi_canopy_height_2019_500m_epsg5070.nc",
+        ),
         "landcover_frac": os.path.join(final_dir, "nlcd", "nlcd_target_grid_2000_2024.zarr"),
         "nlcd": os.path.join(final_dir, "nlcd", "nlcd_2000_2024.zarr"),
         "sar_vh": os.path.join(scratch_dir, "sar", "sar_500m_filled.zarr"),
@@ -191,7 +196,18 @@ def default_short_features() -> List[str]:
 
 
 def default_long_features() -> List[str]:
-    return ["srad", "prcp", "swe", "tmax", "vp"]
+    return [
+        "srad",
+        "prcp",
+        "swe",
+        "tmax",
+        "vpd",
+        "srad_daily_anom",
+        "prcp_rolling30_anom",
+        "swe_daily_anom",
+        "tmax_daily_anom",
+        "vpd_daily_anom",
+    ]
 
 
 def default_static_features() -> List[str]:
@@ -200,37 +216,7 @@ def default_static_features() -> List[str]:
         "elevation",
         "clay",
         "sand",
-        "latitude",
-        "longitude",
-        "climate_zone_1",
-        "climate_zone_2",
-        "climate_zone_3",
-        "climate_zone_4",
-        "climate_zone_5",
-        "climate_zone_6",
-        "climate_zone_7",
-        "climate_zone_8",
-        "climate_zone_9",
-        "climate_zone_10",
-        "climate_zone_11",
-        "climate_zone_12",
-        "climate_zone_13",
-        "climate_zone_14",
-        "climate_zone_15",
-        "climate_zone_16",
-        "climate_zone_17",
-        "climate_zone_18",
-        "climate_zone_19",
-        "climate_zone_20",
-        "climate_zone_21",
-        "climate_zone_22",
-        "climate_zone_23",
-        "climate_zone_24",
-        "climate_zone_25",
-        "climate_zone_26",
-        "climate_zone_27",
-        "climate_zone_28",
-        "climate_zone_29",
+        "canopy_height",
         "barren",
         "crops",
         "deciduous_forest",
@@ -272,8 +258,9 @@ def default_var_locs() -> Dict[str, List[str]]:
             "vv_over_3",
             "vh_over_3",
         ],
-        "static": ["slope", "elevation", "canopy_height", "clay", "sand"],
-        "climate_zone": [f"climate_zone_{i}" for i in range(1, 30)],
+        "static": ["slope", "elevation"],
+        "soils": ["clay", "sand"],
+        "canopy_height": ["canopy_height"],
         "landcover_frac": [
             "barren",
             "crops",
@@ -1037,7 +1024,7 @@ def _extract_chunk_subsets(
             ds = ds.load()
         out[source_name] = ds
 
-    for static_source in ["landcover_frac", "nlcd", "static", "climate_zone"]:
+    for static_source in ["landcover_frac", "nlcd", "static", "soils", "canopy_height"]:
         if static_source in dss and static_source not in out:
             out[static_source] = dss[static_source].isel(
                 x=slice(x0, x1), y=slice(y0, y1)
@@ -1076,6 +1063,10 @@ def _extract_static_feature_value(
             )
         except Exception:
             return np.nan
+    if "canopy_height" in chunk_dss and feature_name in chunk_dss["canopy_height"].data_vars:
+        return _safe_scalar(chunk_dss["canopy_height"][feature_name].isel(x=local_x, y=local_y))
+    if "soils" in chunk_dss and feature_name in chunk_dss["soils"].data_vars:
+        return _safe_scalar(chunk_dss["soils"][feature_name].isel(x=local_x, y=local_y))
     if "static" in chunk_dss and feature_name in chunk_dss["static"].data_vars:
         return _safe_scalar(chunk_dss["static"][feature_name].isel(x=local_x, y=local_y))
     if var_to_source and feature_name in var_to_source:
@@ -2203,6 +2194,10 @@ def build_direct_tensors_from_sample_index(
         candidate_source = None
         if "landcover_frac" in dss and feat in dss["landcover_frac"].data_vars:
             candidate_source = "landcover_frac"
+        elif "canopy_height" in dss and feat in dss["canopy_height"].data_vars:
+            candidate_source = "canopy_height"
+        elif "soils" in dss and feat in dss["soils"].data_vars:
+            candidate_source = "soils"
         elif "static" in dss and feat in dss["static"].data_vars:
             candidate_source = "static"
         elif feat in var_to_source and var_to_source[feat] in dss and feat in dss[var_to_source[feat]].data_vars:
@@ -2407,33 +2402,8 @@ def build_direct_tensors_from_sample_index(
     source_kept_np = source_np[finite_mask]
     stratifier_kept = stratifier_np[finite_mask]
 
-    climate_filter_keep_mask = np.ones(kept_rows.shape[0], dtype=bool)
     climate_filter_metadata = None
-    (
-        kept_rows,
-        X_short_kept,
-        X_long_kept,
-        X_static_kept,
-        Y_kept_np,
-        source_kept_np,
-        stratifier_kept,
-        _kept_climate_codes,
-        climate_filter_keep_mask,
-        climate_filter_metadata,
-    ) = _filter_rows_by_min_sites_per_climate_zone(
-        rows=kept_rows,
-        X_short=X_short_kept,
-        X_long=X_long_kept,
-        X_static=X_static_kept,
-        Y=Y_kept_np,
-        source=source_kept_np,
-        stratifier=stratifier_kept,
-        static_feature_names=static_features,
-        min_sites_per_zone=2,
-    )
     final_keep_mask = finite_mask.copy()
-    if kept_n > 0:
-        final_keep_mask[finite_mask] = climate_filter_keep_mask
 
     X_short_kept, short_vars_kept, short_vars_dropped = _drop_zero_variance_channels(
         X_short_kept, short_vars_out, "short"
