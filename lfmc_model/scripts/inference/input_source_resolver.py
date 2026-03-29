@@ -65,6 +65,19 @@ def _get_time_bounds(zarr_path: str) -> Dict[str, object]:
     }
 
 
+def _merge_daymet_datasets(daymet_ds: xr.Dataset, anomaly_ds: Optional[xr.Dataset]) -> xr.Dataset:
+    if anomaly_ds is None:
+        return daymet_ds
+    anomaly_ds = anomaly_ds.reindex(time=daymet_ds["time"])
+    return xr.concat(
+        [daymet_ds, anomaly_ds],
+        dim="variable",
+        compat="override",
+        coords="minimal",
+        join="exact",
+    )
+
+
 def _get_year_values(zarr_path: str, coord_name: str = 'year') -> List[int]:
     ds = xr.open_zarr(zarr_path)
     vals = ds[coord_name].values
@@ -110,11 +123,19 @@ def resolve_inference_sources(
 
     modis_path = _require_path(sources.get('modis', {}).get('path'), 'MODIS zarr')
     static_path = _require_path(sources.get('static', {}).get('path'), 'static dataset')
-    climate_path = _require_path(sources.get('climate_zone', {}).get('path'), 'climate dataset')
+    soils_path = _require_path(sources.get('soils', {}).get('path'), 'soils dataset')
+    canopy_height_path = _require_path(
+        sources.get('canopy_height', {}).get('path'),
+        'canopy height dataset',
+    )
     nlcd_path = _require_path(sources.get('nlcd', {}).get('annual_path'), 'annual NLCD zarr')
     archive_daymet_path = _require_path(
         sources.get('daymet', {}).get('archive_path'),
         'archive Daymet zarr',
+    )
+    anomaly_daymet_path = _require_path(
+        sources.get('daymet', {}).get('anomalies_path'),
+        'Daymet anomaly zarr',
     )
     monthly_latency_daymet_path = sources.get('daymet', {}).get('monthly_latency_path')
     low_latency_climate_path = sources.get('climate_low_latency', {}).get('path')
@@ -173,9 +194,11 @@ def resolve_inference_sources(
         'requested_end_date': str(end_date.date()),
         'modis_path': modis_path,
         'static_path': static_path,
-        'climate_path': climate_path,
+        'soils_path': soils_path,
+        'canopy_height_path': canopy_height_path,
         'landcover_path': nlcd_path,
         'archive_daymet_path': archive_daymet_path,
+        'anomaly_daymet_path': anomaly_daymet_path,
         'monthly_latency_daymet_path': monthly_latency_daymet_path,
         'low_latency_climate_path': low_latency_climate_path,
         'daymet_mode': daymet_mode,
@@ -204,11 +227,17 @@ def open_inference_datasets_from_resolution(source_resolution: Dict[str, object]
         if time_index.has_duplicates:
             keep_mask = ~time_index.duplicated(keep='last')
             daymet_ds = daymet_ds.isel(time=np.where(keep_mask)[0])
+    anomaly_daymet_ds = xr.open_zarr(
+        str(source_resolution['anomaly_daymet_path']),
+        consolidated=False,
+    )
+    daymet_ds = _merge_daymet_datasets(daymet_ds, anomaly_daymet_ds)
     return {
         'daymet': daymet_ds,
         'modis': xr.open_zarr(str(source_resolution['modis_path'])),
         'static': xr.open_dataset(str(source_resolution['static_path'])),
-        'climate_zone': xr.open_dataset(str(source_resolution['climate_path'])),
+        'soils': xr.open_dataset(str(source_resolution['soils_path'])),
+        'canopy_height': xr.open_dataset(str(source_resolution['canopy_height_path'])),
         'landcover_frac': xr.open_zarr(str(source_resolution['landcover_path'])),
     }
 

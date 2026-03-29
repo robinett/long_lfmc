@@ -6,7 +6,8 @@ sources:
   modis:
     path: /scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_regrid_interpolated/modis_interp_5d.zarr
   daymet:
-    archive_path: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_all_vars.zarr
+    archive_path: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_long_inputs_with_vpd.zarr
+    anomalies_path: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_anomalies_all_vars.zarr
     monthly_latency_path: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_monthly_latency_all_vars.zarr
   climate_low_latency:
     path: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_low_latency/prism_snodas_low_latency_all_vars.zarr
@@ -15,6 +16,10 @@ sources:
     annual_path: /scratch/users/trobinet/long_lfmc/final_lfmc/nlcd/nlcd_target_grid_2000_2024.zarr
   static:
     path: /scratch/users/trobinet/long_lfmc/final_lfmc/static/static_features_500m_epsg5070_float32.nc
+  soils:
+    path: /scratch/users/trobinet/long_lfmc/final_lfmc/soils/soilgrids_top_500m_epsg5070.nc
+  canopy_height:
+    path: /scratch/users/trobinet/long_lfmc/final_lfmc/canopy_height/gedi_canopy_height_2019_500m_epsg5070.nc
   climate_zone:
     path: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_zones/climate_zone_per_pixel_fullgrid.nc4
   production:

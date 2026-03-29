@@ -868,8 +868,15 @@ def _tile_native_tensor_payload(
     }
     subset_sources = {
         "static": dss["static"],
-        "climate_zone": dss["climate_zone"],
+        "soils": dss["soils"],
+        "canopy_height": dss["canopy_height"],
     }
+    use_climate_zone = (
+        any(var_name.startswith("climate_zone_") for var_name in static_vars)
+        and "climate_zone" in dss
+    )
+    if use_climate_zone:
+        subset_sources["climate_zone"] = dss["climate_zone"]
     source_indexers = {
         source_name: _resolve_tile_source_indices(tile_payload, ds, source_name, dss)
         for source_name, ds in {**full_grid_sources, **subset_sources}.items()
@@ -894,8 +901,7 @@ def _tile_native_tensor_payload(
     modis_idx = source_indexers["modis"]
     daymet_idx = source_indexers["daymet"]
     landcover_idx = source_indexers["landcover_frac"]
-    static_idx = source_indexers["static"]
-    climate_idx = source_indexers["climate_zone"]
+    climate_idx = source_indexers.get("climate_zone")
 
     modis_cube = _stack_source_vars(
         dss["modis"],
@@ -913,28 +919,42 @@ def _tile_native_tensor_payload(
         slice(int(daymet_idx["y_min"]), int(daymet_idx["y_max"]) + 1),
         "daymet",
     ) if len(long_source_vars) > 0 else None
-    static_cube = (
-        dss["static"]
-        .isel(
-            x=slice(int(static_idx["x_min"]), int(static_idx["x_max"]) + 1),
-            y=slice(int(static_idx["y_min"]), int(static_idx["y_max"]) + 1),
-        )[static_source_vars]
-        .to_array(dim="variable")
-        .transpose("variable", "y", "x")
-        .compute()
-        if len(static_source_vars) > 0
-        else None
-    )
-    climate_cube = (
-        dss["climate_zone"]["climate_zone"]
-        .isel(
-            x=slice(int(climate_idx["x_min"]), int(climate_idx["x_max"]) + 1),
-            y=slice(int(climate_idx["y_min"]), int(climate_idx["y_max"]) + 1),
+    static_source_vars_by_source = {
+        source_name: [
+            var_name
+            for var_name in static_source_vars
+            if var_to_source.get(var_name) == source_name
+        ]
+        for source_name in ("static", "soils", "canopy_height")
+    }
+    static_cubes = {}
+    for source_name, vars_here in static_source_vars_by_source.items():
+        source_idx = source_indexers[source_name]
+        if len(vars_here) == 0:
+            static_cubes[source_name] = None
+            continue
+        static_cubes[source_name] = (
+            dss[source_name]
+            .isel(
+                x=slice(int(source_idx["x_min"]), int(source_idx["x_max"]) + 1),
+                y=slice(int(source_idx["y_min"]), int(source_idx["y_max"]) + 1),
+            )[vars_here]
+            .to_array(dim="variable")
+            .transpose("variable", "y", "x")
+            .compute()
         )
-        .compute()
-    )
-    if "band" in climate_cube.dims:
-        climate_cube = climate_cube.isel(band=0)
+    climate_cube = None
+    if use_climate_zone and climate_idx is not None:
+        climate_cube = (
+            dss["climate_zone"]["climate_zone"]
+            .isel(
+                x=slice(int(climate_idx["x_min"]), int(climate_idx["x_max"]) + 1),
+                y=slice(int(climate_idx["y_min"]), int(climate_idx["y_max"]) + 1),
+            )
+            .compute()
+        )
+        if "band" in climate_cube.dims:
+            climate_cube = climate_cube.isel(band=0)
     landcover_cube = (
         dss["landcover_frac"]
         .isel(
@@ -962,8 +982,15 @@ def _tile_native_tensor_payload(
         daymet_arr = np.asarray(daymet_cube.values, dtype=np.float32)
     else:
         daymet_arr = None
-    static_arr = np.asarray(static_cube.values, dtype=np.float32) if static_cube is not None else None
-    climate_arr = np.asarray(climate_cube.values)
+    static_arr_by_source = {
+        source_name: (
+            np.asarray(cube.values, dtype=np.float32)
+            if cube is not None
+            else None
+        )
+        for source_name, cube in static_cubes.items()
+    }
+    climate_arr = np.asarray(climate_cube.values) if climate_cube is not None else None
     landcover_arr = np.asarray(landcover_cube.values, dtype=np.float32) if landcover_cube is not None else None
     landcover_years = (
         pd.to_datetime(landcover_cube["year"].values).year.astype(int)
@@ -982,15 +1009,20 @@ def _tile_native_tensor_payload(
 
     modis_var_lookup = {var_name: idx for idx, var_name in enumerate(short_source_vars)}
     daymet_var_lookup = {var_name: idx for idx, var_name in enumerate(long_source_vars)}
-    static_var_lookup = {var_name: idx for idx, var_name in enumerate(static_source_vars)}
+    static_var_lookup_by_source = {
+        source_name: {var_name: idx for idx, var_name in enumerate(vars_here)}
+        for source_name, vars_here in static_source_vars_by_source.items()
+    }
     landcover_var_lookup = {var_name: idx for idx, var_name in enumerate(landcover_vars)}
 
     lat_vals = tile_payload["lat"].astype(np.float32)
     lon_vals = tile_payload["lon"].astype(np.float32)
-    climate_codes = climate_arr[
-        climate_idx["local_iy"].astype(np.int64),
-        climate_idx["local_ix"].astype(np.int64),
-    ].astype(np.int64)
+    climate_codes = None
+    if climate_arr is not None and climate_idx is not None:
+        climate_codes = climate_arr[
+            climate_idx["local_iy"].astype(np.int64),
+            climate_idx["local_ix"].astype(np.int64),
+        ].astype(np.int64)
 
     for pix_start in range(0, n_pixels, pixel_batch_size):
         pix_end = min(pix_start + pixel_batch_size, n_pixels)
@@ -999,13 +1031,11 @@ def _tile_native_tensor_payload(
         modis_x_local = modis_idx["local_ix"][pix_slice].astype(np.int64)
         daymet_y_local = daymet_idx["local_iy"][pix_slice].astype(np.int64)
         daymet_x_local = daymet_idx["local_ix"][pix_slice].astype(np.int64)
-        static_y_local = static_idx["local_iy"][pix_slice].astype(np.int64)
-        static_x_local = static_idx["local_ix"][pix_slice].astype(np.int64)
         landcover_y_local = landcover_idx["local_iy"][pix_slice].astype(np.int64)
         landcover_x_local = landcover_idx["local_ix"][pix_slice].astype(np.int64)
         batch_lat = lat_vals[pix_slice]
         batch_lon = lon_vals[pix_slice]
-        batch_climate_codes = climate_codes[pix_slice]
+        batch_climate_codes = climate_codes[pix_slice] if climate_codes is not None else None
 
         modis_series = (
             modis_arr[:, :, modis_y_local, modis_x_local]
@@ -1017,11 +1047,17 @@ def _tile_native_tensor_payload(
             if daymet_arr is not None
             else None
         )
-        static_series = (
-            static_arr[:, static_y_local, static_x_local]
-            if static_arr is not None
-            else None
-        )
+        static_series_by_source = {}
+        for source_name, source_arr in static_arr_by_source.items():
+            if source_arr is None:
+                static_series_by_source[source_name] = None
+                continue
+            source_idx = source_indexers[source_name]
+            source_y_local = source_idx["local_iy"][pix_slice].astype(np.int64)
+            source_x_local = source_idx["local_ix"][pix_slice].astype(np.int64)
+            static_series_by_source[source_name] = (
+                source_arr[:, source_y_local, source_x_local]
+            )
         landcover_series = (
             landcover_arr[:, :, landcover_y_local, landcover_x_local]
             if landcover_arr is not None
@@ -1072,6 +1108,8 @@ def _tile_native_tensor_payload(
                 elif st_var == "longitude":
                     vals = ((batch_lon - this_norm_mean) / safe_std).reshape(-1, 1)
                 elif st_var.startswith("climate_zone_"):
+                    if batch_climate_codes is None:
+                        raise KeyError("Runtime requests climate_zone_* static vars but no climate dataset is loaded")
                     climate_zone_checking = int(st_var.split("_")[-1])
                     vals = (batch_climate_codes == climate_zone_checking).astype(np.float32).reshape(-1, 1)
                 elif _static_var_is_landcover(st_var):
@@ -1082,8 +1120,10 @@ def _tile_native_tensor_payload(
                         out[:, offset] = landcover_series[year_idx, var_idx, :]
                     vals = out
                 else:
-                    var_idx = static_var_lookup[st_var]
-                    vals = ((static_series[var_idx, :] - this_norm_mean) / safe_std).reshape(-1, 1)
+                    source_name = var_to_source[st_var]
+                    var_idx = static_var_lookup_by_source[source_name][st_var]
+                    source_series = static_series_by_source[source_name]
+                    vals = ((source_series[var_idx, :] - this_norm_mean) / safe_std).reshape(-1, 1)
                 static_input[pix_slice, day_slice, 0, st_idx] = vals
 
     short_tensor = torch.tensor(

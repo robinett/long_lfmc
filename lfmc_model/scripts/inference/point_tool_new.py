@@ -86,6 +86,19 @@ def _get_chunk_size(ds, dim, fallback=64):
             return int(ds.chunks[axis][0])
     return int(fallback)
 
+
+def _merge_daymet_datasets(daymet_ds, anomaly_ds):
+    if anomaly_ds is None:
+        return daymet_ds
+    anomaly_ds = anomaly_ds.reindex(time=daymet_ds["time"])
+    return xr.concat(
+        [daymet_ds, anomaly_ds],
+        dim="variable",
+        compat="override",
+        coords="minimal",
+        join="exact",
+    )
+
 def build_tensors(
     locs,
     start_dates,
@@ -131,10 +144,17 @@ def build_tensors(
     preloaded_chunks = {}
     loc_chunk_keys = None
     preloaded_static = None
+    preloaded_soils = None
+    preloaded_canopy_height = None
     preloaded_climate_zone = None
     if all_nearby:
         preloaded_static = dss['static'].load()
-        preloaded_climate_zone = dss['climate_zone'].load()
+        if 'soils' in dss:
+            preloaded_soils = dss['soils'].load()
+        if 'canopy_height' in dss:
+            preloaded_canopy_height = dss['canopy_height'].load()
+        if 'climate_zone' in dss:
+            preloaded_climate_zone = dss['climate_zone'].load()
         modis_ds = dss['modis']
         modis_x = modis_ds['x'].values
         modis_y = modis_ds['y'].values
@@ -404,6 +424,10 @@ def build_tensors(
                 this_ds_name = var_to_ds[st_var]
                 if all_nearby and loc_chunk_keys is not None and this_ds_name == 'static':
                     this_ds = preloaded_static
+                elif all_nearby and loc_chunk_keys is not None and this_ds_name == 'soils':
+                    this_ds = preloaded_soils
+                elif all_nearby and loc_chunk_keys is not None and this_ds_name == 'canopy_height':
+                    this_ds = preloaded_canopy_height
                 else:
                     this_ds = dss[this_ds_name]
                 this_vals = this_ds[st_var].sel(
@@ -722,7 +746,8 @@ def main():
     # location of possible long input variables
     var_locs = {
         'daymet':[
-            'prcp','srad','swe','tmax','vp'
+            'prcp','srad','swe','tmax','vpd',
+            'srad_anom','prcp_rolling30_anom','swe_anom','tmax_anom','vpd_anom'
         ],
         'modis':[
             'Nadir_Reflectance_Band1_interp',
@@ -736,21 +761,13 @@ def main():
         'static':[
             'slope',
             'elevation',
-            'canopy_height',
+        ],
+        'soils':[
             'clay',
             'sand'
         ],
-        'climate_zone':[
-            'climate_zone_1','climate_zone_2','climate_zone_3',
-            'climate_zone_4','climate_zone_5','climate_zone_6',
-            'climate_zone_7','climate_zone_8','climate_zone_9',
-            'climate_zone_10','climate_zone_11','climate_zone_12',
-            'climate_zone_13','climate_zone_14','climate_zone_15',
-            'climate_zone_16','climate_zone_17','climate_zone_18',
-            'climate_zone_19','climate_zone_20','climate_zone_21',
-            'climate_zone_22','climate_zone_23','climate_zone_24',
-            'climate_zone_25','climate_zone_26','climate_zone_27',
-            'climate_zone_28','climate_zone_29',
+        'canopy_height':[
+            'canopy_height',
         ],
         'landcover_frac':[
             'barren',
@@ -767,11 +784,18 @@ def main():
         ]
     }
     print('opening datasets...')
+    daymet_ds = xr.open_zarr(
+        os.path.join(scratch_root, 'daymet', 'daymet_long_inputs_with_vpd.zarr'),
+        consolidated=False
+    )
+    daymet_anomaly_path = os.path.join(
+        scratch_root,
+        'daymet',
+        'daymet_anomalies_all_vars.zarr',
+    )
+    daymet_anomaly_ds = xr.open_zarr(daymet_anomaly_path, consolidated=False)
     dss = {
-        'daymet': xr.open_zarr(
-            os.path.join(scratch_root, 'daymet', 'daymet_all_vars.zarr'),
-            consolidated=False
-        ),
+        'daymet': _merge_daymet_datasets(daymet_ds, daymet_anomaly_ds),
         'modis': xr.open_zarr(
             os.path.join(
                 scratch_root,
@@ -783,8 +807,11 @@ def main():
         'static': xr.open_dataset(
             os.path.join(scratch_root, 'static', 'static_features_500m_epsg5070_float32.nc')
         ),
-        'climate_zone': xr.open_dataset(
-            os.path.join(scratch_root, 'climate_zones', 'climate_zone_per_pixel_fullgrid.nc4')
+        'soils': xr.open_dataset(
+            os.path.join(scratch_root, 'soils', 'soilgrids_top_500m_epsg5070.nc')
+        ),
+        'canopy_height': xr.open_dataset(
+            os.path.join(scratch_root, 'canopy_height', 'gedi_canopy_height_2019_500m_epsg5070.nc')
         ),
         'landcover_frac': xr.open_zarr(
             os.path.join(scratch_root, 'nlcd', 'nlcd_target_grid_2000_2024.zarr')
