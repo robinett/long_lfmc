@@ -1,0 +1,32 @@
+gedi:
+  source_url: "https://gladxfer.umd.edu/Potapov/Forest_height_2019/Forest_height_2019_NAM.tif"
+  source_crs: "EPSG:4326"
+  output_units: "meters"
+  valid_min: 0.0
+  valid_max: 60.0
+  nodata_codes:
+    - 101
+    - 102
+    - 103
+
+paths:
+  target_grid_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4"
+  legacy_static_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/static/static_features_500m_epsg5070_float32.nc"
+  output_dir: "/scratch/users/trobinet/long_lfmc/final_lfmc/canopy_height"
+  raw_dir: "/scratch/users/trobinet/long_lfmc/final_lfmc/canopy_height/raw"
+  full_download_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/canopy_height/raw/Forest_height_2019_NAM_full.tif"
+  plots_dir: "/scratch/users/trobinet/long_lfmc/final_lfmc/canopy_height/plots"
+  output_dataset_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/canopy_height/gedi_canopy_height_2019_500m_epsg5070.nc"
+  summary_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/canopy_height/plots/gedi_vs_legacy_summary.txt"
+
+processing:
+  target_crs: "EPSG:5070"
+  chunk_size: 750
+  chunk_buffer_pixels: 1000
+  clip_buffer_m: 250000.0
+  resampling: "average"
+
+plotting:
+  absolute_cmap: "viridis"
+  difference_cmap: "RdBu_r"
+  difference_quantile: 0.98
