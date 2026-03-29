@@ -1,0 +1,43 @@
+soilgrids:
+  base_url: "https://files.isric.org/soilgrids/latest/data"
+  depth_interval: "0-5cm"
+  prediction_statistic: "mean"
+  properties:
+    - name: "clay"
+      conversion_factor: 10.0
+      source_units: "g/kg"
+      output_units: "percent"
+      full_local_path: ""
+    - name: "sand"
+      conversion_factor: 10.0
+      source_units: "g/kg"
+      output_units: "percent"
+      full_local_path: ""
+
+paths:
+  target_grid_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4"
+  legacy_static_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/static/static_features_500m_epsg5070_float32.nc"
+  nlcd_target_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/nlcd/nlcd_target_grid_2000_2024.zarr"
+  output_dir: "/scratch/users/trobinet/long_lfmc/final_lfmc/soils"
+  raw_dir: "/scratch/users/trobinet/long_lfmc/final_lfmc/soils/raw"
+  plots_dir: "/scratch/users/trobinet/long_lfmc/final_lfmc/soils/plots"
+  output_dataset_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/soils/soilgrids_top_500m_epsg5070.nc"
+  summary_path: "/scratch/users/trobinet/long_lfmc/final_lfmc/soils/plots/soilgrids_vs_legacy_summary.txt"
+
+processing:
+  target_crs: "EPSG:5070"
+  chunk_size: 1000
+  chunk_buffer_pixels: 100
+  clip_buffer_m: 250000.0
+  resampling: "average"
+  stage_stripe_height: 512
+  stage_progress_interval_pct: 5.0
+
+fill:
+  enabled: true
+  landcover_reference_year: "2023-01-01"
+
+plotting:
+  absolute_cmap: "viridis"
+  difference_cmap: "RdBu_r"
+  difference_quantile: 0.98
