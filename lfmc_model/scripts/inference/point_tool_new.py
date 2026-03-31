@@ -17,10 +17,12 @@ from dask.cache import Cache
 here = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.join(here, '..', '..','..')
 sys.path.append(os.path.join(project_root,'lfmc_model','models','transformer'))
+sys.path.append(os.path.join(project_root,'lfmc_model','models','multisource_fusion'))
 sys.path.append(os.path.join(project_root,'lfmc_model','utils'))
 
 from transformer_multitask_longclimate import LFMCTransformer
 from transformer_multitask_longclimate_uncertainty import LFMCTransformer as LFMCTransformerUncertainty
+from multisource_fusion_model import LFMCMultiSourceFusion
 from plotting import plot_timeseries_by_site
 
 cache = Cache(64e9)
@@ -28,6 +30,7 @@ cache.register()
 
 def parse_model_path(model_path: str) -> dict:
     name = Path(model_path).parts[-3]  # transformer_..._basic
+    model_family = 'multisource_fusion' if name.startswith('multisource_fusion_') else 'transformer'
     patterns = {
         "d_model": r"dm(\d+)",
         "nhead": r"nh(\d+)",
@@ -39,8 +42,17 @@ def parse_model_path(model_path: str) -> dict:
         "long_num_layers": r"nllong(\d+)",
         "long_dim_feedforward": r"dflong(\d+)",
         "long_out_dim": r"outlong(\d+)",
+        "weather_kernel_size": r"kw(\d+)",
+        "weather_max_dilation": r"wdil(\d+)",
+        "weather_d_model": r"_dw(\d+)",
+        "modis_d_model": r"_dm(\d+)",
+        "static_d_model": r"_ds(\d+)",
+        "common_d_model": r"_dc(\d+)",
+        "shared_latent_dim": r"_sh(\d+)",
+        "lfmc_private_dim": r"_lfp(\d+)",
+        "sar_private_dim": r"_sarp(\d+)",
     }
-    params = {}
+    params = {"model_family": model_family}
     for key, pat in patterns.items():
         m = re.search(pat, name)
         if m:
@@ -469,6 +481,7 @@ def _build_inference_model(
     model_type='standard',
 ):
     model_params = parse_model_path(model_path)
+    inferred_family = model_params.get('model_family', 'transformer')
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
@@ -478,7 +491,24 @@ def _build_inference_model(
             ),
             category=UserWarning,
         )
-        if model_type == 'standard':
+        if inferred_family == 'multisource_fusion':
+            model = LFMCMultiSourceFusion(
+                short_input_dim=short_input_dim,
+                long_input_dim=long_input_dim,
+                static_input_dim=static_input_dim,
+                weather_d_model=model_params['weather_d_model'],
+                modis_d_model=model_params['modis_d_model'],
+                static_d_model=model_params['static_d_model'],
+                common_d_model=model_params['common_d_model'],
+                weather_kernel_size=model_params['weather_kernel_size'],
+                weather_max_dilation=model_params['weather_max_dilation'],
+                shared_latent_dim=model_params.get('shared_latent_dim', 0),
+                lfmc_private_dim=model_params.get('lfmc_private_dim', 0),
+                sar_private_dim=model_params.get('sar_private_dim', 0),
+                dropout=model_params['dropout'],
+                num_task_weights=model_task_weights,
+            )
+        elif model_type == 'standard':
             model = LFMCTransformer(
                 short_input_dim=short_input_dim,
                 long_input_dim=long_input_dim,
@@ -747,7 +777,7 @@ def main():
     var_locs = {
         'daymet':[
             'prcp','srad','swe','tmax','vpd',
-            'srad_anom','prcp_rolling30_anom','swe_anom','tmax_anom','vpd_anom'
+            'srad_daily_anom','prcp_rolling30_anom','swe_daily_anom','tmax_daily_anom','vpd_daily_anom'
         ],
         'modis':[
             'Nadir_Reflectance_Band1_interp',
@@ -785,17 +815,11 @@ def main():
     }
     print('opening datasets...')
     daymet_ds = xr.open_zarr(
-        os.path.join(scratch_root, 'daymet', 'daymet_long_inputs_with_vpd.zarr'),
+        os.path.join(scratch_root, 'daymet', 'daymet_vars_and_anoms.zarr'),
         consolidated=False
     )
-    daymet_anomaly_path = os.path.join(
-        scratch_root,
-        'daymet',
-        'daymet_anomalies_all_vars.zarr',
-    )
-    daymet_anomaly_ds = xr.open_zarr(daymet_anomaly_path, consolidated=False)
     dss = {
-        'daymet': _merge_daymet_datasets(daymet_ds, daymet_anomaly_ds),
+        'daymet': _merge_daymet_datasets(daymet_ds, None),
         'modis': xr.open_zarr(
             os.path.join(
                 scratch_root,

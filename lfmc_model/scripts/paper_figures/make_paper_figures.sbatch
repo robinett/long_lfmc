@@ -21,4 +21,5 @@ cd "${script_dir}"
 source ~/uv_activations/activate_lfmc_model_py312.sh
 
 python3 -u "${script_dir}/make_paper_figures.py" \
-    --config "${config_path}"
+    --config "${config_path}" \
+    --figures figure_7

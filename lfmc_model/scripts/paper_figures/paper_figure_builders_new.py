@@ -880,6 +880,90 @@ def _select_timeseries_sites(
     return selected
 
 
+def _select_medium_sites_by_landcover(
+    runtime: Dict[str, object],
+    site_df: pd.DataFrame,
+    n_sites: int,
+    min_measurements: int,
+    metric_col: str = "r2",
+    landcover_order: Optional[Sequence[str]] = None,
+) -> Dict[str, List[str]]:
+    categories = list(landcover_order or runtime["cfg"]["filters"]["landcover_order"])
+    out = {category: [] for category in categories}
+    ranked = site_df.copy()
+    ranked = ranked[ranked["num_measurements"] >= min_measurements]
+    ranked = ranked[np.isfinite(ranked[metric_col])]
+    if len(ranked) == 0:
+        return out
+    def _normalize_landcover(site: str):
+        annotation = get_site_landcover_annotation(site)
+        if annotation is None:
+            return np.nan
+        normalized = str(annotation).replace("Land cover: ", "").strip().lower()
+        normalized = normalized.replace("-", "_").replace(" ", "_")
+        return normalized
+
+    ranked["dominant_landcover"] = ranked["site"].map(_normalize_landcover)
+    ranked = ranked[ranked["dominant_landcover"].isin(categories)].reset_index(drop=True)
+    used_sites = set()
+    for category in categories:
+        category_ranked = ranked[ranked["dominant_landcover"] == category].copy()
+        out[category] = _pick_percentile_sites(
+            category_ranked,
+            metric_col=metric_col,
+            target_percentile=50.0,
+            n_sites=n_sites,
+            used_sites=used_sites,
+        )
+    return out
+
+
+def _select_timeseries_sites_by_landcover(
+    runtime: Dict[str, object],
+    model_entries: Sequence[Dict[str, object]],
+    anchor_model_key: str,
+    num_sites_per_landcover: int,
+    min_measurements: int,
+    years_to_plot: int = 3,
+    landcover_order: Optional[Sequence[str]] = None,
+) -> tuple[Dict[str, object], Dict[str, List[str]]]:
+    site_sets = [set(entry["site_error"].keys()) for entry in model_entries]
+    common_sites = set.intersection(*site_sets) if len(site_sets) > 1 else site_sets[0]
+    anchor_entry = next(
+        (entry for entry in model_entries if entry["paper_model_key"] == anchor_model_key),
+        None,
+    )
+    if anchor_entry is None:
+        raise KeyError(f"Anchor model '{anchor_model_key}' not found in timeseries entries")
+    site_df = build_site_df(anchor_entry["site_error"], common_sites)
+    site_df["r2"] = site_df["site"].map(
+        lambda site: float(anchor_entry["site_error"][site].get("r2", np.nan))
+    )
+    keep_sites = []
+    for site in site_df["site"].tolist():
+        lfmc_dates = pd.to_datetime(anchor_entry["site_error"][site]["dates"], errors="coerce")
+        lfmc_dates = lfmc_dates[lfmc_dates.notna()]
+        selected_years = _top_consecutive_observation_years(lfmc_dates, years_to_plot)
+        observed_years = set(lfmc_dates.year.tolist())
+        n_years_present = sum(1 for year in selected_years if year in observed_years)
+        if n_years_present >= 2:
+            keep_sites.append(site)
+    site_df = site_df[site_df["site"].isin(keep_sites)].reset_index(drop=True)
+    if len(site_df) == 0:
+        raise ValueError("No eligible sites were found for landcover-based timeseries selection")
+    selected = _select_medium_sites_by_landcover(
+        runtime=runtime,
+        site_df=site_df,
+        n_sites=num_sites_per_landcover,
+        min_measurements=min_measurements,
+        metric_col="r2",
+        landcover_order=landcover_order,
+    )
+    if sum(len(site_list) for site_list in selected.values()) == 0:
+        raise ValueError("No sites were selected after applying landcover and measurement filters")
+    return anchor_entry, selected
+
+
 def _site_has_same_year_lfmc_sar_overlap(
     runtime: Dict[str, object],
     model_entry: Dict[str, object],
@@ -1204,6 +1288,87 @@ def _build_timeseries_panel(
     return panel
 
 
+def _build_timeseries_comparison_panel(
+    runtime: Dict[str, object],
+    model_entries: Sequence[Dict[str, object]],
+    anchor_entry: Dict[str, object],
+    site_key: str,
+    criterion_label: str,
+    years_to_plot: int,
+) -> Dict[str, object]:
+    cfg = runtime["cfg"]
+    anchor_site = anchor_entry["site_error"][site_key]
+    lfmc_dates = _to_naive_datetime(anchor_site["dates"])
+    lfmc_values = np.asarray(anchor_site["true_values"], dtype=float)
+    selected_years = _top_consecutive_observation_years(lfmc_dates, years_to_plot)
+    lfmc_dates, lfmc_values = _filter_series_to_years(lfmc_dates, lfmc_values, selected_years)
+    lfmc_dates = _canonicalize_dates_to_year_slots(lfmc_dates, selected_years)
+    lfmc_dates, lfmc_values, _, _ = _reindex_series_to_daily(lfmc_dates, lfmc_values)
+
+    prediction_series = []
+    for model_entry in model_entries:
+        infer_out = _collect_year_window_inference(runtime, model_entry, site_key, selected_years)
+        infer_dates = _canonicalize_dates_to_year_slots(infer_out["dates"], selected_years)
+        infer_lower = None
+        infer_upper = None
+        if len(infer_out["lfmc_pred_std"]) == len(infer_out["lfmc_pred"]):
+            infer_lower = infer_out["lfmc_pred"] - infer_out["lfmc_pred_std"]
+            infer_upper = infer_out["lfmc_pred"] + infer_out["lfmc_pred_std"]
+        infer_dates, infer_values, infer_lower, infer_upper = _reindex_series_to_daily(
+            infer_dates,
+            infer_out["lfmc_pred"],
+            lower=infer_lower,
+            upper=infer_upper,
+        )
+        prediction_series.append(
+            {
+                "label": model_entry["name"],
+                "dates": infer_dates,
+                "values": infer_values,
+                "lower": infer_lower,
+                "upper": infer_upper,
+                "color": model_entry["paper_color"],
+                "linewidth": 2.2,
+                "linestyle": "-",
+                "alpha": 0.95,
+                "legend_group": "predictions",
+                "axis_group": "lfmc",
+            }
+        )
+
+    site_r2 = float(anchor_site.get("r2", np.nan))
+    return {
+        "title": _timeseries_panel_title(
+            cfg=cfg,
+            site_key=site_key,
+            criterion_label=criterion_label,
+            selected_years=selected_years,
+            site_r2=site_r2,
+        ),
+        "series": prediction_series
+        + [
+            {
+                "label": "Observed LFMC",
+                "dates": lfmc_dates,
+                "values": lfmc_values,
+                "color": "#111111",
+                "linestyle": "",
+                "marker": "o",
+                "markersize": 5,
+                "alpha": 0.9,
+                "linewidth": 0.0,
+                "zorder": 4,
+                "legend_group": "observations",
+                "axis_group": "lfmc",
+            }
+        ],
+        "right_series": [],
+        "ylabel": "LFMC (%)",
+        "use_month_aligned_axis": True,
+        "timeseries_mode": "lfmc_only",
+    }
+
+
 def init_runtime(cfg: Dict[str, object]) -> Dict[str, object]:
     output_root = str(cfg["paths"]["output_root"])
     figures_dir = os.path.join(output_root, "figures")
@@ -1326,6 +1491,61 @@ def build_supplementary_figure_1(runtime: Dict[str, object]) -> str:
         )
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
     table_path = _table_output_path(runtime, "supplementary_figure_01_sites")
+    site_rows = []
+    for criterion, site_list in selected.items():
+        for rank_idx, site_key in enumerate(site_list, start=1):
+            site_rows.append(
+                {
+                    "criterion": criterion,
+                    "rank": rank_idx,
+                    "site_key": site_key,
+                }
+            )
+    pd.DataFrame.from_records(site_rows).to_csv(table_path, index=False)
+    plot_stacked_timeseries_panels(
+        panels=panels,
+        save_path=save_path,
+        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"].get("dpi", 350)),
+    )
+    return save_path
+
+
+def build_supplementary_figure_2(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["supplementary_figure_2"]
+    model_entries = [
+        _load_ensemble_site_entry(cfg, str(model_key))
+        for model_key in fig_cfg["model_keys"]
+    ]
+    anchor_entry, selected = _select_timeseries_sites_by_landcover(
+        runtime=runtime,
+        model_entries=model_entries,
+        anchor_model_key=str(fig_cfg["anchor_model_key"]),
+        num_sites_per_landcover=int(fig_cfg["num_sites_per_criterion"]),
+        min_measurements=int(fig_cfg["min_measurements"]),
+        years_to_plot=int(fig_cfg.get("years_to_plot", 3)),
+        landcover_order=list(fig_cfg.get("landcover_order", cfg["filters"]["landcover_order"])),
+    )
+    panels = []
+    panel_order = list(fig_cfg.get("landcover_order", cfg["filters"]["landcover_order"]))
+    for criterion in panel_order:
+        site_list = selected.get(criterion, [])
+        if len(site_list) == 0:
+            continue
+        panels.append(
+            _build_timeseries_comparison_panel(
+                runtime=runtime,
+                model_entries=model_entries,
+                anchor_entry=anchor_entry,
+                site_key=site_list[0],
+                criterion_label=str(criterion).replace("_", " ").title(),
+                years_to_plot=int(fig_cfg.get("years_to_plot", 3)),
+            )
+        )
+    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
+    table_path = _table_output_path(runtime, "supplementary_figure_02_sites")
     site_rows = []
     for criterion, site_list in selected.items():
         for rank_idx, site_key in enumerate(site_list, start=1):
@@ -1719,6 +1939,7 @@ def build_enabled_figures(
         "figure_5": build_figure_5,
         "figure_6": build_figure_6,
         "supplementary_figure_1": build_supplementary_figure_1,
+        "supplementary_figure_2": build_supplementary_figure_2,
     }
     outputs = {}
     for fig_key, fig_cfg in cfg["figures"].items():

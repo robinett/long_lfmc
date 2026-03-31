@@ -1020,12 +1020,20 @@ def plot_landcover_comparison_panels(
             ax.set_ylim(-0.1, ymax)
             ax.set_ylabel(panel["ylabel"])
             ax.set_title(panel["title"], loc="left", pad=4)
-        legend = axes[0].legend(frameon=True, ncol=len(model_labels), loc="upper right")
+        handles, _ = axes[0].get_legend_handles_labels()
+        legend = fig.legend(
+            handles,
+            model_labels,
+            frameon=True,
+            ncol=len(model_labels),
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.992),
+        )
         legend.get_frame().set_alpha(1.0)
         legend.get_frame().set_edgecolor("0.4")
         axes[-1].set_xticks(x, _format_landcover_labels(categories))
         axes[-1].set_xlabel("Land cover")
-        fig.subplots_adjust(left=0.09, right=0.985, bottom=0.11, top=0.96, hspace=0.34)
+        fig.subplots_adjust(left=0.09, right=0.985, bottom=0.11, top=0.93, hspace=0.34)
         _ensure_parent_dir(save_path)
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)

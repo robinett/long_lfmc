@@ -35,13 +35,9 @@ DEFAULT_SCRATCH_ROOT = "/scratch/users/trobinet/long_lfmc/final_lfmc"
 DAYMET_ZARR_PATH = os.path.join(
     DEFAULT_SCRATCH_ROOT,
     "daymet",
-    "daymet_long_inputs_with_vpd.zarr",
+    "daymet_vars_and_anoms.zarr",
 )
-DAYMET_ANOM_ZARR_PATH = os.path.join(
-    DEFAULT_SCRATCH_ROOT,
-    "daymet",
-    "daymet_anomalies_all_vars.zarr",
-)
+DAYMET_ANOM_ZARR_PATH = None
 MODIS_ZARR_PATH = os.path.join(
     DEFAULT_SCRATCH_ROOT,
     "modis",
@@ -78,11 +74,11 @@ VAR_LOCS = {
         "swe",
         "tmax",
         "vpd",
-        "srad_anom",
+        "srad_daily_anom",
         "prcp_rolling30_anom",
-        "swe_anom",
-        "tmax_anom",
-        "vpd_anom",
+        "swe_daily_anom",
+        "tmax_daily_anom",
+        "vpd_daily_anom",
     ],
     "modis": [
         "Nadir_Reflectance_Band1_interp",
@@ -327,22 +323,24 @@ def get_inference_datasets():
         return _INFERENCE_DSS
     required_paths = [
         DAYMET_ZARR_PATH,
-        DAYMET_ANOM_ZARR_PATH,
         MODIS_ZARR_PATH,
         NLCD_ZARR_PATH,
         STATIC_NC_PATH,
         SOILS_NC_PATH,
         CANOPY_HEIGHT_NC_PATH,
     ]
+    if DAYMET_ANOM_ZARR_PATH is not None:
+        required_paths.append(DAYMET_ANOM_ZARR_PATH)
     for path in required_paths:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Missing required inference dataset: {path}")
     print(timestamped_message("Opening inference datasets..."))
+    daymet_ds = xr.open_zarr(DAYMET_ZARR_PATH, consolidated=False)
+    daymet_anom_ds = None
+    if DAYMET_ANOM_ZARR_PATH is not None:
+        daymet_anom_ds = xr.open_zarr(DAYMET_ANOM_ZARR_PATH, consolidated=False)
     _INFERENCE_DSS = {
-        "daymet": _merge_daymet_datasets(
-            xr.open_zarr(DAYMET_ZARR_PATH, consolidated=False),
-            xr.open_zarr(DAYMET_ANOM_ZARR_PATH, consolidated=False),
-        ),
+        "daymet": _merge_daymet_datasets(daymet_ds, daymet_anom_ds),
         "modis": xr.open_zarr(MODIS_ZARR_PATH),
         "static": xr.open_dataset(STATIC_NC_PATH),
         "soils": xr.open_dataset(SOILS_NC_PATH),
@@ -389,7 +387,7 @@ def select_ensemble_member_dirs(
     for name in os.listdir(outputs_root):
         model_dir = os.path.join(outputs_root, name)
         if (
-            name.startswith("transformer_")
+            os.path.isdir(model_dir)
             and (member_name_prefix is None or name.startswith(member_name_prefix))
             and is_complete_ensemble_member_dir(model_dir)
         ):
@@ -448,11 +446,11 @@ def select_model_dir(outputs_root, model_df_index=None):
     candidates = []
     for name in os.listdir(outputs_root):
         model_dir = os.path.join(outputs_root, name)
-        if name.startswith("transformer_") and is_complete_model_dir(model_dir):
+        if os.path.isdir(model_dir) and is_complete_model_dir(model_dir):
             candidates.append(model_dir)
     if len(candidates) == 0:
         raise FileNotFoundError(
-            f"No complete transformer_* model dirs found under {outputs_root}"
+            f"No complete model dirs found under {outputs_root}"
         )
     candidates = sorted(candidates, key=lambda x: os.path.getmtime(x), reverse=True)
     return candidates[0]
@@ -766,8 +764,17 @@ def get_latest_checkpoint(fold_dir):
 
 
 def _parse_data_seed_from_model_dir(model_dir):
-    match = re.search(r"_ds(\d+)", os.path.basename(model_dir))
-    return match.group(1) if match else None
+    model_name = os.path.basename(model_dir)
+    explicit_match = re.search(r"_ds(\d+)_ms\d+(?:_|$)", model_name)
+    if explicit_match is not None:
+        return explicit_match.group(1)
+    single_match = re.search(r"_ms(\d+)(?:_|$)", model_name)
+    if single_match is not None:
+        return single_match.group(1)
+    matches = re.findall(r"_ds(\d+)", model_name)
+    if len(matches) == 0:
+        return None
+    return matches[-1]
 
 
 def _resolve_input_data_dir(inputs_root, input_data_name, model_dir=None):

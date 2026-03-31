@@ -6,4 +6,5 @@ source ~/.bashrc
 source ~/uv_activations/activate_lfmc_model_py312.sh
 
 python3 -u /home/users/trobinet/long_lfmc/lfmc_model/scripts/paper_figures/make_paper_figures.py \
-    --config "$config_path"
+    --config "$config_path" \
+    --figures figure_7
