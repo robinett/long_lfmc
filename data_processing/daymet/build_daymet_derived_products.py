@@ -521,10 +521,33 @@ def trailing_window_mean_numpy(arr: np.ndarray, window_days: int) -> np.ndarray:
     return rolling
 
 
+def circular_centered_window_mean_numpy(arr: np.ndarray, window_days: int) -> np.ndarray:
+    if window_days <= 1:
+        return arr.astype(np.float32, copy=True)
+    if arr.shape[0] == 0:
+        return arr.astype(np.float32, copy=True)
+    if window_days > arr.shape[0]:
+        raise ValueError(
+            f"Centered climatology smoothing window ({window_days}) exceeds climatology axis "
+            f"length ({arr.shape[0]})"
+        )
+
+    left_pad = (window_days - 1) // 2
+    right_pad = window_days // 2
+    padded = np.concatenate([arr[-left_pad:], arr, arr[:right_pad]], axis=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        smoothed = np.empty_like(arr, dtype=np.float32)
+        for idx in range(arr.shape[0]):
+            smoothed[idx] = np.nanmean(padded[idx : idx + window_days], axis=0).astype(np.float32)
+    return smoothed
+
+
 def calendar_day_climatology_and_anomaly_numpy(
     arr: np.ndarray,
     md_values: np.ndarray,
     unique_md_values: np.ndarray,
+    climatology_smoothing_window_days: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     climatology = np.full((len(unique_md_values),) + arr.shape[1:], np.nan, dtype=np.float32)
     anomaly = np.full(arr.shape, np.nan, dtype=np.float32)
@@ -534,7 +557,13 @@ def calendar_day_climatology_and_anomaly_numpy(
             warnings.simplefilter("ignore", category=RuntimeWarning)
             climatology_chunk = np.nanmean(arr[mask], axis=0).astype(np.float32)
         climatology[idx] = climatology_chunk
-        anomaly[mask] = arr[mask] - climatology_chunk
+    climatology = circular_centered_window_mean_numpy(
+        climatology,
+        int(climatology_smoothing_window_days),
+    )
+    for idx, month_day in enumerate(unique_md_values):
+        mask = md_values == month_day
+        anomaly[mask] = arr[mask] - climatology[idx]
     return climatology, anomaly
 
 
@@ -545,16 +574,25 @@ def compute_anomaly_chunk(
     md_values: np.ndarray,
     unique_md_values: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
+    climatology_smoothing_window_days = int(
+        config["processing"].get("climatology_smoothing_window_days", 1)
+    )
     if var_name == "prcp_rolling30_anom":
         rolling = trailing_window_mean_numpy(
             base_chunk.astype(np.float32, copy=False),
             int(config["processing"]["prcp_rolling_window_days"]),
         )
-        return calendar_day_climatology_and_anomaly_numpy(rolling, md_values, unique_md_values)
+        return calendar_day_climatology_and_anomaly_numpy(
+            rolling,
+            md_values,
+            unique_md_values,
+            climatology_smoothing_window_days=climatology_smoothing_window_days,
+        )
     return calendar_day_climatology_and_anomaly_numpy(
         base_chunk.astype(np.float32, copy=False),
         md_values,
         unique_md_values,
+        climatology_smoothing_window_days=climatology_smoothing_window_days,
     )
 
 
@@ -731,6 +769,9 @@ def init_anomaly(args, config: Dict) -> None:
             "vars": anomaly_var_names(config),
             "store_path": run_paths["final_output_zarr_path"],
             "climatology_store_path": run_paths["climatology_output_zarr_path"],
+            "climatology_smoothing_window_days": int(
+                config["processing"].get("climatology_smoothing_window_days", 1)
+            ),
         },
     )
     print("Initialized anomaly phase markers")

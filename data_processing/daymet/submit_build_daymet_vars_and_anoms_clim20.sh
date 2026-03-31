@@ -18,9 +18,9 @@ if [[ $# -gt 0 ]]; then
     exit 1
 fi
 
+config_path="${SCRIPT_DIR}/configs_clim20.yaml"
 run_script="${SCRIPT_DIR}/run_build_daymet_derived_products.sh"
 array_task_script="${SCRIPT_DIR}/run_build_daymet_derived_products_array_task.sh"
-config_path="${SCRIPT_DIR}/configs.yaml"
 
 mapfile -t config_values < <(
 python3 - <<'PY' "${config_path}"
@@ -99,19 +99,21 @@ run_script_submit() {
     sbatch_submit "${slurm_args[@]}" "${run_script}" "${script_args[@]}"
 }
 
-init_job_id=$(
-    run_script_submit \
-        --job-name=daymet_init_store \
-        --output=./logs/daymet_init_store_%j.out \
-        --error=./logs/daymet_init_store_%j.err \
-        -- \
-        --mode init-store
-)
-
+echo "Submitting Daymet clim20 workflow"
 echo "Config: ${config_path}"
 echo "Smoke test: ${smoke_test}"
 echo "Anomaly shards per variable: ${num_shards}"
 echo "Max concurrent anomaly tasks: ${max_jobs}"
+
+init_job_id=$(
+    run_script_submit \
+        --job-name=daymet_c20_init_store \
+        --output=./logs/daymet_c20_init_store_%j.out \
+        --error=./logs/daymet_c20_init_store_%j.err \
+        -- \
+        --mode init-store
+)
+
 echo "Submitted init-store job: ${init_job_id}"
 
 standard_job_ids=()
@@ -119,9 +121,9 @@ for var_name in "${standard_vars[@]}"; do
     this_job_id=$(
         run_script_submit \
             --dependency=afterok:"${init_job_id}" \
-            --job-name="daymet_std_${var_name}" \
-            --output="./logs/daymet_std_${var_name}_%j.out" \
-            --error="./logs/daymet_std_${var_name}_%j.err" \
+            --job-name="daymet_c20_std_${var_name}" \
+            --output="./logs/daymet_c20_std_${var_name}_%j.out" \
+            --error="./logs/daymet_c20_std_${var_name}_%j.err" \
             -- \
             --mode build-standard-var \
             --var "${var_name}"
@@ -134,9 +136,9 @@ standard_dep=$(IFS=:; echo "${standard_job_ids[*]}")
 finalize_standard_job_id=$(
     run_script_submit \
         --dependency=afterok:"${standard_dep}" \
-        --job-name=daymet_finalize_standard \
-        --output=./logs/daymet_finalize_standard_%j.out \
-        --error=./logs/daymet_finalize_standard_%j.err \
+        --job-name=daymet_c20_finalize_standard \
+        --output=./logs/daymet_c20_finalize_standard_%j.out \
+        --error=./logs/daymet_c20_finalize_standard_%j.err \
         -- \
         --mode finalize-standard
 )
@@ -146,9 +148,9 @@ echo "Submitted finalize-standard job: ${finalize_standard_job_id}"
 init_anomaly_job_id=$(
     run_script_submit \
         --dependency=afterok:"${finalize_standard_job_id}" \
-        --job-name=daymet_init_anomaly \
-        --output=./logs/daymet_init_anomaly_%j.out \
-        --error=./logs/daymet_init_anomaly_%j.err \
+        --job-name=daymet_c20_init_anomaly \
+        --output=./logs/daymet_c20_init_anomaly_%j.out \
+        --error=./logs/daymet_c20_init_anomaly_%j.err \
         -- \
         --mode init-anomaly
 )
@@ -161,9 +163,9 @@ anomaly_array_job_id=$(
     sbatch_submit \
         --dependency=afterok:"${init_anomaly_job_id}" \
         --array="${array_spec}" \
-        --job-name=daymet_anom \
-        --output=./logs/daymet_anom_%A_%a.out \
-        --error=./logs/daymet_anom_%A_%a.err \
+        --job-name=daymet_c20_anom \
+        --output=./logs/daymet_c20_anom_%A_%a.out \
+        --error=./logs/daymet_c20_anom_%A_%a.err \
         "${array_task_script}" \
         "${config_path}" \
         "${num_shards}" \
@@ -177,12 +179,12 @@ echo "Array spec: ${array_spec} (${#anomaly_vars[@]} vars x ${num_shards} shards
 finalize_anomaly_job_id=$(
     run_script_submit \
         --dependency=afterok:"${anomaly_array_job_id}" \
-        --job-name=daymet_finalize_anomaly \
-        --output=./logs/daymet_finalize_anomaly_%j.out \
-        --error=./logs/daymet_finalize_anomaly_%j.err \
+        --job-name=daymet_c20_finalize_anomaly \
+        --output=./logs/daymet_c20_finalize_anomaly_%j.out \
+        --error=./logs/daymet_c20_finalize_anomaly_%j.err \
         -- \
         --mode finalize-anomaly
 )
 
 echo "Submitted finalize-anomaly job: ${finalize_anomaly_job_id}"
-echo "Workflow submission complete."
+echo "Daymet clim20 workflow submission complete."
