@@ -21,10 +21,12 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
 sys.path.append(os.path.join(project_root,'lfmc_model','models','transformer'))
+sys.path.append(os.path.join(project_root,'lfmc_model','models','multisource_fusion'))
 sys.path.append(os.path.join(project_root,'lfmc_model','utils'))
 
 from transformer_multitask import LFMCTransformer
 from transformer_multitask_longclimate import LFMCTransformer as LFMCTransformerMultiTask
+from multisource_fusion_model import LFMCMultiSourceFusion
 #from transformer_multitask_longclimate import LFMCTransformer as LFMCTransformerMultiTaskLongClimate
 #from transformer_multitask_longclimate_uncertainty import LFMCTransformer as LFMCTransformerMultiTaskLongClimate
 import plotting
@@ -181,6 +183,25 @@ def get_args():
         help='Weight decay for Adam optimizer',
     )
     parser.add_argument(
+        '--warmup_epochs',
+        type=int,
+        default=2,
+        help='Number of epochs to use for learning-rate warmup',
+    )
+    parser.add_argument(
+        '--scheduler_t_max',
+        type=int,
+        default=40,
+        help='CosineAnnealingLR T_max value',
+    )
+    parser.add_argument(
+        '--model_family',
+        type=str,
+        default='transformer_longclimate',
+        choices=['transformer_longclimate', 'multisource_fusion'],
+        help='Model family to train',
+    )
+    parser.add_argument(
         '--d_model',
         type=int,
         help='Dimensionality of the model',
@@ -229,6 +250,60 @@ def get_args():
         '--long_out_dim',
         type=int,
         help='Dimensionality of the output layer in the long-term model',
+    )
+    parser.add_argument(
+        '--weather_kernel_size',
+        type=int,
+        default=5,
+        help='Kernel size for the weather TCN encoder',
+    )
+    parser.add_argument(
+        '--weather_d_model',
+        type=int,
+        default=128,
+        help='Hidden width for the weather TCN encoder',
+    )
+    parser.add_argument(
+        '--weather_max_dilation',
+        type=int,
+        default=32,
+        help='Maximum dilation used by the weather TCN encoder',
+    )
+    parser.add_argument(
+        '--modis_d_model',
+        type=int,
+        default=128,
+        help='Model width for the MODIS transformer encoder',
+    )
+    parser.add_argument(
+        '--static_d_model',
+        type=int,
+        default=64,
+        help='Hidden width for the static MLP encoder',
+    )
+    parser.add_argument(
+        '--common_d_model',
+        type=int,
+        default=128,
+        help='Common token width used by the fusion transformer',
+    )
+    parser.add_argument(
+        '--shared_latent_dim',
+        type=int,
+        default=0,
+        help='Shared latent width after the fusion trunk (0 keeps legacy direct heads)',
+    )
+    parser.add_argument(
+        '--lfmc_private_dim',
+        type=int,
+        default=0,
+        help='LFMC-private latent width after the fusion trunk (0 keeps legacy direct heads)',
+    )
+    parser.add_argument(
+        '--sar_private_dim',
+        type=int,
+        default=0,
+        help='VV/VH-private latent width after the fusion trunk (0 keeps legacy direct heads)',
     )
     parser.add_argument(
         '--num_tasks',
@@ -283,8 +358,108 @@ def get_args():
         action='store_true',
         help='If set, delete an existing output directory before training',
     )
+    parser.add_argument(
+        '--skip_final_all_data_fold',
+        action='store_true',
+        help='If set, skip the final 9998 all-data fit after cross-validation folds',
+    )
     args = parser.parse_args()
     return args
+
+
+def build_model_from_args(
+    args,
+    short_input_dim,
+    static_input_dim,
+    long_input_dim,
+    num_tasks,
+    device,
+):
+    if args.model_family == 'transformer_longclimate':
+        model = LFMCTransformerMultiTask(
+            short_input_dim=short_input_dim,
+            static_input_dim=static_input_dim,
+            long_input_dim=long_input_dim,
+            d_model=args.d_model,
+            nhead=args.nhead,
+            num_layers=args.num_layers,
+            dim_feedforward=args.dim_feedforward,
+            dropout=args.dropout,
+            num_queries=2,
+            long_d_model=args.long_d_model,
+            long_nhead=args.long_nhead,
+            long_num_layers=args.long_num_layers,
+            long_dim_feedforward=args.long_dim_feedforward,
+            long_out_dim=args.long_out_dim,
+            num_task_weights=num_tasks
+        )
+    elif args.model_family == 'multisource_fusion':
+        model = LFMCMultiSourceFusion(
+            short_input_dim=short_input_dim,
+            static_input_dim=static_input_dim,
+            long_input_dim=long_input_dim,
+            weather_d_model=args.weather_d_model,
+            modis_d_model=args.modis_d_model,
+            static_d_model=args.static_d_model,
+            common_d_model=args.common_d_model,
+            weather_kernel_size=args.weather_kernel_size,
+            weather_max_dilation=args.weather_max_dilation,
+            shared_latent_dim=args.shared_latent_dim,
+            lfmc_private_dim=args.lfmc_private_dim,
+            sar_private_dim=args.sar_private_dim,
+            dropout=args.dropout,
+            num_task_weights=num_tasks,
+        )
+    else:
+        raise ValueError(f"Unsupported model_family: {args.model_family}")
+    return model.to(device)
+
+
+def build_model_name(
+    args,
+    batch_size,
+    lr,
+    warmup_steps,
+    scheduler_t_max,
+    adam_weight_decay,
+    num_insitu_obs,
+    num_vv_obs,
+    num_vh_obs,
+):
+    first_task_weight_tag = ''
+    if (
+        args.task_weight_type == 'manual'
+        and args.manual_task_weights is not None
+        and len(args.manual_task_weights) > 0
+    ):
+        first_task_weight_tag = f'_tw0{args.manual_task_weights[0]}'
+
+    if args.model_family == 'transformer_longclimate':
+        model_name = (
+            f'transformer_dm{args.d_model}_nh{args.nhead}_nl{args.num_layers}_df{args.dim_feedforward}'
+            f'_do{args.dropout}_bs{batch_size}_lr{lr}_warmup{warmup_steps}_tmax{scheduler_t_max}'
+            f'_wd{adam_weight_decay}_iobs{num_insitu_obs}_vvobs{num_vv_obs}_vhobs{num_vh_obs}'
+            f'_dmlong{args.long_d_model}_nhlong{args.long_nhead}_nllong{args.long_num_layers}'
+            f'_dflong{args.long_dim_feedforward}_outlong{args.long_out_dim}'
+            f'_firstweight{first_task_weight_tag}'
+        )
+    elif args.model_family == 'multisource_fusion':
+        model_name = (
+            f'multisource_fusion_kw{args.weather_kernel_size}'
+            f'_wdil{args.weather_max_dilation}'
+            f'_dw{args.weather_d_model}_dm{args.modis_d_model}'
+            f'_ds{args.static_d_model}_dc{args.common_d_model}'
+            f'_sh{args.shared_latent_dim}_lfp{args.lfmc_private_dim}_sarp{args.sar_private_dim}'
+            f'_do{args.dropout}_bs{batch_size}_lr{lr}_warmup{warmup_steps}_tmax{scheduler_t_max}'
+            f'_wd{adam_weight_decay}_iobs{num_insitu_obs}_vvobs{num_vv_obs}_vhobs{num_vh_obs}'
+            f'_firstweight{first_task_weight_tag}'
+        )
+    else:
+        raise ValueError(f"Unsupported model_family: {args.model_family}")
+
+    if args.run_tag is not None and len(args.run_tag) > 0:
+        model_name = f'{model_name}_{args.run_tag}'
+    return model_name
 
 
 class StratifiedBatchSampler(Sampler):
@@ -2366,6 +2541,8 @@ def main():
     #warmup_steps = 1200
     base_lr = lr
     warmup_start_lr = 1e-6
+    warmup_epochs = args.warmup_epochs
+    scheduler_t_max = args.scheduler_t_max
     val_split = args.val_split
     adam_weight_decay = args.adam_wd
     patience = 8
@@ -2383,6 +2560,7 @@ def main():
     long_num_layers = args.long_num_layers
     long_dim_feedforward = args.long_dim_feedforward
     long_out_dim = args.long_out_dim
+    model_family = args.model_family
     # load the data
     datasets = load_data(input_data_dir)
     # early check that we don't have nans ANYWHERE
@@ -2430,29 +2608,26 @@ def main():
     num_insitu_obs = int((source == 0).sum().item())
     num_vv_obs = int((source == 1).sum().item())
     num_vh_obs = int((source == 2).sum().item())
-    # make warmup the first 3 epochs
+    # make warmup the first N epochs
     batches_per_epoch = (num_insitu_obs + num_vv_obs + num_vh_obs) / batch_size * 0.7
-    warmup_steps = int(3 * batches_per_epoch)
+    warmup_steps = int(warmup_epochs * batches_per_epoch)
     print(f'Number of insitu observations: {num_insitu_obs}')
     print(f'Number of VV observations: {num_vv_obs}')
     print(f'Number of VH observations: {num_vh_obs}')
-    first_task_weight_tag = ''
-    if (
-        args.task_weight_type == 'manual'
-        and args.manual_task_weights is not None
-        and len(args.manual_task_weights) > 0
-    ):
-        first_task_weight_tag = f'_tw0{args.manual_task_weights[0]}'
-    this_model_name = (
-        f'transformer_dm{d_model}_nh{nhead}_nl{num_layers}_df{dim_feedforward}'
-        f'_do{dropout}_bs{batch_size}_lr{lr}_warmup{warmup_steps}'
-        f'_wd{adam_weight_decay}_iobs{num_insitu_obs}_vvobs{num_vv_obs}_vhobs{num_vh_obs}'
-        f'_dmlong{long_d_model}_nhlong{long_nhead}_nllong{long_num_layers}'
-        f'_dflong{long_dim_feedforward}_outlong{long_out_dim}'
-        f'_firstweight{first_task_weight_tag}'
+    print(f'Warmup epochs: {warmup_epochs}')
+    print(f'Warmup steps: {warmup_steps}')
+    print(f'Cosine scheduler T_max: {scheduler_t_max}')
+    this_model_name = build_model_name(
+        args=args,
+        batch_size=batch_size,
+        lr=lr,
+        warmup_steps=warmup_steps,
+        scheduler_t_max=scheduler_t_max,
+        adam_weight_decay=adam_weight_decay,
+        num_insitu_obs=num_insitu_obs,
+        num_vv_obs=num_vv_obs,
+        num_vh_obs=num_vh_obs,
     )
-    if args.run_tag is not None and len(args.run_tag) > 0:
-        this_model_name = f'{this_model_name}_{args.run_tag}'
     # set up the save directories
     full_save_dir = os.path.join(save_dir, this_model_name)
     if os.path.exists(full_save_dir):
@@ -2540,23 +2715,14 @@ def main():
     for fold, locs in enumerate(fold_locs.items()):
         print(f'Training fold {fold+1}/{n_folds} with {len(locs[1])} locations held out for testing')
         # build the model
-        model = LFMCTransformerMultiTask(
+        model = build_model_from_args(
+            args=args,
             short_input_dim=short_input_dim,
             static_input_dim=static_input_dim,
             long_input_dim=long_input_dim,
-            d_model=d_model,
-            nhead=nhead,
-            num_layers=num_layers,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            num_queries=2,
-            long_d_model=long_d_model,
-            long_nhead=long_nhead,
-            long_num_layers=long_num_layers,
-            long_dim_feedforward=long_dim_feedforward,
-            long_out_dim=long_out_dim,
-            num_task_weights=num_tasks
-        ).to(device)
+            num_tasks=num_tasks,
+            device=device,
+        )
         # build the optimizer
         decay, no_decay = [], []
         for name, param in model.named_parameters():
@@ -2583,7 +2749,7 @@ def main():
         # build the scheduler
         scheduler = CosineAnnealingLR(
             optimizer,
-            T_max=20,
+            T_max=scheduler_t_max,
             eta_min=1e-6
         )
         # build early stopping
@@ -2625,23 +2791,14 @@ def main():
         )
     # one final version of the model trained on all the data
     print('Training final model on all data')
-    model = LFMCTransformerMultiTask(
+    model = build_model_from_args(
+        args=args,
         short_input_dim=short_input_dim,
         static_input_dim=static_input_dim,
         long_input_dim=long_input_dim,
-        d_model=d_model,
-        nhead=nhead,
-        num_layers=num_layers,
-        dim_feedforward=dim_feedforward,
-        dropout=dropout,
-        num_queries=2,
-        long_d_model=long_d_model,
-        long_nhead=long_nhead,
-        long_num_layers=long_num_layers,
-        long_dim_feedforward=long_dim_feedforward,
-        long_out_dim=long_out_dim,
-        num_task_weights=num_tasks
-    ).to(device)
+        num_tasks=num_tasks,
+        device=device,
+    )
     # build the optimizer
     decay, no_decay = [], []
     for name, param in model.named_parameters():
@@ -2668,7 +2825,7 @@ def main():
     # build the scheduler
     scheduler = CosineAnnealingLR(
         optimizer,
-        T_max=20,
+        T_max=scheduler_t_max,
         eta_min=1e-6
     )
     # build early stopping
@@ -2686,29 +2843,30 @@ def main():
         )
     else:
         grad_norm = None
-    # train on this fold
-    locs = (9998, [(-9998.0,-9998.0)])  # dummy value to indicate training on all data
-    train_fold_k(
-        model,
-        full_save_dir,
-        datasets,
-        locs,
-        var_names,
-        device,
-        optimizer,
-        scheduler,
-        early_stopping,
-        batch_size,
-        max_epochs,
-        warmup_steps,
-        warmup_start_lr,
-        val_split,
-        num_tasks,
-        task_weight_type,
-        grad_norm,
-        split_seed=split_seed,
-        batch_seed=batch_seed,
-    )
+    if not args.skip_final_all_data_fold:
+        # Train one final all-data fit after CV for production runs.
+        locs = (9998, [(-9998.0,-9998.0)])  # dummy value to indicate training on all data
+        train_fold_k(
+            model,
+            full_save_dir,
+            datasets,
+            locs,
+            var_names,
+            device,
+            optimizer,
+            scheduler,
+            early_stopping,
+            batch_size,
+            max_epochs,
+            warmup_steps,
+            warmup_start_lr,
+            val_split,
+            num_tasks,
+            task_weight_type,
+            grad_norm,
+            split_seed=split_seed,
+            batch_seed=batch_seed,
+        )
 
             
 

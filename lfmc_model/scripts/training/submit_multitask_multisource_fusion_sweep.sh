@@ -8,4 +8,4 @@ mkdir -p logs
 
 source /home/users/trobinet/uv_activations/activate_lfmc_model_py312.sh
 
-python3 "${script_dir}/submit_training_end_to_end.py" "$@"
+python3 -u "${script_dir}/submit_multitask_multisource_fusion_sweep.py" "$@"

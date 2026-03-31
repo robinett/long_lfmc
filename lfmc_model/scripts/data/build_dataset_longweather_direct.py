@@ -183,6 +183,12 @@ def main():
             "Skips all feature extraction/tensor rebuild."
         ),
     )
+    parser.add_argument(
+        "--daymet-zarr-path",
+        type=str,
+        default=None,
+        help="Optional override for the Daymet vars/anoms zarr store.",
+    )
     args = parser.parse_args()
     if args.sample_index_path is None:
         print(
@@ -245,6 +251,8 @@ def main():
             "nlcd_2000_2024.zarr",
         ),
     }
+    if args.daymet_zarr_path:
+        dataset_paths["daymet"] = str(args.daymet_zarr_path)
 
     grid_source = "modis"
     stratifier = "nlcd"
