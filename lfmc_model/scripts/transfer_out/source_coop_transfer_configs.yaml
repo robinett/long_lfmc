@@ -1,14 +1,27 @@
 source_coop:
   region: us-west-2
+  endpoint_url: ""
   bucket: us-west-2.opendata.source.coop
   product_prefix: rseg/long-lfmc-test/
   credentials_path: /home/users/trobinet/long_lfmc/lfmc_model/scripts/transfer_out/source_credentials.json
   verify_after_upload: true
   delete_extra_remote_files: false
   acl: none
+  boto3_max_workers: 16
 
 datasets:
   example_lfmc_maps:
     description: Example LFMC map Zarr store for Source Cooperative upload.
+    artifact_type: zarr
     source_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_shared_dm128_2023_07_08/run_20260323_205249/merged/lfmc_maps.zarr
     destination_relpath: lfmc_maps.zarr
+  viewer_3857_lfmc_maps:
+    description: Derived EPSG:3857 viewer Zarr for the long LFMC web viewer.
+    artifact_type: zarr
+    source_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857.zarr
+    destination_relpath: viewer_3857/lfmc_maps_3857.zarr
+  viewer_3857_assets:
+    description: Remote tile and manifest assets for the EPSG:3857 long LFMC web viewer.
+    artifact_type: directory
+    source_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_assets/web_mercator_3857
+    destination_relpath: viewer_3857/assets/web_mercator_3857

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import concurrent.futures
 import datetime as dt
 import json
 import os
@@ -8,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
@@ -50,6 +52,7 @@ def get_args():
     parser.add_argument("--destination_relpath", type=str, default=None)
     parser.add_argument("--bucket", type=str, default=None)
     parser.add_argument("--region", type=str, default=None)
+    parser.add_argument("--endpoint_url", type=str, default=None)
     parser.add_argument("--credentials_path", type=str, default=None)
     parser.add_argument("--acl", choices=["none", "bucket-owner-full-control"], default=None)
     parser.add_argument("--profile", type=str, default=None)
@@ -235,7 +238,7 @@ def iter_local_files(source_path: Path) -> Iterable[Path]:
             yield path
 
 
-def build_boto3_client(region: str, env: Dict[str, str], profile: Optional[str]):
+def build_boto3_client(region: str, env: Dict[str, str], profile: Optional[str], endpoint_url: Optional[str]):
     import boto3
 
     session_kwargs = {"region_name": region}
@@ -247,7 +250,10 @@ def build_boto3_client(region: str, env: Dict[str, str], profile: Optional[str])
         if env.get("AWS_SESSION_TOKEN"):
             session_kwargs["aws_session_token"] = env["AWS_SESSION_TOKEN"]
     session = boto3.Session(**session_kwargs)
-    return session.client("s3", region_name=region)
+    client_kwargs = {"region_name": region}
+    if endpoint_url:
+        client_kwargs["endpoint_url"] = endpoint_url
+    return session.client("s3", **client_kwargs)
 
 
 def list_remote_objects_boto3(client, bucket: str, key_prefix: str):
@@ -268,13 +274,14 @@ def upload_with_boto3(
     logger: TeeLogger,
     dry_run: bool,
     total_bytes: int,
+    max_workers: int,
 ):
-    total_files = 0
     uploaded_files = 0
     uploaded_bytes = 0
     start_time = time.time()
     last_progress_time = start_time
     extra_args = {}
+    progress_lock = threading.Lock()
     if acl != "none":
         extra_args["ACL"] = acl
 
@@ -282,21 +289,13 @@ def upload_with_boto3(
     total_files = len(local_files)
     logger.write(
         timestamped_message(
-            f"Uploading with boto3: {total_files} files, {human_bytes(total_bytes)} total"
+            f"Uploading with boto3: {total_files} files, {human_bytes(total_bytes)} total, "
+            f"max_workers={max_workers}"
         )
     )
-    for path in local_files:
-        rel_path = path.relative_to(source_path).as_posix()
-        key = f"{key_prefix}/{rel_path}"
-        file_size = path.stat().st_size
-        if dry_run:
-            if uploaded_files < 10:
-                logger.write(timestamped_message(f"Dry run upload candidate: s3://{bucket}/{key}"))
-        else:
-            client.upload_file(str(path), bucket, key, ExtraArgs=extra_args or None)
-        uploaded_files += 1
-        uploaded_bytes += file_size
-        now = time.time()
+
+    def maybe_log_progress(now: float) -> None:
+        nonlocal last_progress_time
         should_log_progress = (
             uploaded_files == total_files
             or uploaded_files == 1
@@ -316,6 +315,33 @@ def upload_with_boto3(
                 )
             )
             last_progress_time = now
+
+    def upload_one(path: Path) -> Tuple[Path, int]:
+        rel_path = path.relative_to(source_path).as_posix()
+        key = f"{key_prefix}/{rel_path}"
+        file_size = path.stat().st_size
+        if dry_run:
+            return path, file_size
+        client.upload_file(str(path), bucket, key, ExtraArgs=extra_args or None)
+        return path, file_size
+
+    if dry_run:
+        for path in local_files[:10]:
+            rel_path = path.relative_to(source_path).as_posix()
+            key = f"{key_prefix}/{rel_path}"
+            logger.write(timestamped_message(f"Dry run upload candidate: s3://{bucket}/{key}"))
+        logger.write(timestamped_message("Dry run enabled. Uploads were not executed."))
+        return
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_path = {executor.submit(upload_one, path): path for path in local_files}
+        for future in concurrent.futures.as_completed(future_to_path):
+            path = future_to_path[future]
+            _, file_size = future.result()
+            with progress_lock:
+                uploaded_files += 1
+                uploaded_bytes += file_size
+                maybe_log_progress(time.time())
 
 
 def delete_extra_remote_objects_boto3(
@@ -424,6 +450,7 @@ def main():
     dataset_cfg = datasets_cfg.get(args.dataset_key, {})
 
     region = require_config_value(args.region or source_cfg.get("region", None), "source_coop.region")
+    endpoint_url = str(args.endpoint_url or source_cfg.get("endpoint_url", "")).strip()
     bucket = require_config_value(args.bucket or source_cfg.get("bucket", None), "source_coop.bucket")
     product_prefix = require_config_value(
         args.product_prefix or source_cfg.get("product_prefix", None),
@@ -437,6 +464,7 @@ def main():
         args.destination_relpath or dataset_cfg.get("destination_relpath", None),
         f"datasets.{args.dataset_key}.destination_relpath",
     )
+    artifact_type = str(dataset_cfg.get("artifact_type", "zarr")).strip().lower()
     source_path = Path(
         require_config_value(
             args.source_path or dataset_cfg.get("source_path", None),
@@ -449,14 +477,26 @@ def main():
         args.delete_extra_remote_files,
         bool(source_cfg.get("delete_extra_remote_files", False)),
     )
+    boto3_max_workers = int(source_cfg.get("boto3_max_workers", 16))
+    if boto3_max_workers < 1:
+        raise ValueError("source_coop.boto3_max_workers must be at least 1")
 
     if not source_path.exists():
         raise FileNotFoundError(f"Source path does not exist: {source_path}")
     if not source_path.is_dir():
         raise ValueError(f"Source path must be a directory: {source_path}")
-    if not (source_path / "zarr.json").exists():
+    if artifact_type == "zarr":
+        has_zarr_v3 = (source_path / "zarr.json").exists()
+        has_zarr_v2 = (source_path / ".zgroup").exists()
+        if not has_zarr_v3 and not has_zarr_v2:
+            raise ValueError(
+                "Expected a Zarr store with either zarr.json (Zarr v3) "
+                f"or .zgroup (Zarr v2) at the top level, but found neither in {source_path}"
+            )
+    elif artifact_type != "directory":
         raise ValueError(
-            f"Expected a Zarr store with zarr.json at the top level, but did not find it in {source_path}"
+            f"Unsupported artifact_type {artifact_type!r} for dataset {args.dataset_key!r}; "
+            "expected 'zarr' or 'directory'"
         )
 
     log_dir = Path(__file__).resolve().parent / "logs"
@@ -466,6 +506,7 @@ def main():
     try:
         logger.write(timestamped_message(f"Config path: {config_path}"))
         logger.write(timestamped_message(f"Dataset key: {args.dataset_key}"))
+        logger.write(timestamped_message(f"Artifact type: {artifact_type}"))
         logger.write(timestamped_message(f"Source path: {source_path}"))
 
         local_file_count, local_total_bytes = local_inventory(source_path)
@@ -478,6 +519,8 @@ def main():
         remote_uri = build_remote_uri(bucket, product_prefix, destination_relpath)
         logger.write(timestamped_message(f"Remote URI: {remote_uri}"))
         logger.write(timestamped_message(f"AWS region: {region}"))
+        if endpoint_url:
+            logger.write(timestamped_message(f"S3 endpoint URL: {endpoint_url}"))
         logger.write(
             timestamped_message(
                 "Remote delete behavior: "
@@ -502,6 +545,8 @@ def main():
         aws_path = resolve_aws_cli(args.aws_executable, env=env, logger=logger)
         if aws_path is not None:
             sync_command = [aws_path, "s3", "sync", str(source_path), remote_uri]
+            if endpoint_url:
+                sync_command.extend(["--endpoint-url", endpoint_url])
             if acl != "none":
                 sync_command.extend(["--acl", acl])
             if delete_extra_remote_files:
@@ -522,6 +567,8 @@ def main():
                     "--recursive",
                     "--summarize",
                 ]
+                if endpoint_url:
+                    verify_command.extend(["--endpoint-url", endpoint_url])
                 verify_returncode, verify_lines = run_and_capture(
                     verify_command,
                     env=env,
@@ -537,7 +584,12 @@ def main():
         else:
             logger.write(timestamped_message("Using boto3 upload backend"))
             key_prefix = build_remote_key_prefix(product_prefix, destination_relpath)
-            client = build_boto3_client(region=region, env=env, profile=args.profile)
+            client = build_boto3_client(
+                region=region,
+                env=env,
+                profile=args.profile,
+                endpoint_url=endpoint_url,
+            )
             upload_with_boto3(
                 client=client,
                 source_path=source_path,
@@ -547,6 +599,7 @@ def main():
                 logger=logger,
                 dry_run=args.dry_run,
                 total_bytes=local_total_bytes,
+                max_workers=boto3_max_workers,
             )
             if delete_extra_remote_files:
                 delete_extra_remote_objects_boto3(
