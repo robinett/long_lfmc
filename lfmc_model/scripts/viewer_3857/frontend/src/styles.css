@@ -1,0 +1,324 @@
+:root {
+  color-scheme: light;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  background:
+    radial-gradient(circle at top left, rgba(212, 164, 92, 0.18), transparent 32%),
+    radial-gradient(circle at bottom right, rgba(89, 112, 95, 0.16), transparent 28%),
+    linear-gradient(135deg, #efe4cf 0%, #ddceb6 42%, #d5c4aa 100%);
+  color: #1d1f1b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  min-height: 100vh;
+}
+
+.control-panel {
+  padding: 26px 22px 24px;
+  background: rgba(245, 239, 226, 0.84);
+  backdrop-filter: blur(10px);
+  border-right: 1px solid rgba(63, 55, 42, 0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.control-panel h1 {
+  margin: 0;
+  font-size: 1.9rem;
+  line-height: 1.02;
+  font-weight: 700;
+  color: #2f261d;
+}
+
+.panel-card {
+  padding: 14px 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 251, 244, 0.86);
+  box-shadow: 0 14px 32px rgba(63, 46, 26, 0.08);
+}
+
+.panel-label {
+  margin-bottom: 8px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.78rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #80593a;
+}
+
+.panel-mono,
+.status-line,
+.stats-value,
+.date-value,
+.toggle-button {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.status-line {
+  margin-top: 8px;
+  font-size: 0.84rem;
+  color: #5d5348;
+}
+
+.date-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.date-value {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #2f261d;
+}
+
+.pill {
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: #d8e0cc;
+  color: #334234;
+  font-size: 0.78rem;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.pill-loading {
+  background: #ead6b3;
+  color: #6c411e;
+}
+
+.date-slider {
+  width: 100%;
+  accent-color: #8e5b34;
+}
+
+.date-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.toggle-row {
+  display: flex;
+  gap: 10px;
+}
+
+.toggle-button {
+  border: 0;
+  border-radius: 999px;
+  padding: 9px 14px;
+  background: #e5ddcf;
+  color: #53412d;
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+
+.toggle-button-active {
+  background: #725033;
+  color: #fff5e9;
+}
+
+.play-button {
+  min-width: 76px;
+  flex-shrink: 0;
+}
+
+.slider-extents {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 0.82rem;
+  color: #645a4e;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.legend-bar {
+  height: 16px;
+  border-radius: 999px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+}
+
+.stats-grid div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.location-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.location-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.location-input {
+  width: 100%;
+  border: 1px solid rgba(128, 89, 58, 0.24);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: rgba(255, 251, 244, 0.95);
+  color: #221b14;
+  font-size: 0.94rem;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.location-input:focus {
+  outline: 2px solid rgba(114, 80, 51, 0.24);
+  border-color: rgba(114, 80, 51, 0.5);
+}
+
+.location-actions {
+  margin-top: 12px;
+}
+
+.location-button {
+  width: 100%;
+}
+
+.stats-key {
+  font-size: 0.8rem;
+  color: #6c6258;
+}
+
+.stats-value {
+  font-size: 0.96rem;
+  color: #221b14;
+}
+
+.panel-note {
+  margin: 0;
+  color: #5f554a;
+  line-height: 1.5;
+}
+
+.timeseries-wrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.timeseries-chart {
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(245, 239, 226, 0.9) 0%, rgba(236, 227, 209, 0.9) 100%);
+}
+
+.chart-line {
+  fill: none;
+  stroke: #824c27;
+  stroke-width: 2.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.chart-marker {
+  stroke: rgba(47, 38, 29, 0.55);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 4;
+}
+
+.chart-axis,
+.chart-tick {
+  stroke: rgba(77, 67, 55, 0.72);
+  stroke-width: 1;
+}
+
+.chart-label {
+  fill: #5a4c3f;
+  font-size: 0.78rem;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.chart-label-y {
+  text-anchor: end;
+}
+
+.chart-label-x {
+}
+
+.chart-label-axis {
+  text-anchor: middle;
+  letter-spacing: 0.08em;
+}
+
+.chart-label-today {
+  fill: #6f4930;
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.map-stage {
+  padding: 18px;
+}
+
+.map-frame {
+  position: relative;
+  width: 100%;
+  height: calc(100vh - 36px);
+  border-radius: 26px;
+  overflow: hidden;
+  box-shadow: 0 28px 60px rgba(52, 40, 24, 0.16);
+  background: linear-gradient(180deg, #e7dfcf 0%, #d8ccb8 100%);
+}
+
+.map-container {
+  width: 100%;
+  height: 100%;
+}
+
+.map-container .ol-control {
+  background: rgba(255, 251, 244, 0.9);
+  border-radius: 12px;
+}
+
+.map-container .ol-control button {
+  background: rgba(114, 80, 51, 0.92);
+}
+
+.map-container .ol-control button:hover,
+.map-container .ol-control button:focus {
+  background: rgba(92, 61, 37, 0.96);
+}
+
+@media (max-width: 1100px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .control-panel {
+    border-right: 0;
+    border-bottom: 1px solid rgba(63, 55, 42, 0.14);
+  }
+
+  .map-frame {
+    height: 72vh;
+  }
+}

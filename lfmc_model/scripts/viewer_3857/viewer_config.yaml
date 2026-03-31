@@ -1,0 +1,21 @@
+server:
+  host: 127.0.0.1
+  port: 8001
+
+data:
+  dataset_label: Long LFMC Viewer 3857
+  data_source: source
+  local_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857.zarr
+  source_store: s3://rseg/long-lfmc-test/viewer_3857/lfmc_maps_3857.zarr
+  source_endpoint_url: https://data.source.coop
+  grid_crs: EPSG:3857
+  display_variable: lfmc_ens_mean
+  quality_variable: quality_flag
+  landcover_variable: dominant_landcover_code
+  initial_date: 2023-07-01
+
+assets:
+  asset_mode: source
+  local_asset_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_assets/web_mercator_3857
+  source_asset_base_url: https://data.source.coop/rseg/long-lfmc-test/viewer_3857/assets/web_mercator_3857
+  manifest_filename: manifest.json

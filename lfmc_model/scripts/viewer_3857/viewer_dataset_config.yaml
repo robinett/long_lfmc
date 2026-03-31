@@ -1,0 +1,18 @@
+dataset:
+  dataset_label: Long LFMC Viewer 3857
+  scientific_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_shared_dm128_2023_07_08/run_20260323_205249/merged/lfmc_maps.zarr
+  scientific_grid_crs: EPSG:5070
+  viewer_grid_crs: EPSG:3857
+  viewer_grid_anchor_mode: source_extent_center
+  viewer_sampling_method: nearest_source_cell
+  display_variable: lfmc_ens_mean
+  quality_variable: quality_flag
+  landcover_variable: dominant_landcover_code
+
+output:
+  viewer_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857.zarr
+  clear_existing: true
+  viewer_resolution_m: 500.0
+  time_chunk_size: 128
+  spatial_chunk_size: 256
+  latlon_row_chunk_size: 256
