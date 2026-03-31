@@ -48,12 +48,14 @@ class ViewerAssetBuilder:
         dataset_cfg = cfg["dataset"]
         output_cfg = cfg["output"]
         tiles_cfg = cfg["tiles"]
+        rendering_cfg = cfg.get("rendering", {})
 
         self.dataset_label = str(dataset_cfg["dataset_label"])
         self.dataset_path = str(dataset_cfg["local_dataset_path"])
         self.grid_crs = str(dataset_cfg["grid_crs"])
         self.initial_date = str(dataset_cfg["initial_date"])
         self.selected_dates = [str(value) for value in dataset_cfg["dates"]]
+        self.landcover_variable = str(dataset_cfg["landcover_variable"])
 
         self.asset_root = Path(str(output_cfg["asset_root"]))
         self.manifest_filename = str(output_cfg["manifest_filename"])
@@ -63,6 +65,8 @@ class ViewerAssetBuilder:
         self.min_zoom = int(tiles_cfg["min_zoom"])
         self.max_zoom = int(tiles_cfg["max_zoom"])
         self.extra_view_resolutions = [float(value) for value in tiles_cfg.get("extra_view_resolutions", [250.0, 125.0])]
+        self.default_valid_alpha = int(rendering_cfg.get("default_valid_alpha", 235))
+        self.evergreen_forest_alpha = int(rendering_cfg.get("evergreen_forest_alpha", 60))
 
         self.layers = {str(name): layer_cfg for name, layer_cfg in cfg["layers"].items()}
 
@@ -75,6 +79,12 @@ class ViewerAssetBuilder:
         self.y_values = np.asarray(self.ds["y"].values, dtype=np.float64)
         self.lat_array = self.ds["lat"]
         self.lon_array = self.ds["lon"]
+        self.landcover_da = self.ds[self.landcover_variable]
+        self.landcover_labels = self._landcover_mapping()
+        self.evergreen_code = self._landcover_code_for_name("evergreen_forest")
+        self.landcover_years = None
+        if "landcover_year" in self.landcover_da.dims:
+            self.landcover_years = np.asarray(self.landcover_da["landcover_year"].values)
 
         self.dx = float(np.median(np.diff(self.x_values)))
         self.dy = float(np.median(np.diff(self.y_values)))
@@ -113,7 +123,43 @@ class ViewerAssetBuilder:
         extras = [value for value in self.extra_view_resolutions if value < self.pixel_width]
         return base + extras
 
-    def _rgba_for_layer(self, layer_key: str, time_idx: int) -> np.ndarray:
+    def _landcover_mapping(self) -> Dict[int, str]:
+        code_to_name = self.landcover_da.attrs.get("code_to_name", {})
+        nodata_code = self.landcover_da.attrs.get("nodata_code")
+        if isinstance(code_to_name, dict):
+            mapping = {int(key): str(value) for key, value in code_to_name.items()}
+            if nodata_code is not None:
+                mapping[int(nodata_code)] = "nodata"
+            return mapping
+        dataset_key = self.ds.attrs.get("dominant_landcover_code_key")
+        if isinstance(dataset_key, str):
+            parsed = json.loads(dataset_key)
+            mapping = {int(key): str(value) for key, value in parsed.items()}
+            if nodata_code is not None:
+                mapping[int(nodata_code)] = "nodata"
+            return mapping
+        return {}
+
+    def _landcover_code_for_name(self, target_name: str):
+        for code, name in self.landcover_labels.items():
+            if name == target_name:
+                return code
+        return None
+
+    def _landcover_year_index(self, date_str: str) -> int:
+        if self.landcover_years is None or self.landcover_years.size == 1:
+            return 0
+        year = int(date_str[:4])
+        diffs = np.abs(self.landcover_years.astype(np.int64) - year)
+        return int(np.argmin(diffs))
+
+    def _landcover_codes_for_date(self, date_str: str) -> np.ndarray:
+        if self.landcover_years is None:
+            return np.asarray(self.landcover_da.values)
+        landcover_year_idx = self._landcover_year_index(date_str)
+        return np.asarray(self.landcover_da.isel(landcover_year=landcover_year_idx).values)
+
+    def _rgba_for_layer(self, layer_key: str, time_idx: int, date_str: str) -> np.ndarray:
         layer_cfg = self.layers[layer_key]
         variable_name = str(layer_cfg["variable"])
         data = np.asarray(self.ds[variable_name].isel(time=time_idx).values, dtype=np.float32)
@@ -128,7 +174,11 @@ class ViewerAssetBuilder:
         stops = np.asarray(layer_cfg["stops"], dtype=np.float32)
         colors = np.asarray(layer_cfg["palette"], dtype=np.float32)
         rgb = build_color_ramp(normalized, stops, colors)
-        alpha = np.where(valid_mask, 235, 0).astype(np.uint8)
+        alpha = np.where(valid_mask, self.default_valid_alpha, 0).astype(np.uint8)
+        if self.evergreen_code is not None:
+            landcover_codes = self._landcover_codes_for_date(date_str)
+            evergreen_mask = valid_mask & (landcover_codes == self.evergreen_code)
+            alpha[evergreen_mask] = self.evergreen_forest_alpha
         return np.dstack([rgb, alpha])
 
     def _downsample_rgba(self, rgba: np.ndarray, factor: int) -> np.ndarray:
@@ -225,7 +275,7 @@ class ViewerAssetBuilder:
 
             for time_idx, date_str in zip(self.selected_indices, self.selected_dates):
                 log(f"Rendering {layer_key} for {date_str}")
-                rgba = self._rgba_for_layer(layer_key=layer_key, time_idx=time_idx)
+                rgba = self._rgba_for_layer(layer_key=layer_key, time_idx=time_idx, date_str=date_str)
                 self._build_tiles_for_image(
                     rgba=rgba,
                     layer_key=layer_key,

@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-script_dir="/home/users/trobinet/long_lfmc/lfmc_model/scripts/viewer"
+script_dir="/home/users/trobinet/long_lfmc/old/viewer"
 session_name="${1:-long_lfmc_viewer}"
 
 if ! command -v tmux >/dev/null 2>&1; then
@@ -11,9 +11,8 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 
 if tmux has-session -t "${session_name}" 2>/dev/null; then
-    echo "tmux session ${session_name} already exists." >&2
-    echo "Attach with: tmux attach -t ${session_name}" >&2
-    exit 1
+    echo "Restarting existing tmux session ${session_name}."
+    tmux kill-session -t "${session_name}"
 fi
 
 tmux new-session -d -s "${session_name}"

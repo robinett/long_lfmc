@@ -2,6 +2,7 @@ dataset:
   dataset_label: Long LFMC Prototype
   local_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_shared_dm128_2023_07_08/run_20260323_205249/merged/lfmc_maps.zarr
   grid_crs: EPSG:5070
+  landcover_variable: dominant_landcover_code
   initial_date: 2023-07-01
   dates:
     - 2023-07-01
@@ -23,6 +24,10 @@ tiles:
     - 31.25
     - 15.625
 
+rendering:
+  default_valid_alpha: 235
+  evergreen_forest_alpha: 30
+
 layers:
   mean:
     variable: lfmc_ens_mean
@@ -31,11 +36,11 @@ layers:
     min: 40.0
     max: 220.0
     palette:
-      - [37, 59, 54]
-      - [109, 142, 96]
-      - [208, 196, 135]
-      - [202, 126, 74]
       - [109, 39, 27]
+      - [202, 126, 74]
+      - [208, 196, 135]
+      - [109, 142, 96]
+      - [37, 59, 54]
     stops: [0.0, 0.18, 0.40, 0.68, 1.0]
   uncertainty:
     variable: lfmc_ens_std

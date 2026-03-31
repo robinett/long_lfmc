@@ -43,13 +43,80 @@ function legendGradient(layerConfig) {
   const stops = layerConfig.stops ?? [];
   const palette = layerConfig.palette ?? [];
   if (!stops.length || !palette.length) {
-    return "linear-gradient(90deg, #253b36 0%, #6d8e60 24%, #d2c487 52%, #c9794a 76%, #6d271d 100%)";
+    return "linear-gradient(to right, #6d271d 0%, #c9794a 24%, #d2c487 52%, #6d8e60 76%, #253b36 100%)";
   }
   const pieces = palette.map((color, idx) => {
     const pct = `${Math.round(Number(stops[idx]) * 100)}%`;
     return `rgb(${color.join(",")}) ${pct}`;
   });
-  return `linear-gradient(90deg, ${pieces.join(", ")})`;
+  return `linear-gradient(to right, ${pieces.join(", ")})`;
+}
+
+function niceTickStep(span, targetTickCount) {
+  const roughStep = span / Math.max(targetTickCount - 1, 1);
+  const magnitude = 10 ** Math.floor(Math.log10(Math.max(roughStep, 1e-6)));
+  const normalized = roughStep / magnitude;
+
+  if (normalized <= 1) {
+    return 1 * magnitude;
+  }
+  if (normalized <= 2) {
+    return 2 * magnitude;
+  }
+  if (normalized <= 2.5) {
+    return 2.5 * magnitude;
+  }
+  if (normalized <= 5) {
+    return 5 * magnitude;
+  }
+  return 10 * magnitude;
+}
+
+function buildAxisTicks(minValue, maxValue, count = 4) {
+  const span = maxValue - minValue;
+  if (!Number.isFinite(span) || span <= 0) {
+    return [{ value: minValue, label: formatValue(minValue, 0), fraction: 0.5 }];
+  }
+
+  const step = niceTickStep(span, count);
+  const axisMin = Math.floor(minValue / step) * step;
+  const axisMax = Math.ceil(maxValue / step) * step;
+  const axisSpan = Math.max(axisMax - axisMin, step);
+  const ticks = [];
+
+  for (let value = axisMin; value <= axisMax + step * 0.001; value += step) {
+    const roundedValue = Number(value.toFixed(6));
+    const fraction = (axisMax - roundedValue) / axisSpan;
+    ticks.push({
+      value: roundedValue,
+      label: formatValue(roundedValue, 0),
+      fraction,
+    });
+  }
+
+  return ticks;
+}
+
+function buildDateTicks(dates) {
+  if (!dates.length) {
+    return [];
+  }
+
+  const candidateIndices = [0, Math.floor((dates.length - 1) / 2), dates.length - 1];
+  const seen = new Set();
+
+  return candidateIndices
+    .filter((idx) => {
+      if (seen.has(idx)) {
+        return false;
+      }
+      seen.add(idx);
+      return true;
+    })
+    .map((idx) => ({
+      idx,
+      label: dates[idx],
+    }));
 }
 
 function buildTimeseriesGeometry(pointInfo, selectedDate) {
@@ -80,14 +147,17 @@ function buildTimeseriesGeometry(pointInfo, selectedDate) {
     return null;
   }
 
-  const width = 320;
-  const height = 170;
-  const padding = { left: 10, right: 10, top: 12, bottom: 24 };
+  const width = 340;
+  const height = 210;
+  const padding = { left: 48, right: 12, top: 12, bottom: 38 };
   const innerWidth = width - padding.left - padding.right;
   const innerHeight = height - padding.top - padding.bottom;
 
-  const yMin = Math.min(...validPoints.map((point) => point.low));
-  const yMax = Math.max(...validPoints.map((point) => point.high));
+  const dataYMin = Math.min(...validPoints.map((point) => point.low));
+  const dataYMax = Math.max(...validPoints.map((point) => point.high));
+  const yTicks = buildAxisTicks(dataYMin, dataYMax);
+  const yMin = yTicks[0].value;
+  const yMax = yTicks[yTicks.length - 1].value;
   const ySpan = Math.max(yMax - yMin, 1e-6);
   const xDenominator = Math.max(dates.length - 1, 1);
 
@@ -109,17 +179,27 @@ function buildTimeseriesGeometry(pointInfo, selectedDate) {
 
   const selectedIndex = Math.max(dates.indexOf(selectedDate), 0);
   const selectedX = xCoord(selectedIndex);
+  const xTicks = buildDateTicks(dates).map((tick) => ({
+    ...tick,
+    x: xCoord(tick.idx),
+  }));
 
   return {
     width,
     height,
+    padding,
     linePath,
     areaPath,
     selectedX,
-    minLabel: formatValue(yMin, 0),
-    maxLabel: formatValue(yMax, 0),
-    startDate: dates[0],
-    endDate: dates[dates.length - 1],
+    axisLeft: padding.left,
+    axisRight: width - padding.right,
+    axisTop: padding.top,
+    axisBottom: height - padding.bottom,
+    yTicks: yTicks.map((tick) => ({
+      ...tick,
+      y: padding.top + tick.fraction * innerHeight,
+    })),
+    xTicks,
   };
 }
 
@@ -133,24 +213,66 @@ function TimeseriesChart({ pointInfo, selectedDate }) {
   return (
     <div className="timeseries-wrap">
       <svg viewBox={`0 0 ${geometry.width} ${geometry.height}`} className="timeseries-chart" role="img">
+        <line
+          x1={geometry.axisLeft}
+          x2={geometry.axisLeft}
+          y1={geometry.axisTop}
+          y2={geometry.axisBottom}
+          className="chart-axis"
+        />
+        <line
+          x1={geometry.axisLeft}
+          x2={geometry.axisRight}
+          y1={geometry.axisBottom}
+          y2={geometry.axisBottom}
+          className="chart-axis"
+        />
         <path d={geometry.areaPath} className="chart-band" />
         <path d={geometry.linePath} className="chart-line" />
         <line
           x1={geometry.selectedX}
           x2={geometry.selectedX}
-          y1="10"
-          y2={geometry.height - 22}
+          y1={geometry.axisTop}
+          y2={geometry.axisBottom}
           className="chart-marker"
         />
+        {geometry.yTicks.map((tick) => (
+          <g key={`y-${tick.label}`}>
+            <line
+              x1={geometry.axisLeft - 5}
+              x2={geometry.axisLeft}
+              y1={tick.y}
+              y2={tick.y}
+              className="chart-tick"
+            />
+            <text x={geometry.axisLeft - 9} y={tick.y + 4} className="chart-label chart-label-y">
+              {tick.label}
+            </text>
+          </g>
+        ))}
+        {geometry.xTicks.map((tick) => (
+          <g key={`x-${tick.idx}`}>
+            <line
+              x1={tick.x}
+              x2={tick.x}
+              y1={geometry.axisBottom}
+              y2={geometry.axisBottom + 5}
+              className="chart-tick"
+            />
+            <text x={tick.x} y={geometry.axisBottom + 18} className="chart-label chart-label-x">
+              {tick.label}
+            </text>
+          </g>
+        ))}
+        <text
+          x="16"
+          y={geometry.axisTop + (geometry.axisBottom - geometry.axisTop) / 2}
+          transform={`rotate(-90 16 ${geometry.axisTop + (geometry.axisBottom - geometry.axisTop) / 2})`}
+          className="chart-label chart-label-axis"
+        >
+          LFMC (%)
+        </text>
       </svg>
-      <div className="chart-scale">
-        <span>{geometry.maxLabel}</span>
-        <span>{geometry.minLabel}</span>
-      </div>
-      <div className="slider-extents">
-        <span>{geometry.startDate}</span>
-        <span>{geometry.endDate}</span>
-      </div>
     </div>
   );
 }
@@ -437,18 +559,8 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="control-panel">
-        <div className="eyebrow">Long LFMC</div>
-        <h1>Exact Grid Viewer</h1>
-        <p className="lede">
-          This local viewer renders the LFMC raster on its native EPSG:5070 500 m grid. Click
-          anywhere to highlight the exact containing cell and inspect the full time series.
-        </p>
-
-        <section className="panel-card">
-          <div className="panel-label">Dataset</div>
-          <div className="panel-mono">{manifest?.dataset_label ?? "Loading..."}</div>
-          <div className="status-line">{statusText}</div>
-        </section>
+        <h1>Viewer for long-term LFMC dataset</h1>
+        <div className="status-line">{statusText}</div>
 
         <section className="panel-card">
           <div className="panel-label">Layer</div>
@@ -515,19 +627,11 @@ function App() {
                 <span className="stats-value">{formatValue(pointInfo.lfmc_ens_std, 1)}</span>
               </div>
               <div>
-                <span className="stats-key">Click Lat</span>
-                <span className="stats-value">{formatValue(pointInfo.requested_lat, 4)}</span>
-              </div>
-              <div>
-                <span className="stats-key">Click Lon</span>
-                <span className="stats-value">{formatValue(pointInfo.requested_lon, 4)}</span>
-              </div>
-              <div>
-                <span className="stats-key">Cell Center Lat</span>
+                <span className="stats-key">Center Lat</span>
                 <span className="stats-value">{formatValue(pointInfo.cell_center_lat, 4)}</span>
               </div>
               <div>
-                <span className="stats-key">Cell Center Lon</span>
+                <span className="stats-key">Center Lon</span>
                 <span className="stats-value">{formatValue(pointInfo.cell_center_lon, 4)}</span>
               </div>
               <div>
@@ -537,18 +641,6 @@ function App() {
               <div>
                 <span className="stats-key">Product Level</span>
                 <span className="stats-value">{formatLabel(pointInfo.data_product_level)}</span>
-              </div>
-              <div>
-                <span className="stats-key">Cell X/Y</span>
-                <span className="stats-value">
-                  {pointInfo.cell_index.x}, {pointInfo.cell_index.y}
-                </span>
-              </div>
-              <div>
-                <span className="stats-key">Click Grid</span>
-                <span className="stats-value">
-                  {formatValue(pointInfo.requested_grid_x, 0)}, {formatValue(pointInfo.requested_grid_y, 0)}
-                </span>
               </div>
             </div>
           ) : (
@@ -565,10 +657,6 @@ function App() {
       <main className="map-stage">
         <div className="map-frame">
           <div ref={mapContainerRef} className="map-container" />
-          <div className="map-caption">
-            Native grid view in EPSG:5070. Click marker shows the exact click point; the outlined
-            box shows the selected 500 m LFMC cell.
-          </div>
         </div>
       </main>
     </div>

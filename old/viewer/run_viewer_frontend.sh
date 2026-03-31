@@ -2,7 +2,7 @@
 
 set -eo pipefail
 
-script_dir="/home/users/trobinet/long_lfmc/lfmc_model/scripts/viewer"
+script_dir="/home/users/trobinet/long_lfmc/old/viewer"
 frontend_dir="${script_dir}/frontend"
 node_bin_dir="/share/software/user/open/nodejs/25.3.0/bin"
 node_lib_dir="/share/software/user/open/nodejs/25.3.0/lib"

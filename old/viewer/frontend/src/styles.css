@@ -39,27 +39,12 @@ body {
   overflow-y: auto;
 }
 
-.eyebrow {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: 0.78rem;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: #6f4c2f;
-}
-
 .control-panel h1 {
   margin: 0;
-  font-size: 2.1rem;
-  line-height: 0.98;
+  font-size: 1.9rem;
+  line-height: 1.02;
   font-weight: 700;
   color: #2f261d;
-}
-
-.lede {
-  margin: 0;
-  font-size: 0.97rem;
-  line-height: 1.5;
-  color: #4d4337;
 }
 
 .panel-card {
@@ -190,7 +175,6 @@ body {
 .timeseries-wrap {
   display: flex;
   flex-direction: column;
-  gap: 6px;
 }
 
 .timeseries-chart {
@@ -219,12 +203,29 @@ body {
   stroke-dasharray: 4 4;
 }
 
-.chart-scale {
-  display: flex;
-  justify-content: space-between;
+.chart-axis,
+.chart-tick {
+  stroke: rgba(77, 67, 55, 0.72);
+  stroke-width: 1;
+}
+
+.chart-label {
+  fill: #5a4c3f;
   font-size: 0.78rem;
-  color: #645a4e;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.chart-label-y {
+  text-anchor: end;
+}
+
+.chart-label-x {
+  text-anchor: middle;
+}
+
+.chart-label-axis {
+  text-anchor: middle;
+  letter-spacing: 0.08em;
 }
 
 .map-stage {
@@ -244,20 +245,6 @@ body {
 .map-container {
   width: 100%;
   height: 100%;
-}
-
-.map-caption {
-  position: absolute;
-  left: 16px;
-  bottom: 16px;
-  max-width: 420px;
-  padding: 10px 12px;
-  border-radius: 14px;
-  background: rgba(37, 31, 24, 0.76);
-  color: #f7f0e3;
-  font-size: 0.83rem;
-  line-height: 1.4;
-  backdrop-filter: blur(6px);
 }
 
 .map-container .ol-control {

@@ -2,7 +2,7 @@
 
 set -eo pipefail
 
-script_dir="/home/users/trobinet/long_lfmc/lfmc_model/scripts/viewer"
+script_dir="/home/users/trobinet/long_lfmc/old/viewer"
 cd "${script_dir}"
 
 source ~/.bashrc || true

@@ -29,7 +29,7 @@ The prototype has three pieces:
 Build the local viewer assets before launching the app:
 
 ```bash
-cd /home/users/trobinet/long_lfmc/lfmc_model/scripts/viewer
+cd /home/users/trobinet/long_lfmc/old/viewer
 bash run_viewer_build.sh
 ```
 
@@ -44,21 +44,21 @@ The build reads the local Zarr and writes native-grid tiles plus `manifest.json`
 Run the API directly:
 
 ```bash
-cd /home/users/trobinet/long_lfmc/lfmc_model/scripts/viewer
+cd /home/users/trobinet/long_lfmc/old/viewer
 bash run_viewer_api.sh
 ```
 
 Run the frontend directly:
 
 ```bash
-cd /home/users/trobinet/long_lfmc/lfmc_model/scripts/viewer
+cd /home/users/trobinet/long_lfmc/old/viewer
 bash run_viewer_frontend.sh
 ```
 
 Or start both together in a tmux session:
 
 ```bash
-cd /home/users/trobinet/long_lfmc/lfmc_model/scripts/viewer
+cd /home/users/trobinet/long_lfmc/old/viewer
 bash start_viewer_tmux.sh
 ```
 
