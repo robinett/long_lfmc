@@ -5,6 +5,7 @@ import functools
 import io
 import json
 import mimetypes
+import os
 import time
 import urllib.parse
 from http import HTTPStatus
@@ -584,8 +585,10 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     server_cfg = cfg["server"]
-    host = str(server_cfg["host"])
-    port = int(server_cfg["port"])
+    config_host = str(server_cfg["host"])
+    config_port = int(server_cfg["port"])
+    host = str(os.environ.get("HOST", config_host)).strip() or config_host
+    port = int(str(os.environ.get("PORT", config_port)).strip())
     server = ThreadingHTTPServer((host, port), ViewerRequestHandler)
     print(timestamped_message(f"Serving viewer API at http://{host}:{port}"), flush=True)
     server.serve_forever()

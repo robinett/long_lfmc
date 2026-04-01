@@ -22,6 +22,13 @@ const EPSG5070_DEF =
 proj4.defs("EPSG:5070", EPSG5070_DEF);
 register(proj4);
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "https://long-lfmc-api.onrender.com").replace(/\/$/, "");
+
+function apiUrl(pathAndQuery) {
+  const normalizedPath = pathAndQuery.startsWith("/") ? pathAndQuery : `/${pathAndQuery}`;
+  return `${API_BASE_URL}${normalizedPath}`;
+}
+
 function formatValue(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return "NA";
@@ -357,7 +364,7 @@ function App() {
       x: String(x),
       y: String(y),
     });
-    const response = await fetch(`/api/point?${query.toString()}`);
+    const response = await fetch(apiUrl(`/api/point?${query.toString()}`));
     const payload = await response.json();
     if (payload.error) {
       throw new Error(payload.error);
@@ -663,7 +670,7 @@ function App() {
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
           setStatusText("Starting viewer...");
-          const metadataResponse = await fetch("/api/metadata", { cache: "no-store" });
+          const metadataResponse = await fetch(apiUrl("/api/metadata"), { cache: "no-store" });
           if (!metadataResponse.ok) {
             throw new Error(`Metadata HTTP ${metadataResponse.status}`);
           }
@@ -971,7 +978,7 @@ function App() {
     setIsDownloadingCsv(true);
     setStatusText("Preparing scientific CSV download...");
     try {
-      const response = await fetch(`/api/download_csv?${query.toString()}`);
+      const response = await fetch(apiUrl(`/api/download_csv?${query.toString()}`));
       if (!response.ok) {
         const errorText = await response.text();
         let message = errorText || `HTTP ${response.status}`;
