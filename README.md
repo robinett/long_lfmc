@@ -14,7 +14,7 @@ You can explore the public dataset remotely without downloading the full store, 
 
 - Viewer: `https://example.com/long-lfmc-viewer`
 
-  The viewer is the easiest way to explore the dataset if you want to look at patterns quickly before writing any code. It is an interactive web map for browsing LFMC across space and time, and it is designed to make a very large spatiotemporal product feel immediately usable.
+  The viewer is the easiest way to explore the dataset if you want to look at patterns quickly before writing any code. It is an interactive web map for browsing LFMC across space and time, and it is designed to make a very large spatiotemporal product feel immediately usable. It is also the best option if you want to download data for only a small number of points rather than working with the full map dataset.
 
   In the viewer, you will be able to:
 
