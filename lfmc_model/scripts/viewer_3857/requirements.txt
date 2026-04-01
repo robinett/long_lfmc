@@ -1,0 +1,7 @@
+dask
+numpy
+pyproj
+PyYAML
+s3fs
+xarray
+zarr
