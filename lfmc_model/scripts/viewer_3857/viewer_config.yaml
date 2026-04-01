@@ -14,6 +14,16 @@ data:
   landcover_variable: dominant_landcover_code
   initial_date: 2023-07-01
 
+scientific_data:
+  data_source: source
+  local_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_shared_dm128_2023_07_08/run_20260323_205249/merged/lfmc_maps.zarr
+  source_store: s3://rseg/long-lfmc-test/lfmc_maps.zarr
+  source_endpoint_url: https://data.source.coop
+  grid_crs: EPSG:5070
+  display_variable: lfmc_ens_mean
+  uncertainty_variable: lfmc_ens_std
+  quality_variable: quality_flag
+
 assets:
   asset_mode: source
   local_asset_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_assets/web_mercator_3857

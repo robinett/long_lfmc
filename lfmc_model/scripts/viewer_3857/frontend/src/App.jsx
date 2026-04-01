@@ -332,12 +332,18 @@ function App() {
   const queuedDateIndexRef = useRef(null);
   const transitionInFlightRef = useRef(false);
   const playbackTimeoutRef = useRef(null);
+  const activeDownloadSiteIndexRef = useRef(0);
 
   const [manifest, setManifest] = useState(null);
   const [dateIndex, setDateIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [locationLatInput, setLocationLatInput] = useState("");
   const [locationLonInput, setLocationLonInput] = useState("");
+  const [downloadStartDate, setDownloadStartDate] = useState("");
+  const [downloadEndDate, setDownloadEndDate] = useState("");
+  const [downloadSites, setDownloadSites] = useState([{ lat: "", lon: "" }]);
+  const [activeDownloadSiteIndex, setActiveDownloadSiteIndex] = useState(0);
+  const [isDownloadingCsv, setIsDownloadingCsv] = useState(false);
   const [pointInfo, setPointInfo] = useState(null);
   const [statusText, setStatusText] = useState("Loading viewer manifest...");
   const [isMapLoading, setIsMapLoading] = useState(false);
@@ -368,6 +374,16 @@ function App() {
       x: payload.requested_grid_x,
       y: payload.requested_grid_y,
     };
+    setDownloadSites((currentSites) =>
+      currentSites.map((site, siteIndex) =>
+        siteIndex === activeDownloadSiteIndexRef.current
+          ? {
+              lat: formatCoordinateInput(payload.cell_center_lat),
+              lon: formatCoordinateInput(payload.cell_center_lon),
+            }
+          : site,
+      ),
+    );
     updateSelectionFeatures(payload, manifestRef.current);
     if (recenter && mapRef.current) {
       mapRef.current.getView().animate({
@@ -670,6 +686,10 @@ function App() {
           const initialIndex = Math.max(runtimeManifest.dates.indexOf(runtimeManifest.initial_date), 0);
           setDateIndex(initialIndex);
           dateIndexRef.current = initialIndex;
+          setDownloadStartDate((currentValue) => currentValue || runtimeManifest.dates[0] || "");
+          setDownloadEndDate(
+            (currentValue) => currentValue || runtimeManifest.dates[runtimeManifest.dates.length - 1] || "",
+          );
           setStatusText(`Loaded ${runtimeManifest.dataset_label}`);
           return;
         } catch (error) {
@@ -699,6 +719,10 @@ function App() {
   useEffect(() => {
     dateIndexRef.current = dateIndex;
   }, [dateIndex]);
+
+  useEffect(() => {
+    activeDownloadSiteIndexRef.current = activeDownloadSiteIndex;
+  }, [activeDownloadSiteIndex]);
 
   useEffect(() => {
     if (!manifest || mapRef.current || !mapContainerRef.current) {
@@ -900,6 +924,147 @@ function App() {
     }
   }
 
+  async function handleDownloadCsv() {
+    if (!manifest) {
+      return;
+    }
+    if (!downloadStartDate || !downloadEndDate) {
+      setStatusText("Select a start date and end date before downloading CSV");
+      return;
+    }
+    if (downloadEndDate < downloadStartDate) {
+      setStatusText("CSV end date must be on or after the start date");
+      return;
+    }
+
+    const sites = [];
+    for (const site of downloadSites) {
+      const isBlank = String(site.lat).trim() === "" && String(site.lon).trim() === "";
+      if (isBlank) {
+        continue;
+      }
+      const latitude = parseCoordinateInput(site.lat);
+      const longitude = parseCoordinateInput(site.lon);
+      if (latitude === null || longitude === null) {
+        setStatusText("Each site must have valid numeric latitude and longitude");
+        return;
+      }
+      if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+        setStatusText("All site coordinates must have valid latitude/longitude ranges");
+        return;
+      }
+      sites.push({ lat: latitude, lon: longitude });
+    }
+    if (!sites.length) {
+      setStatusText("Select a site on the map or enter a site before downloading");
+      return;
+    }
+
+    const query = new URLSearchParams({
+      start_date: downloadStartDate,
+      end_date: downloadEndDate,
+    });
+    sites.forEach((site) => {
+      query.append("site", `${site.lat},${site.lon}`);
+    });
+
+    setIsDownloadingCsv(true);
+    setStatusText("Preparing scientific CSV download...");
+    try {
+      const response = await fetch(`/api/download_csv?${query.toString()}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        let message = errorText || `HTTP ${response.status}`;
+        try {
+          const parsed = JSON.parse(errorText);
+          if (parsed?.error) {
+            message = parsed.error;
+          }
+        } catch {
+          // Keep the raw error text if the API did not return JSON.
+        }
+        throw new Error(message);
+      }
+
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") ?? "";
+      const filenameMatch = disposition.match(/filename="([^"]+)"/);
+      const filename = filenameMatch?.[1] ?? "lfmc_site_download.csv";
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(blobUrl);
+      setStatusText(`Downloaded scientific CSV for ${downloadStartDate} to ${downloadEndDate}`);
+    } catch (error) {
+      setStatusText(`CSV download failed: ${error.message}`);
+    } finally {
+      setIsDownloadingCsv(false);
+    }
+  }
+
+  function handleAddDownloadSite() {
+    const activeSite = downloadSites[activeDownloadSiteIndex];
+    if (!activeSite) {
+      return;
+    }
+    const latitude = parseCoordinateInput(activeSite.lat);
+    const longitude = parseCoordinateInput(activeSite.lon);
+    if (latitude === null || longitude === null) {
+      setStatusText("Fill Site coordinates before adding another site");
+      return;
+    }
+    if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+      setStatusText("Site coordinates must have valid latitude/longitude ranges");
+      return;
+    }
+    setDownloadSites((currentSites) => {
+      if (currentSites.length >= 10) {
+        return currentSites;
+      }
+      return [...currentSites, { lat: "", lon: "" }];
+    });
+    setActiveDownloadSiteIndex((currentValue) => Math.min(currentValue + 1, 9));
+  }
+
+  function handleUpdateDownloadSite(index, field, value) {
+    setDownloadSites((currentSites) =>
+      currentSites.map((site, siteIndex) =>
+        siteIndex === index
+          ? {
+              ...site,
+              [field]: value,
+            }
+          : site,
+      ),
+    );
+  }
+
+  function handleRemoveDownloadSite(index) {
+    setDownloadSites((currentSites) => {
+      const nextSites =
+        currentSites.length === 1
+          ? [{ lat: "", lon: "" }]
+          : currentSites.filter((_, siteIndex) => siteIndex !== index);
+      setActiveDownloadSiteIndex((currentValue) => {
+        if (nextSites.length === 1) {
+          return 0;
+        }
+        if (index < currentValue) {
+          return currentValue - 1;
+        }
+        if (index === currentValue) {
+          return Math.max(0, currentValue - 1);
+        }
+        return Math.min(currentValue, nextSites.length - 1);
+      });
+      return nextSites;
+    });
+  }
+
   return (
     <div className="app-shell">
       <aside className="control-panel">
@@ -1015,6 +1180,112 @@ function App() {
         <section className="panel-card">
           <div className="panel-label">Time Series</div>
           <TimeseriesChart pointInfo={pointInfo} selectedDate={selectedDate} />
+        </section>
+
+        <section className="panel-card">
+          <div className="panel-label">Download CSV</div>
+          {downloadSites.map((site, index) => (
+            <div
+              className={`download-site-block ${index === activeDownloadSiteIndex ? "download-site-block-active" : ""}`}
+              key={`download-site-${index}`}
+            >
+              <div className="download-site-header">
+                <span className="stats-key">Site {index + 1}</span>
+                <div className="download-site-actions">
+                  {index === activeDownloadSiteIndex ? (
+                    <span className="download-site-active">Active</span>
+                  ) : null}
+                  {downloadSites.length > 1 ? (
+                    <button
+                      type="button"
+                      className="toggle-button download-site-remove"
+                      onClick={() => handleRemoveDownloadSite(index)}
+                    >
+                      Remove
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              <div className="location-grid">
+                <label className="location-field">
+                  <span className="stats-key">Latitude</span>
+                  <input
+                    className="location-input"
+                    type="text"
+                    inputMode="decimal"
+                    value={site.lat}
+                    onChange={(event) => handleUpdateDownloadSite(index, "lat", event.target.value)}
+                    onFocus={() => setActiveDownloadSiteIndex(index)}
+                    placeholder="34.2206"
+                  />
+                </label>
+                <label className="location-field">
+                  <span className="stats-key">Longitude</span>
+                  <input
+                    className="location-input"
+                    type="text"
+                    inputMode="decimal"
+                    value={site.lon}
+                    onChange={(event) => handleUpdateDownloadSite(index, "lon", event.target.value)}
+                    onFocus={() => setActiveDownloadSiteIndex(index)}
+                    placeholder="-119.0504"
+                  />
+                </label>
+              </div>
+            </div>
+          ))}
+          <div className="location-grid">
+            <label className="location-field">
+              <span className="stats-key">Start Date</span>
+              <input
+                className="location-input"
+                type="date"
+                value={downloadStartDate}
+                min={dates[0] ?? undefined}
+                max={dates[dates.length - 1] ?? undefined}
+                onChange={(event) => setDownloadStartDate(event.target.value)}
+              />
+            </label>
+            <label className="location-field">
+              <span className="stats-key">End Date</span>
+              <input
+                className="location-input"
+                type="date"
+                value={downloadEndDate}
+                min={dates[0] ?? undefined}
+                max={dates[dates.length - 1] ?? undefined}
+                onChange={(event) => setDownloadEndDate(event.target.value)}
+              />
+            </label>
+          </div>
+          <div className="location-actions">
+            <button
+              type="button"
+              className="toggle-button location-button"
+              disabled={downloadSites.length >= 10}
+              onClick={handleAddDownloadSite}
+            >
+              Add Site
+            </button>
+          </div>
+          <div className="location-actions">
+            <button
+              type="button"
+              className="toggle-button location-button"
+              disabled={
+                isDownloadingCsv ||
+                !manifest ||
+                !downloadSites.some(
+                  (site) => String(site.lat).trim() !== "" && String(site.lon).trim() !== "",
+                )
+              }
+              onClick={() => {
+                void handleDownloadCsv();
+              }}
+            >
+              {isDownloadingCsv ? "Preparing CSV..." : "Download .CSVs For These Sites"}
+            </button>
+          </div>
         </section>
       </aside>
 

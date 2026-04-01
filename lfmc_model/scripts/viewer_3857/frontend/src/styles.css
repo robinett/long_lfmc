@@ -203,6 +203,58 @@ body {
   width: 100%;
 }
 
+.download-site-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.download-site-block {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(128, 89, 58, 0.14);
+}
+
+.download-site-block-active {
+  margin-left: -6px;
+  margin-right: -6px;
+  padding: 12px;
+  border-top: 0;
+  border-radius: 14px;
+  background: rgba(234, 214, 179, 0.48);
+  box-shadow: inset 0 0 0 2px rgba(114, 80, 51, 0.22);
+}
+
+.download-site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.download-site-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.download-site-active {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #725033;
+  color: #fff5e9;
+  font-size: 0.74rem;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-weight: 600;
+}
+
+.download-site-remove {
+  padding: 6px 10px;
+  font-size: 0.76rem;
+}
+
 .stats-key {
   font-size: 0.8rem;
   color: #6c6258;

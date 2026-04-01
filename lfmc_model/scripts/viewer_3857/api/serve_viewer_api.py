@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import csv
 import functools
+import io
 import json
 import mimetypes
 import time
@@ -45,6 +47,59 @@ def datetime64_to_datestr(value) -> str:
 
 def join_url_parts(base_url: str, relpath: str) -> str:
     return f"{base_url.rstrip('/')}/{relpath.lstrip('/')}"
+
+
+def nearest_index(sorted_values: np.ndarray, target_value: float) -> int:
+    values = np.asarray(sorted_values, dtype=np.float64)
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError("nearest_index requires a non-empty 1D coordinate array")
+
+    ascending = values[0] <= values[-1]
+    work_values = values if ascending else values[::-1]
+    insert_idx = int(np.searchsorted(work_values, target_value, side="left"))
+
+    if insert_idx <= 0:
+        nearest_work_idx = 0
+    elif insert_idx >= work_values.size:
+        nearest_work_idx = work_values.size - 1
+    else:
+        left_idx = insert_idx - 1
+        right_idx = insert_idx
+        left_diff = abs(target_value - work_values[left_idx])
+        right_diff = abs(work_values[right_idx] - target_value)
+        nearest_work_idx = left_idx if left_diff <= right_diff else right_idx
+
+    if ascending:
+        return nearest_work_idx
+    return values.size - 1 - nearest_work_idx
+
+
+def open_dataset_for_config(data_cfg: Dict[str, object]) -> xr.Dataset:
+    data_source = str(data_cfg.get("data_source", "local")).strip().lower()
+    local_dataset_path = str(data_cfg.get("local_dataset_path", "")).strip()
+    source_store = str(data_cfg.get("source_store", "")).strip()
+    source_endpoint_url = str(data_cfg.get("source_endpoint_url", "")).strip()
+
+    if data_source == "source":
+        if not source_store:
+            raise ValueError("source_store is required when data_source=source")
+        storage_options = {"anon": True}
+        if source_endpoint_url:
+            storage_options["client_kwargs"] = {"endpoint_url": source_endpoint_url}
+        consolidated = bool(data_cfg.get("consolidated", False))
+        return xr.open_zarr(
+            source_store,
+            consolidated=consolidated,
+            storage_options=storage_options,
+        )
+
+    if data_source == "local":
+        if not local_dataset_path:
+            raise ValueError("local_dataset_path is required when data_source=local")
+        consolidated = bool(data_cfg.get("consolidated", False))
+        return xr.open_zarr(local_dataset_path, consolidated=consolidated)
+
+    raise ValueError(f"Unsupported data_source {data_source!r}; expected 'local' or 'source'")
 
 
 class ViewerDataset:
@@ -99,16 +154,15 @@ class ViewerDataset:
         raise ValueError(f"Unsupported data_source {self.data_source!r}; expected 'local' or 'source'")
 
     def _open_dataset(self) -> xr.Dataset:
-        if self.data_source == "source":
-            storage_options = {"anon": True}
-            if self.source_endpoint_url:
-                storage_options["client_kwargs"] = {"endpoint_url": self.source_endpoint_url}
-            return xr.open_zarr(
-                self.source_store,
-                consolidated=True,
-                storage_options=storage_options,
-            )
-        return xr.open_zarr(self.local_dataset_path, consolidated=False)
+        return open_dataset_for_config(
+            {
+                "data_source": self.data_source,
+                "local_dataset_path": self.local_dataset_path,
+                "source_store": self.source_store,
+                "source_endpoint_url": self.source_endpoint_url,
+                "consolidated": True if self.data_source == "source" else False,
+            }
+        )
 
     def _grid_extent(self) -> Dict[str, float]:
         return {
@@ -284,9 +338,117 @@ class ViewerDataset:
         return candidate
 
 
+class ScientificDataset:
+    def __init__(self, cfg: Dict[str, object]):
+        data_cfg = cfg["scientific_data"]
+
+        self.data_source = str(data_cfg.get("data_source", "local")).strip().lower()
+        self.local_dataset_path = str(data_cfg.get("local_dataset_path", "")).strip()
+        self.source_store = str(data_cfg.get("source_store", "")).strip()
+        self.source_endpoint_url = str(data_cfg.get("source_endpoint_url", "")).strip()
+        self.grid_crs = str(data_cfg["grid_crs"])
+        self.display_variable = str(data_cfg["display_variable"])
+        self.uncertainty_variable = str(data_cfg["uncertainty_variable"])
+        self.quality_variable = str(data_cfg["quality_variable"])
+
+        self.ds = open_dataset_for_config(
+            {
+                "data_source": self.data_source,
+                "local_dataset_path": self.local_dataset_path,
+                "source_store": self.source_store,
+                "source_endpoint_url": self.source_endpoint_url,
+                "consolidated": False,
+            }
+        )
+        self.wgs84_to_grid = Transformer.from_crs("EPSG:4326", self.grid_crs, always_xy=True)
+        self.grid_to_wgs84 = Transformer.from_crs(self.grid_crs, "EPSG:4326", always_xy=True)
+        self.dates = [datetime64_to_datestr(value) for value in self.ds["time"].values]
+        self.x_values = np.asarray(self.ds["x"].values, dtype=np.float64)
+        self.y_values = np.asarray(self.ds["y"].values, dtype=np.float64)
+
+    def _date_index(self, date_str: str) -> int:
+        try:
+            return self.dates.index(date_str)
+        except ValueError as exc:
+            raise ValueError(f"Date not available in scientific dataset: {date_str}") from exc
+
+    def _cell_for_latlon(self, lat: float, lon: float) -> Tuple[int, int, float, float]:
+        grid_x, grid_y = self.wgs84_to_grid.transform(lon, lat)
+        x_idx = nearest_index(self.x_values, float(grid_x))
+        y_idx = nearest_index(self.y_values, float(grid_y))
+        center_x = float(self.x_values[x_idx])
+        center_y = float(self.y_values[y_idx])
+        return x_idx, y_idx, center_x, center_y
+
+    def download_csv_bytes_for_sites(
+        self,
+        sites: List[Tuple[float, float]],
+        start_date: str,
+        end_date: str,
+    ) -> Tuple[bytes, str]:
+        start_idx = self._date_index(start_date)
+        end_idx = self._date_index(end_date)
+        if end_idx < start_idx:
+            raise ValueError("end_date must be on or after start_date")
+        if not sites:
+            raise ValueError("At least one site is required for CSV download")
+        if len(sites) > 10:
+            raise ValueError("CSV download supports at most 10 sites")
+
+        time_slice = slice(start_idx, end_idx + 1)
+        date_values = self.dates[start_idx : end_idx + 1]
+        quality_values = np.asarray(self.ds[self.quality_variable].isel(time=time_slice).values)
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(
+            [
+                "site_index",
+                "site_lat",
+                "site_lon",
+                "date",
+                "lfmc_ens_mean",
+                "lfmc_ens_std",
+                "quality_flag",
+            ]
+        )
+
+        for site_idx, (lat, lon) in enumerate(sites, start=1):
+            x_idx, y_idx, center_x, center_y = self._cell_for_latlon(lat=lat, lon=lon)
+            center_lon, center_lat = self.grid_to_wgs84.transform(center_x, center_y)
+            mean_values = np.asarray(
+                self.ds[self.display_variable].isel(time=time_slice, y=y_idx, x=x_idx).values,
+                dtype=np.float32,
+            )
+            uncertainty_values = np.asarray(
+                self.ds[self.uncertainty_variable].isel(time=time_slice, y=y_idx, x=x_idx).values,
+                dtype=np.float32,
+            )
+
+            for time_idx, date_str in enumerate(date_values):
+                mean_value = safe_float(mean_values[time_idx])
+                uncertainty_value = safe_float(uncertainty_values[time_idx])
+                quality_raw = quality_values[time_idx]
+                quality_value = int(quality_raw) if np.isfinite(quality_raw) else ""
+                writer.writerow(
+                    [
+                        site_idx,
+                        f"{float(center_lat):.6f}",
+                        f"{float(center_lon):.6f}",
+                        date_str,
+                        "" if mean_value is None else f"{mean_value:.6f}",
+                        "" if uncertainty_value is None else f"{uncertainty_value:.6f}",
+                        quality_value,
+                    ]
+                )
+
+        filename = f"lfmc_sites_{start_date}_to_{end_date}.csv"
+        return buffer.getvalue().encode("utf-8"), filename
+
+
 cfg = load_config()
 dask.config.set(scheduler="synchronous")
 viewer_dataset = ViewerDataset(cfg)
+scientific_dataset = ScientificDataset(cfg)
 
 
 class ViewerRequestHandler(BaseHTTPRequestHandler):
@@ -347,6 +509,26 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                     )
                 )
                 return
+            if parsed.path == "/api/download_csv":
+                start_date = self._require_param(query, "start_date")
+                end_date = self._require_param(query, "end_date")
+                sites = []
+                for raw_site in query.get("site", []):
+                    parts = [value.strip() for value in raw_site.split(",", maxsplit=1)]
+                    if len(parts) != 2:
+                        raise ValueError(f"Invalid site parameter {raw_site!r}; expected 'lat,lon'")
+                    sites.append((float(parts[0]), float(parts[1])))
+                if not sites:
+                    lat = float(self._require_param(query, "lat"))
+                    lon = float(self._require_param(query, "lon"))
+                    sites = [(lat, lon)]
+                csv_bytes, filename = scientific_dataset.download_csv_bytes_for_sites(
+                    sites=sites,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                self._csv_response(csv_bytes, filename=filename)
+                return
             if parsed.path.startswith("/viewer-assets/"):
                 self._static_response(viewer_dataset.resolve_asset_path(parsed.path))
                 return
@@ -389,6 +571,15 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if send_body:
             self.wfile.write(body)
+
+    def _csv_response(self, body: bytes, filename: str) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers()
+        self.wfile.write(body)
 
 
 def main() -> None:
