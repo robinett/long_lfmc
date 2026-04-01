@@ -34,7 +34,7 @@ def open_remote_lfmc_dataset(product_prefix: str, remote_zarr_relpath: str) -> x
     return xr.open_zarr(
         store_uri,
         chunks={},
-        consolidated=False,
+        consolidated=True,
         storage_options={
             "anon": True,
             "client_kwargs": {"endpoint_url": SOURCE_ENDPOINT_URL},

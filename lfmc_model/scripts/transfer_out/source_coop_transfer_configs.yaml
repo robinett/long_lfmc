@@ -15,6 +15,11 @@ datasets:
     artifact_type: zarr
     source_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_shared_dm128_2023_07_08/run_20260323_205249/merged/lfmc_maps.zarr
     destination_relpath: lfmc_maps.zarr
+  scientific_lfmc_maps:
+    description: Scientific EPSG:5070 LFMC Zarr store for Source Cooperative upload.
+    artifact_type: zarr
+    source_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_shared_dm128_2023_07_08/run_20260323_205249/merged/lfmc_maps.zarr
+    destination_relpath: lfmc_maps.zarr
   viewer_3857_lfmc_maps:
     description: Derived EPSG:3857 viewer Zarr for the long LFMC web viewer.
     artifact_type: zarr

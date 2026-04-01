@@ -5,6 +5,7 @@ server:
 data:
   dataset_label: Long LFMC Viewer 3857
   data_source: source
+  consolidated: true
   local_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857.zarr
   source_store: s3://rseg/long-lfmc-test/viewer_3857/lfmc_maps_3857.zarr
   source_endpoint_url: https://data.source.coop
@@ -16,6 +17,7 @@ data:
 
 scientific_data:
   data_source: source
+  consolidated: true
   local_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_shared_dm128_2023_07_08/run_20260323_205249/merged/lfmc_maps.zarr
   source_store: s3://rseg/long-lfmc-test/lfmc_maps.zarr
   source_endpoint_url: https://data.source.coop

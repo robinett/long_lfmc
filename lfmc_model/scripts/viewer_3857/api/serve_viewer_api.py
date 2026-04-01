@@ -358,7 +358,7 @@ class ScientificDataset:
                 "local_dataset_path": self.local_dataset_path,
                 "source_store": self.source_store,
                 "source_endpoint_url": self.source_endpoint_url,
-                "consolidated": False,
+                "consolidated": bool(data_cfg.get("consolidated", False)),
             }
         )
         self.wgs84_to_grid = Transformer.from_crs("EPSG:4326", self.grid_crs, always_xy=True)
