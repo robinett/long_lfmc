@@ -169,9 +169,20 @@ function buildTimeseriesGeometry(pointInfo, selectedDate) {
   const xCoord = (index) => padding.left + (index / xDenominator) * innerWidth;
   const yCoord = (value) => padding.top + ((yMax - value) / ySpan) * innerHeight;
 
-  const linePath = validPoints
-    .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xCoord(point.idx)} ${yCoord(point.mean)}`)
-    .join(" ");
+  let lineStarted = false;
+  const linePathParts = [];
+
+  for (let idx = 0; idx < dates.length; idx += 1) {
+    const meanValue = means[idx];
+    if (meanValue === null || Number.isNaN(meanValue)) {
+      lineStarted = false;
+      continue;
+    }
+    linePathParts.push(`${lineStarted ? "L" : "M"} ${xCoord(idx)} ${yCoord(Number(meanValue))}`);
+    lineStarted = true;
+  }
+
+  const linePath = linePathParts.join(" ");
 
   const selectedIndex = Math.max(dates.indexOf(selectedDate), 0);
   const selectedX = xCoord(selectedIndex);
