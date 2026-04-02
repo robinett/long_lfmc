@@ -354,7 +354,8 @@ def get_model_grid():
     global _MODEL_GRID
     if _MODEL_GRID is None:
         from map_runtime_utils import DEFAULT_MODEL_GRID_PATH, open_model_grid
-        _MODEL_GRID = open_model_grid(DEFAULT_MODEL_GRID_PATH)
+        grid_path = os.environ.get("LFMC_MODEL_GRID_PATH", DEFAULT_MODEL_GRID_PATH)
+        _MODEL_GRID = open_model_grid(grid_path)
     return _MODEL_GRID
 
 

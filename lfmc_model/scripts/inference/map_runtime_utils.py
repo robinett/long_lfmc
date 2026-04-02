@@ -64,7 +64,7 @@ DEFAULT_MAP_RUN_ROOT = os.path.join(
     "lfmc_vh_vv_ens_fullrandom",
 )
 DEFAULT_MODEL_GRID_PATH = os.path.join(
-    DEFAULT_OAK_ROOT,
+    DEFAULT_SCRATCH_ROOT,
     "grid",
     "epsg5070_500m_westUS_grid.nc4",
 )
@@ -328,8 +328,6 @@ def _mask_cache_signature(
     landcover_ds: xr.Dataset,
     grid_path: str,
     allowed_classes: Sequence[str],
-    climate_ds: Optional[xr.Dataset] = None,
-    allowed_climate_codes: Optional[Sequence[int]] = None,
 ) -> str:
     def _source_signature(path: str) -> Dict[str, object]:
         out: Dict[str, object] = {"path": str(path)}
@@ -340,7 +338,6 @@ def _mask_cache_signature(
         return out
 
     landcover_var = next(iter(landcover_ds.data_vars.values()))
-    climate_var = None if climate_ds is None else next(iter(climate_ds.data_vars.values()))
     payload = {
         "grid_path": grid_path,
         "grid_shape": {k: int(v) for k, v in model_grid.sizes.items()},
@@ -356,16 +353,6 @@ def _mask_cache_signature(
         "landcover_shape": {k: int(v) for k, v in landcover_ds.sizes.items()},
         "landcover_vars": sorted(landcover_ds.data_vars),
         "allowed_classes": list(allowed_classes),
-        "climate_source": (
-            None
-            if climate_var is None
-            else _source_signature(str(climate_var.encoding.get("source", "")))
-        ),
-        "allowed_climate_codes": (
-            None
-            if allowed_climate_codes is None
-            else [int(code) for code in sorted(set(allowed_climate_codes))]
-        ),
     }
     raw = json.dumps(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha1(raw).hexdigest()[:16]
@@ -377,8 +364,6 @@ def load_or_build_prediction_mask_for_year(
     year: int,
     grid_path: str = DEFAULT_MODEL_GRID_PATH,
     allowed_classes: Sequence[str] = ALLOWED_DOMINANT_LANDCOVER,
-    climate_ds: Optional[xr.Dataset] = None,
-    allowed_climate_codes: Optional[Sequence[int]] = None,
     cache_root: str = DEFAULT_LANDCOVER_MASK_CACHE_DIR,
 ) -> xr.DataArray:
     cache_sig = _mask_cache_signature(
@@ -386,8 +371,6 @@ def load_or_build_prediction_mask_for_year(
         landcover_ds=landcover_ds,
         grid_path=grid_path,
         allowed_classes=allowed_classes,
-        climate_ds=climate_ds,
-        allowed_climate_codes=allowed_climate_codes,
     )
     cache_dir = os.path.join(cache_root, cache_sig)
     cache_path = os.path.join(cache_dir, f"prediction_mask_{year}.npz")
@@ -406,15 +389,6 @@ def load_or_build_prediction_mask_for_year(
     )
     model_random_mask = model_grid["random_vals"].notnull()
     prediction_mask = (model_random_mask & landcover_mask).transpose(*model_random_mask.dims)
-    if climate_ds is not None and allowed_climate_codes is not None:
-        climate_codes = sorted({int(code) for code in allowed_climate_codes})
-        if len(climate_codes) == 0:
-            raise ValueError("allowed_climate_codes must not be empty when climate_ds is provided")
-        climate_da = climate_ds["climate_zone"]
-        if "band" in climate_da.dims:
-            climate_da = climate_da.isel(band=0)
-        climate_mask = climate_da.isin(climate_codes).astype(bool)
-        prediction_mask = (prediction_mask & climate_mask).transpose(*model_random_mask.dims)
     mask = np.asarray(prediction_mask.values, dtype=bool)
     y_vals = np.asarray(model_grid["y"].values)
     x_vals = np.asarray(model_grid["x"].values)
@@ -871,12 +845,11 @@ def _tile_native_tensor_payload(
         "soils": dss["soils"],
         "canopy_height": dss["canopy_height"],
     }
-    use_climate_zone = (
-        any(var_name.startswith("climate_zone_") for var_name in static_vars)
-        and "climate_zone" in dss
-    )
-    if use_climate_zone:
-        subset_sources["climate_zone"] = dss["climate_zone"]
+    if any(var_name.startswith("climate_zone_") for var_name in static_vars):
+        raise KeyError(
+            "Inference no longer supports climate_zone_* static vars. "
+            "Rebuild or retire runtimes that still request them."
+        )
     source_indexers = {
         source_name: _resolve_tile_source_indices(tile_payload, ds, source_name, dss)
         for source_name, ds in {**full_grid_sources, **subset_sources}.items()
@@ -888,7 +861,6 @@ def _tile_native_tensor_payload(
         var_name
         for var_name in static_vars
         if var_name not in {"latitude", "longitude"}
-        and not var_name.startswith("climate_zone_")
         and not _static_var_is_landcover(var_name)
     ]
     landcover_vars = [var_name for var_name in static_vars if _static_var_is_landcover(var_name)]
@@ -901,8 +873,6 @@ def _tile_native_tensor_payload(
     modis_idx = source_indexers["modis"]
     daymet_idx = source_indexers["daymet"]
     landcover_idx = source_indexers["landcover_frac"]
-    climate_idx = source_indexers.get("climate_zone")
-
     modis_cube = _stack_source_vars(
         dss["modis"],
         short_source_vars,
@@ -943,18 +913,6 @@ def _tile_native_tensor_payload(
             .transpose("variable", "y", "x")
             .compute()
         )
-    climate_cube = None
-    if use_climate_zone and climate_idx is not None:
-        climate_cube = (
-            dss["climate_zone"]["climate_zone"]
-            .isel(
-                x=slice(int(climate_idx["x_min"]), int(climate_idx["x_max"]) + 1),
-                y=slice(int(climate_idx["y_min"]), int(climate_idx["y_max"]) + 1),
-            )
-            .compute()
-        )
-        if "band" in climate_cube.dims:
-            climate_cube = climate_cube.isel(band=0)
     landcover_cube = (
         dss["landcover_frac"]
         .isel(
@@ -990,7 +948,6 @@ def _tile_native_tensor_payload(
         )
         for source_name, cube in static_cubes.items()
     }
-    climate_arr = np.asarray(climate_cube.values) if climate_cube is not None else None
     landcover_arr = np.asarray(landcover_cube.values, dtype=np.float32) if landcover_cube is not None else None
     landcover_years = (
         pd.to_datetime(landcover_cube["year"].values).year.astype(int)
@@ -1017,12 +974,6 @@ def _tile_native_tensor_payload(
 
     lat_vals = tile_payload["lat"].astype(np.float32)
     lon_vals = tile_payload["lon"].astype(np.float32)
-    climate_codes = None
-    if climate_arr is not None and climate_idx is not None:
-        climate_codes = climate_arr[
-            climate_idx["local_iy"].astype(np.int64),
-            climate_idx["local_ix"].astype(np.int64),
-        ].astype(np.int64)
 
     for pix_start in range(0, n_pixels, pixel_batch_size):
         pix_end = min(pix_start + pixel_batch_size, n_pixels)
@@ -1035,7 +986,6 @@ def _tile_native_tensor_payload(
         landcover_x_local = landcover_idx["local_ix"][pix_slice].astype(np.int64)
         batch_lat = lat_vals[pix_slice]
         batch_lon = lon_vals[pix_slice]
-        batch_climate_codes = climate_codes[pix_slice] if climate_codes is not None else None
 
         modis_series = (
             modis_arr[:, :, modis_y_local, modis_x_local]
@@ -1107,11 +1057,6 @@ def _tile_native_tensor_payload(
                     vals = ((batch_lat - this_norm_mean) / safe_std).reshape(-1, 1)
                 elif st_var == "longitude":
                     vals = ((batch_lon - this_norm_mean) / safe_std).reshape(-1, 1)
-                elif st_var.startswith("climate_zone_"):
-                    if batch_climate_codes is None:
-                        raise KeyError("Runtime requests climate_zone_* static vars but no climate dataset is loaded")
-                    climate_zone_checking = int(st_var.split("_")[-1])
-                    vals = (batch_climate_codes == climate_zone_checking).astype(np.float32).reshape(-1, 1)
                 elif _static_var_is_landcover(st_var):
                     var_idx = landcover_var_lookup[st_var]
                     out = np.empty((pix_end - pix_start, day_end - day_start), dtype=np.float32)

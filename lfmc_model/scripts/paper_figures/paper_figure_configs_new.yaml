@@ -23,8 +23,8 @@ filters:
 models:
   multitask_16:
     display_name: Multitask LFMC Model (16-member ensemble)
-    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_wd64_lr5e-4_tw5_vpd_anoms_nozone
-    input_data_name: ensemble/lfmc_vh_vv_365_dm128_vpd_anoms_nozone
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+    input_data_name: ensemble/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
     is_ensemble: true
     ensemble_member_name_prefix:
     ensemble_selection_key:
@@ -32,8 +32,8 @@ models:
     color: "#cf5c36"
   single_task_16:
     display_name: Single-task LFMC Model (16-member ensemble)
-    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_wd64_lr5e-4_tw5_vpd_anoms_nozone
-    input_data_name: lfmc_365_dm128_vpd_anoms_nozone
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+    input_data_name: lfmc_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
     is_ensemble: true
     ensemble_member_name_prefix:
     ensemble_selection_key:
@@ -54,7 +54,7 @@ figures:
     filename: figure_01_conceptual.png
 
   figure_2:
-    enabled: false
+    enabled: true
     model_key: multitask_16
     num_sites_per_criterion: 1
     min_measurements: 10
@@ -70,14 +70,14 @@ figures:
     filename: figure_02_multitask_timeseries.png
 
   figure_3:
-    enabled: false
+    enabled: true
     model_key: multitask_16
     hexbin_gridsize: 60
     figsize: [12.2, 11.3]
     filename: figure_03_performance_scatters.png
 
   figure_4:
-    enabled: false
+    enabled: true
     model_key: multitask_16
     metric_colors:
       - "#cf5c36"
@@ -88,7 +88,7 @@ figures:
     filename: figure_04_landcover_breakdown.png
 
   figure_5:
-    enabled: false
+    enabled: true
     model_keys:
       - multitask_16
       - single_task_16
@@ -102,7 +102,7 @@ figures:
     filename: figure_06_dataset_sample_maps.png
 
   supplementary_figure_1:
-    enabled: false
+    enabled: true
     model_key: multitask_16
     num_sites_per_criterion: 1
     min_measurements: 10

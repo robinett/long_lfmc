@@ -20,8 +20,6 @@ sources:
     path: /scratch/users/trobinet/long_lfmc/final_lfmc/soils/soilgrids_top_500m_epsg5070.nc
   canopy_height:
     path: /scratch/users/trobinet/long_lfmc/final_lfmc/canopy_height/gedi_canopy_height_2019_500m_epsg5070.nc
-  climate_zone:
-    path: /scratch/users/trobinet/long_lfmc/final_lfmc/climate_zones/climate_zone_per_pixel_fullgrid.nc4
   production:
     zarr_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/production/lfmc_maps_production.zarr
     metadata_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/production/metadata

@@ -1,3 +1,5 @@
+# Legacy shared-dm128 multiyear inference config.
+# Do not use for the current clim20 model family; kept only for historical reproducibility.
 ensemble:
   outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_shared_ensemble
   input_data_name: ensemble/lfmc_vh_vv_365_shared_ensemble
@@ -32,7 +34,7 @@ paths:
 chunking:
   tile_size: 100
   months_per_block: 1
-  time_chunk_days: 31
+  time_chunk_days: 128
   y_chunk: 256
   x_chunk: 256
 

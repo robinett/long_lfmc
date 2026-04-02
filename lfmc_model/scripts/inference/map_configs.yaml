@@ -24,7 +24,7 @@ paths:
 chunking:
   tile_size: 10
   months_per_block: 1
-  time_chunk_days: 31
+  time_chunk_days: 128
   y_chunk: 256
   x_chunk: 256
 

@@ -14,6 +14,9 @@ if [[ -z "${CONFIG_PATH:-}" ]]; then
 fi
 export CONFIG_PATH
 
+SBATCH_SUBMIT_MAX_ATTEMPTS="${SBATCH_SUBMIT_MAX_ATTEMPTS:-5}"
+SBATCH_SUBMIT_RETRY_SLEEP_SECONDS="${SBATCH_SUBMIT_RETRY_SLEEP_SECONDS:-15}"
+
 cfg_value() {
     local section="$1"
     local key="$2"
@@ -34,6 +37,44 @@ elif isinstance(value, bool):
 else:
     print(value)
 PYCFG
+}
+
+timestamp_slug() {
+    date +"%Y%m%d_%H%M%S"
+}
+
+submit_with_retry() {
+    local label="$1"
+    shift
+    local attempt=""
+    local stdout_log=""
+    local stderr_log=""
+    local output=""
+    local status=0
+    for (( attempt=1; attempt<=SBATCH_SUBMIT_MAX_ATTEMPTS; attempt++ )); do
+        stdout_log="${logs_dir}/sbatch_${label}_attempt${attempt}_$(timestamp_slug).out"
+        stderr_log="${logs_dir}/sbatch_${label}_attempt${attempt}_$(timestamp_slug).err"
+        if "$@" >"${stdout_log}" 2>"${stderr_log}"; then
+            output="$(awk 'NF {print; exit}' "${stdout_log}")"
+            if [[ -z "${output}" ]]; then
+                echo "sbatch returned success for ${label} attempt ${attempt}, but no job id was captured. stdout=${stdout_log} stderr=${stderr_log}" >&2
+                status=1
+            else
+                echo "Submitted ${label} on attempt ${attempt}; stdout=${stdout_log} stderr=${stderr_log}" >&2
+                printf '%s\n' "${output}"
+                return 0
+            fi
+        else
+            status=$?
+            echo "sbatch failed for ${label} attempt ${attempt}/${SBATCH_SUBMIT_MAX_ATTEMPTS}; status=${status}; stdout=${stdout_log} stderr=${stderr_log}" >&2
+        fi
+        if [[ "${attempt}" -lt "${SBATCH_SUBMIT_MAX_ATTEMPTS}" ]]; then
+            echo "Retrying ${label} submission after ${SBATCH_SUBMIT_RETRY_SLEEP_SECONDS}s" >&2
+            sleep "${SBATCH_SUBMIT_RETRY_SLEEP_SECONDS}"
+        fi
+    done
+    echo "Exhausted sbatch retries for ${label}" >&2
+    return 1
 }
 
 refresh_runtime_scheduler_limits() {
@@ -120,6 +161,55 @@ format_dhms() {
     minutes=$(( (total_seconds % 3600) / 60 ))
     seconds=$(( total_seconds % 60 ))
     printf '%d:%02d:%02d:%02d\n' "${days}" "${hours}" "${minutes}" "${seconds}"
+}
+
+downshift_gpu_batch_cache_for_job() {
+    local job_id="$1"
+    local metadata_path="${latest_run_dir}/gpu_work_queue/worker_runtime/job_${job_id}.json"
+    if [[ ! -f "${metadata_path}" ]]; then
+        return 1
+    fi
+    JOB_METADATA_PATH="${metadata_path}" python3 - <<'PYDOWN'
+import json
+import math
+import os
+import time
+
+metadata_path = os.environ["JOB_METADATA_PATH"]
+with open(metadata_path, "r", encoding="utf-8") as f:
+    metadata = json.load(f)
+
+cache_path = metadata.get("cache_path")
+selected_batch_size = int(metadata.get("selected_batch_size", 0))
+configured_batch_size = int(metadata.get("configured_batch_size", 512))
+if not cache_path or selected_batch_size <= 0:
+    raise SystemExit(1)
+
+cache_payload = {}
+if os.path.exists(cache_path):
+    with open(cache_path, "r", encoding="utf-8") as f:
+        cache_payload = json.load(f)
+
+new_batch_size = max(configured_batch_size, int(math.floor(selected_batch_size * 0.5)))
+if new_batch_size >= selected_batch_size:
+    new_batch_size = max(configured_batch_size, selected_batch_size - 256)
+if new_batch_size <= 0:
+    new_batch_size = configured_batch_size
+
+cache_payload["selected_batch_size"] = int(new_batch_size)
+cache_payload["last_downshift_reason"] = "OUT_OF_MEMORY"
+cache_payload["last_downshift_from"] = int(selected_batch_size)
+cache_payload["last_downshift_job_id"] = str(metadata.get("job_id", ""))
+cache_payload["updated_at_epoch"] = float(time.time())
+
+os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+tmp_path = cache_path + ".tmp"
+with open(tmp_path, "w", encoding="utf-8") as f:
+    json.dump(cache_payload, f, indent=2, sort_keys=True)
+    f.write("\n")
+os.replace(tmp_path, cache_path)
+print(f"{selected_batch_size}->{new_batch_size}")
+PYDOWN
 }
 
 estimate_recent_shard_rate_per_second() {
@@ -275,8 +365,72 @@ multiyear_year_ordinal="${MULTIYEAR_YEAR_ORDINAL:-}"
 multiyear_status_dir="${MULTIYEAR_STATUS_DIR:-}"
 multiyear_year_started_at_epoch="${MULTIYEAR_YEAR_STARTED_AT_EPOCH:-}"
 
-start_from_gpu=false
-existing_run_dir=
+start_from_gpu="${START_FROM_GPU:-false}"
+existing_run_dir="${EXISTING_RUN_DIR:-}"
+auto_resume_complete_run="${AUTO_RESUME_COMPLETE_RUN:-true}"
+
+find_resumable_run_dir() {
+    local run_root="$1"
+    RUN_ROOT_FOR_RESUME="${run_root}" python3 - <<'PYRESUME'
+import csv
+import json
+import os
+from pathlib import Path
+
+run_root = Path(os.environ["RUN_ROOT_FOR_RESUME"])
+if not run_root.exists():
+    raise SystemExit(1)
+
+run_dirs = sorted(
+    [p for p in run_root.iterdir() if p.is_dir() and p.name.startswith("run_")],
+    key=lambda p: p.stat().st_mtime,
+    reverse=True,
+)
+if not run_dirs:
+    raise SystemExit(1)
+
+run_dir = run_dirs[0]
+manifest_path = run_dir / "manifest.csv"
+run_config_path = run_dir / "run_config.json"
+prepared_dir = run_dir / "prepared_tensors"
+shards_dir = run_dir / "shards"
+completed_log = run_dir / "gpu_work_queue" / "completed_tasks.tsv"
+
+if not manifest_path.exists() or not run_config_path.exists():
+    raise SystemExit(1)
+
+with open(run_config_path, "r", encoding="utf-8") as f:
+    run_config = json.load(f)
+
+out_zarr_path = run_config.get("out_zarr_path") or run_config.get("persistent_out_zarr_path")
+if out_zarr_path and Path(out_zarr_path).exists():
+    raise SystemExit(1)
+
+with open(manifest_path, newline="", encoding="utf-8") as f:
+    task_count = sum(1 for _ in csv.DictReader(f))
+
+prepared_count = sum(1 for p in prepared_dir.glob("*") if p.is_file()) if prepared_dir.exists() else 0
+shard_count = sum(1 for p in shards_dir.glob("*.npz")) if shards_dir.exists() else 0
+completed_count = sum(1 for _ in completed_log.open("r", encoding="utf-8")) if completed_log.exists() else 0
+
+if task_count <= 0:
+    raise SystemExit(1)
+if prepared_count != task_count or shard_count != task_count or completed_count != task_count:
+    raise SystemExit(1)
+
+print(str(run_dir))
+PYRESUME
+}
+
+configured_run_root="${RUN_ROOT:-$(cfg_value paths run_root '')}"
+if [[ "${start_from_gpu}" != "true" && -z "${existing_run_dir}" && "${auto_resume_complete_run}" == "true" && -n "${configured_run_root}" ]]; then
+    if resumable_run_dir="$(find_resumable_run_dir "${configured_run_root}")"; then
+        start_from_gpu="true"
+        existing_run_dir="${resumable_run_dir}"
+        echo "Detected completed-shard run ready for resume: ${existing_run_dir}"
+        echo "Skipping manifest/prepare/GPU submission and resuming at merge/validation."
+    fi
+fi
 
 manifest_args=(
     --config_path "${CONFIG_PATH}"
@@ -342,9 +496,9 @@ if [[ "${start_from_gpu}" == "true" ]]; then
     fi
 else
     echo "Submitting manifest build job..."
-    manifest_job_id="$({
-        sbatch --parsable --export=ALL,CONFIG_PATH="${CONFIG_PATH}" "${script_dir}/build_map_manifest_ensemble.sbatch" "${manifest_args[@]}"
-    })"
+    manifest_job_id="$(submit_with_retry \
+        "build_map_manifest" \
+        sbatch --parsable --export=ALL,CONFIG_PATH="${CONFIG_PATH}" "${script_dir}/build_map_manifest_ensemble.sbatch" "${manifest_args[@]}")"
     echo "Submitted manifest build job ${manifest_job_id}"
 
     while true; do
@@ -376,7 +530,7 @@ fi
 mkdir -p "${gpu_lock_dir}"
 
 lock_count() {
-    find "${gpu_lock_dir}" -maxdepth 1 -type f | wc -l
+    find "${gpu_lock_dir}" -maxdepth 1 -type f -name "lock_${run_name}_gpu_*.lock" | wc -l
 }
 
 gpu_completion_log_path() {
@@ -500,7 +654,8 @@ submit_gpu_job() {
     fi
 
     if [[ -n "${constraint}" ]]; then
-        if ! gpu_job_id="$({
+        if ! gpu_job_id="$(submit_with_retry \
+            "run_maps_gpu_${pool}_${gpu_task_id}" \
             sbatch \
                 --parsable \
                 --partition="${partition}" \
@@ -510,14 +665,14 @@ submit_gpu_job() {
                 --constraint="${constraint}" \
                 --job-name="map_gpu_${pool}_${gpu_task_id}" \
                 --export="${sbatch_export}" \
-                "${script_dir}/run_maps_gpu_ensemble.sbatch"
-        })"; then
+                "${script_dir}/run_maps_gpu_ensemble.sbatch")"; then
             if [[ "${pool}" == "serc" ]]; then
                 rm -f "${lock_file}"
             fi
             return 1
         fi
-    elif ! gpu_job_id="$({
+    elif ! gpu_job_id="$(submit_with_retry \
+        "run_maps_gpu_${pool}_${gpu_task_id}" \
         sbatch \
             --parsable \
             --partition="${partition}" \
@@ -526,8 +681,7 @@ submit_gpu_job() {
             --mem="${mem}" \
             --job-name="map_gpu_${pool}_${gpu_task_id}" \
             --export="${sbatch_export}" \
-            "${script_dir}/run_maps_gpu_ensemble.sbatch"
-    })"; then
+            "${script_dir}/run_maps_gpu_ensemble.sbatch")"; then
         if [[ "${pool}" == "serc" ]]; then
             rm -f "${lock_file}"
         fi
@@ -603,9 +757,9 @@ if [[ "${use_gpu_forward}" == "true" ]]; then
         if [[ "${start_from_gpu}" == "true" ]]; then
             echo "GPU-only restart mode: skipping CPU prepare array and starting directly from prepared tensors in ${latest_run_dir}"
         else
-            prepare_job_id="$({
-                sbatch --parsable --array="0-$(( num_job_tasks - 1 ))%${array_concurrency}" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/prepare_maps_ensemble.sbatch"
-            })"
+            prepare_job_id="$(submit_with_retry \
+                "prepare_maps_ensemble" \
+                sbatch --parsable --array="0-$(( num_job_tasks - 1 ))%${array_concurrency}" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/prepare_maps_ensemble.sbatch")"
             echo "Submitted CPU prepare array job ${prepare_job_id}"
             echo "Monitoring prepare tasks and submitting GPU jobs under shared lock budget ${gpu_max_jobs} from ${gpu_lock_dir}"
         fi
@@ -685,6 +839,13 @@ if [[ "${use_gpu_forward}" == "true" ]]; then
                         gpu_job_ids[$gpu_task_id]=""
                         gpu_job_pool[$gpu_task_id]=""
                         owners_failure_events_total=$(( owners_failure_events_total + 1 ))
+                        if [[ "${gpu_job_state}" == "OUT_OF_MEMORY" ]]; then
+                            if downshift_note="$(downshift_gpu_batch_cache_for_job "${gpu_job_id}")"; then
+                                echo "GPU worker job ${gpu_job_id} hit OUT_OF_MEMORY; downshifted cached batch size ${downshift_note}"
+                            else
+                                echo "GPU worker job ${gpu_job_id} hit OUT_OF_MEMORY; no batch-cache metadata was available to downshift"
+                            fi
+                        fi
                         if job_retryable "${gpu_job_state}"; then
                             retry_waiting_total=$(( retry_waiting_total + 1 ))
                             echo "GPU worker job ${gpu_job_id} for worker_id=${gpu_task_id} on pool=owners ended with retryable state ${gpu_job_state}; tolerated_owners_failures=${owners_failure_events_total}; unfinished shards remain claimable"
@@ -693,6 +854,13 @@ if [[ "${use_gpu_forward}" == "true" ]]; then
                         fi
                         progress_made=1
                         continue
+                    fi
+                    if [[ "${gpu_job_state}" == "OUT_OF_MEMORY" ]]; then
+                        if downshift_note="$(downshift_gpu_batch_cache_for_job "${gpu_job_id}")"; then
+                            echo "GPU worker job ${gpu_job_id} hit OUT_OF_MEMORY; downshifted cached batch size ${downshift_note}"
+                        else
+                            echo "GPU worker job ${gpu_job_id} hit OUT_OF_MEMORY; no batch-cache metadata was available to downshift"
+                        fi
                     fi
                     if job_retryable "${gpu_job_state}"; then
                         retry_count=$(( ${gpu_retry_counts[$gpu_task_id]:-0} + 1 ))
@@ -728,6 +896,11 @@ if [[ "${use_gpu_forward}" == "true" ]]; then
                     running_gpu_jobs=$(( running_gpu_jobs + 1 ))
                 fi
             done
+
+            active_gpu_jobs=$(( running_gpu_jobs + pending_gpu_jobs ))
+            if [[ "${completed_shards}" -ge "${num_fine_tasks}" && "${prepare_complete}" -eq 1 && "${active_gpu_jobs}" -eq 0 ]]; then
+                break
+            fi
 
             serc_estimated_task_seconds=""
             serc_estimated_finish_seconds=""
@@ -811,7 +984,6 @@ PYELAPSED
                 done
             fi
 
-            active_gpu_jobs=$(( running_gpu_jobs + pending_gpu_jobs ))
             if [[ "${completed_shards}" -ge "${num_fine_tasks}" && "${prepare_complete}" -eq 1 && "${active_gpu_jobs}" -eq 0 ]]; then
                 break
             fi
@@ -951,6 +1123,13 @@ PYMAP
                     if [[ "${gpu_pool}" == "serc" ]]; then
                         cleanup_lock_for_task "${gpu_task_id}"
                     fi
+                    if [[ "${gpu_job_state}" == "OUT_OF_MEMORY" ]]; then
+                        if downshift_note="$(downshift_gpu_batch_cache_for_job "${gpu_job_id}")"; then
+                            echo "GPU job ${gpu_job_id} hit OUT_OF_MEMORY; downshifted cached batch size ${downshift_note}"
+                        else
+                            echo "GPU job ${gpu_job_id} hit OUT_OF_MEMORY; no batch-cache metadata was available to downshift"
+                        fi
+                    fi
                     if job_retryable "${gpu_job_state}"; then
                         retry_count=$(( ${gpu_retry_counts[$gpu_task_id]:-0} + 1 ))
                         gpu_retry_counts[$gpu_task_id]="${retry_count}"
@@ -1053,9 +1232,9 @@ PYMAP
     fi
 
 else
-    array_job_id="$({
-        sbatch --parsable --array="0-$(( num_job_tasks - 1 ))%${array_concurrency}" --export=ALL,MANIFEST_PATH="${manifest_path}",MODEL_TYPE="${model_type}" "${script_dir}/create_maps_ensemble.sbatch"
-    })"
+    array_job_id="$(submit_with_retry \
+        "create_maps_ensemble" \
+        sbatch --parsable --array="0-$(( num_job_tasks - 1 ))%${array_concurrency}" --export=ALL,MANIFEST_PATH="${manifest_path}",MODEL_TYPE="${model_type}" "${script_dir}/create_maps_ensemble.sbatch")"
     echo "Submitted worker array job ${array_job_id}"
     after_gpu_dependency="${array_job_id}"
 fi
@@ -1070,23 +1249,23 @@ merge_init_args+=(
     --export=ALL,MANIFEST_PATH="${manifest_path}",OVERWRITE_MERGE=1,MERGE_INITIALIZE_ONLY=1
     "${script_dir}/merge_maps_ensemble.sbatch"
 )
-merge_init_job_id="$(sbatch "${merge_init_args[@]}")"
+merge_init_job_id="$(submit_with_retry "merge_init" sbatch "${merge_init_args[@]}")"
 echo "Submitted merge initialization job ${merge_init_job_id}"
 
-merge_array_job_id="$({
-    sbatch --parsable --dependency=afterok:${merge_init_job_id} --array="0-$(( num_merge_tasks - 1 ))%${array_concurrency}" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/merge_maps_ensemble.sbatch"
-})"
+merge_array_job_id="$(submit_with_retry \
+    "merge_array" \
+    sbatch --parsable --dependency=afterok:${merge_init_job_id} --array="0-$(( num_merge_tasks - 1 ))%${array_concurrency}" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/merge_maps_ensemble.sbatch")"
 echo "Submitted merge array job ${merge_array_job_id}"
 
-validate_job_id="$({
-    sbatch --parsable --dependency=afterok:${merge_array_job_id} --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/validate_maps_ensemble.sbatch"
-})"
+validate_job_id="$(submit_with_retry \
+    "validate_maps" \
+    sbatch --parsable --dependency=afterok:${merge_array_job_id} --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/validate_maps_ensemble.sbatch")"
 echo "Submitted validation job ${validate_job_id}"
 
 if [[ "${cleanup_prepared_tensors_after_success}" == "true" ]]; then
-    cleanup_job_id="$({
-        sbatch --parsable --dependency=afterok:${validate_job_id} --job-name="cleanup_prepared_tensors" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/cleanup_prepared_tensors.sbatch"
-    })"
+    cleanup_job_id="$(submit_with_retry \
+        "cleanup_prepared_tensors" \
+        sbatch --parsable --dependency=afterok:${validate_job_id} --job-name="cleanup_prepared_tensors" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/cleanup_prepared_tensors.sbatch")"
     echo "Submitted prepared-tensor cleanup job ${cleanup_job_id} after validation success"
 else
     echo "Skipping prepared-tensor cleanup after validation stage."

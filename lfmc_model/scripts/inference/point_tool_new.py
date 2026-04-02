@@ -158,15 +158,12 @@ def build_tensors(
     preloaded_static = None
     preloaded_soils = None
     preloaded_canopy_height = None
-    preloaded_climate_zone = None
     if all_nearby:
         preloaded_static = dss['static'].load()
         if 'soils' in dss:
             preloaded_soils = dss['soils'].load()
         if 'canopy_height' in dss:
             preloaded_canopy_height = dss['canopy_height'].load()
-        if 'climate_zone' in dss:
-            preloaded_climate_zone = dss['climate_zone'].load()
         modis_ds = dss['modis']
         modis_x = modis_ds['x'].values
         modis_y = modis_ds['y'].values
@@ -393,23 +390,10 @@ def build_tensors(
                 this_vals = loc[0] # longitude
                 vals_to_add = (this_vals - this_norm_mean) / this_norm_std
             elif 'climate_zone' in st_var:
-                if all_nearby and loc_chunk_keys is not None:
-                    this_ds = preloaded_climate_zone
-                else:
-                    this_ds = dss['climate_zone']
-                this_vals = this_ds['climate_zone'].sel(
-                    x=this_x,
-                    y=this_y,
-                    method='nearest'
+                raise KeyError(
+                    "Inference no longer supports climate_zone_* static vars. "
+                    "Rebuild or retire runtimes that still request them."
                 )
-                climate_zone_here = int(this_vals[0].values)
-                climate_zone_checking = int(
-                    st_var.split('_')[-1]
-                )
-                if climate_zone_here == climate_zone_checking:
-                    vals_to_add = 1
-                else:
-                    vals_to_add = 0
             elif (
                 'barren' in st_var or
                 'crops' in st_var or

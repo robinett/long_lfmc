@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 
+# Legacy exploratory sweep script.
+# This file still targets the older non-clim20 tensor/output naming and is not the
+# current production training entrypoint. Prefer submit_training_end_to_end.py for
+# the active multisource_fusion clim20 model family.
+
 import argparse
 import datetime as dt
 import fcntl

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 
 import argparse
+import gc
+import hashlib
 import json
 import math
 import os
 import shutil
+import threading
 import time
 
 import pandas as pd
@@ -12,6 +15,7 @@ import torch
 
 from map_runtime_utils import (
     DEFAULT_MODEL_TYPE,
+    DEFAULT_SCRATCH_ROOT,
     build_static_superset_runtime,
     convert_tensor_payload_to_runtime,
     densify_tile_predictions,
@@ -32,6 +36,16 @@ DEFAULT_GPU_TIME_MARGIN_SECONDS = 600
 DEFAULT_GPU_IDLE_SLEEP_SECONDS = 15
 DEFAULT_GPU_CLAIM_STALE_SECONDS = 1800
 DEFAULT_GPU_NEXT_TASK_SAFETY_FACTOR = 1.15
+DEFAULT_GPU_BATCH_CACHE_ROOT = os.path.join(
+    DEFAULT_SCRATCH_ROOT,
+    "lfmc_model",
+    "inference",
+    "cache",
+    "gpu_batch_sizes",
+)
+DEFAULT_GPU_BATCH_RUNTIME_DIRNAME = "worker_runtime"
+DEFAULT_GPU_BATCH_PROBE_FRACTION = 0.85
+DEFAULT_GPU_BATCH_MIN = 512
 
 
 class PreparedTensorNotReadyError(RuntimeError):
@@ -89,7 +103,327 @@ def _gpu_specific_batch_size(device_name: str, total_memory_gb: float) -> int | 
     return None
 
 
-def _resolve_forward_batch_size(run_config: dict, worker_label: str) -> int:
+def _round_batch_size(value: int) -> int:
+    if value <= DEFAULT_GPU_BATCH_MIN:
+        return DEFAULT_GPU_BATCH_MIN
+    rounded = int(math.floor(value / 256.0) * 256)
+    return max(rounded, DEFAULT_GPU_BATCH_MIN)
+
+
+def _runtime_batch_signature(run_config: dict, reference_runtime, predictor_states: list[dict]) -> str:
+    payload = {
+        "input_data_name": run_config.get("input_data_name"),
+        "model_type": run_config.get("model_type", DEFAULT_MODEL_TYPE),
+        "member_count": len(predictor_states),
+        "short_vars": list(reference_runtime["var_names"]["short_vars"]),
+        "long_vars": list(reference_runtime["var_names"]["long_vars"]),
+        "static_vars": list(reference_runtime["var_names"]["static_vars"]),
+        "short_lag_days": [int(v) for v in reference_runtime["short_lag_days"]],
+        "long_lag_days": [int(v) for v in reference_runtime["long_lag_days"]],
+    }
+    raw = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+
+def _current_rss_gb() -> float:
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return float(parts[1]) / (1024.0 * 1024.0)
+    except FileNotFoundError:
+        return 0.0
+    return 0.0
+
+
+def _host_memory_limit_gb() -> float | None:
+    mem_per_node = os.environ.get("SLURM_MEM_PER_NODE", "").strip()
+    if mem_per_node.isdigit():
+        return float(mem_per_node) / 1024.0
+    mem_per_cpu = os.environ.get("SLURM_MEM_PER_CPU", "").strip()
+    cpus_on_node = os.environ.get("SLURM_CPUS_ON_NODE", "").strip()
+    if mem_per_cpu.isdigit() and cpus_on_node.isdigit():
+        return (float(mem_per_cpu) * float(cpus_on_node)) / 1024.0
+    return None
+
+
+def _candidate_batch_sizes(start_batch_size: int, max_batch_size: int) -> list[int]:
+    candidates = []
+    current = _round_batch_size(start_batch_size)
+    max_batch_size = _round_batch_size(max_batch_size)
+    while current <= max_batch_size:
+        candidates.append(current)
+        next_candidate = _round_batch_size(int(math.ceil(current * 1.5)))
+        if next_candidate <= current:
+            next_candidate = current + 256
+        current = next_candidate
+    if len(candidates) == 0 or candidates[-1] != max_batch_size:
+        candidates.append(max_batch_size)
+    return sorted(set(candidates))
+
+
+def _slice_tensor_payload_rows(tensor_payload: dict, row_count: int) -> dict:
+    out = dict(tensor_payload)
+    out["short_tensor"] = tensor_payload["short_tensor"][:row_count]
+    out["long_tensor"] = tensor_payload["long_tensor"][:row_count]
+    out["static_tensor"] = tensor_payload["static_tensor"][:row_count]
+    out["info_df"] = tensor_payload["info_df"].iloc[:row_count].copy()
+    return out
+
+
+def _monitor_peak_rss(stop_event: threading.Event, peak_holder: list[float]) -> None:
+    while not stop_event.is_set():
+        peak_holder[0] = max(peak_holder[0], _current_rss_gb())
+        stop_event.wait(0.05)
+
+
+def _batch_cache_path(
+    *,
+    run_config: dict,
+    reference_runtime,
+    predictor_states: list[dict],
+    device_name: str,
+    total_memory_gb: float,
+    host_memory_limit_gb: float | None,
+) -> str:
+    signature = _runtime_batch_signature(run_config, reference_runtime, predictor_states)
+    gpu_key = _normalize_gpu_name(device_name)
+    gpu_mem_key = int(round(total_memory_gb * 10.0))
+    host_mem_key = "na" if host_memory_limit_gb is None else str(int(round(host_memory_limit_gb * 10.0)))
+    filename = f"{gpu_key}_gpumem{gpu_mem_key}_hostmem{host_mem_key}_{signature}.json"
+    return os.path.join(DEFAULT_GPU_BATCH_CACHE_ROOT, filename)
+
+
+def _load_batch_cache(cache_path: str) -> dict | None:
+    if not os.path.exists(cache_path):
+        return None
+    with open(cache_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_batch_cache(cache_path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    tmp_path = f"{cache_path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp_path, cache_path)
+
+
+def _write_worker_batch_metadata(
+    *,
+    run_dir: str,
+    job_id: str,
+    cache_path: str,
+    selected_batch_size: int,
+    configured_batch_size: int,
+    device_name: str,
+    total_memory_gb: float,
+    host_memory_limit_gb: float | None,
+) -> None:
+    runtime_dir = os.path.join(run_dir, "gpu_work_queue", DEFAULT_GPU_BATCH_RUNTIME_DIRNAME)
+    os.makedirs(runtime_dir, exist_ok=True)
+    payload = {
+        "job_id": str(job_id),
+        "cache_path": str(cache_path),
+        "selected_batch_size": int(selected_batch_size),
+        "configured_batch_size": int(configured_batch_size),
+        "device_name": str(device_name),
+        "total_memory_gb": float(total_memory_gb),
+        "host_memory_limit_gb": (
+            None if host_memory_limit_gb is None else float(host_memory_limit_gb)
+        ),
+        "written_at_epoch": float(time.time()),
+    }
+    path = os.path.join(runtime_dir, f"job_{job_id}.json")
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp_path, path)
+
+
+def _probe_batch_size(
+    *,
+    predictor,
+    tensor_payload: dict,
+    batch_size: int,
+    use_cuda_autocast: bool,
+) -> dict:
+    row_count = int(min(batch_size, tensor_payload["short_tensor"].shape[0]))
+    probe_payload = _slice_tensor_payload_rows(tensor_payload, row_count=row_count)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        baseline_gpu_gb = torch.cuda.memory_allocated() / (1024 ** 3)
+    else:
+        baseline_gpu_gb = 0.0
+    baseline_rss_gb = _current_rss_gb()
+    peak_rss_holder = [baseline_rss_gb]
+    stop_event = threading.Event()
+    monitor_thread = threading.Thread(
+        target=_monitor_peak_rss,
+        args=(stop_event, peak_rss_holder),
+        daemon=True,
+    )
+    monitor_thread.start()
+    success = False
+    oom_error = False
+    try:
+        run_runtime_forward_loaded(
+            predictor=predictor,
+            tensor_payload=probe_payload,
+            batch_size=batch_size,
+            return_info_df=False,
+            use_cuda_autocast=use_cuda_autocast,
+        )
+        success = True
+    except RuntimeError as exc:
+        if "out of memory" in str(exc).lower():
+            oom_error = True
+        else:
+            raise
+    finally:
+        stop_event.set()
+        monitor_thread.join(timeout=1.0)
+        if torch.cuda.is_available():
+            peak_gpu_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
+            torch.cuda.empty_cache()
+        else:
+            peak_gpu_gb = 0.0
+        gc.collect()
+    return {
+        "success": success,
+        "oom_error": oom_error,
+        "row_count": row_count,
+        "baseline_rss_gb": baseline_rss_gb,
+        "peak_rss_gb": peak_rss_holder[0],
+        "baseline_gpu_gb": baseline_gpu_gb,
+        "peak_gpu_gb": peak_gpu_gb,
+    }
+
+
+def _calibrate_forward_batch_size(
+    *,
+    run_config: dict,
+    worker_label: str,
+    reference_runtime,
+    predictor_states: list[dict],
+    reference_payload: dict,
+    use_cuda_autocast: bool,
+    configured_batch_size: int,
+    device_name: str,
+    total_memory_gb: float,
+    host_memory_limit_gb: float | None,
+    cache_path: str,
+) -> int:
+    runtime = predictor_states[0]["runtime"]
+    try:
+        probe_payload = convert_tensor_payload_to_runtime(
+            reference_payload,
+            reference_runtime,
+            runtime,
+            {},
+            site="gpu_batch_probe",
+        )
+    except ValueError:
+        probe_payload = reference_payload
+
+    gpu_specific_batch_size = _gpu_specific_batch_size(device_name, total_memory_gb)
+    memory_bucket_batch_size = _memory_bucket_batch_size(total_memory_gb)
+    old_hardware_limit = (
+        memory_bucket_batch_size
+        if gpu_specific_batch_size is None
+        else min(gpu_specific_batch_size, memory_bucket_batch_size)
+    )
+    probe_limit = min(
+        int(probe_payload["short_tensor"].shape[0]),
+        max(old_hardware_limit, configured_batch_size),
+    )
+    if probe_limit < configured_batch_size:
+        selected = _round_batch_size(probe_limit)
+        return selected
+
+    predictor = predictor_states[0]["predictor"]
+    candidate_results = []
+    best_success = None
+    for candidate in _candidate_batch_sizes(configured_batch_size, probe_limit):
+        probe_result = _probe_batch_size(
+            predictor=predictor,
+            tensor_payload=probe_payload,
+            batch_size=candidate,
+            use_cuda_autocast=use_cuda_autocast,
+        )
+        probe_result["candidate_batch_size"] = int(candidate)
+        candidate_results.append(probe_result)
+        print(timestamped_message(
+            f"[run_map_task_gpu] {worker_label} probe batch_size={candidate} "
+            f"success={probe_result['success']} "
+            f"rss={probe_result['peak_rss_gb']:.2f}GB "
+            f"gpu={probe_result['peak_gpu_gb']:.2f}GB"
+        ))
+        if not probe_result["success"]:
+            break
+        best_success = probe_result
+        baseline_rss = probe_result["baseline_rss_gb"]
+        peak_rss = probe_result["peak_rss_gb"]
+        baseline_gpu = probe_result["baseline_gpu_gb"]
+        peak_gpu = probe_result["peak_gpu_gb"]
+        next_cap = probe_limit
+        if host_memory_limit_gb is not None and peak_rss > baseline_rss:
+            rss_growth = peak_rss - baseline_rss
+            rss_budget = max(host_memory_limit_gb * DEFAULT_GPU_BATCH_PROBE_FRACTION - baseline_rss, 0.0)
+            if rss_budget > 0:
+                next_cap = min(next_cap, int(math.floor(candidate * rss_budget / rss_growth)))
+        if total_memory_gb > 0 and peak_gpu > baseline_gpu:
+            gpu_growth = peak_gpu - baseline_gpu
+            gpu_budget = max(total_memory_gb * DEFAULT_GPU_BATCH_PROBE_FRACTION - baseline_gpu, 0.0)
+            if gpu_budget > 0:
+                next_cap = min(next_cap, int(math.floor(candidate * gpu_budget / gpu_growth)))
+        if next_cap <= candidate:
+            break
+
+    if best_success is None:
+        selected_batch_size = max(DEFAULT_GPU_BATCH_MIN, configured_batch_size // 2)
+    else:
+        selected_batch_size = _round_batch_size(
+            max(DEFAULT_GPU_BATCH_MIN, int(math.floor(best_success["candidate_batch_size"] * 0.8)))
+        )
+        selected_batch_size = min(selected_batch_size, int(best_success["candidate_batch_size"]))
+
+    cache_payload = {
+        "cache_version": 1,
+        "device_name": str(device_name),
+        "total_memory_gb": float(total_memory_gb),
+        "host_memory_limit_gb": None if host_memory_limit_gb is None else float(host_memory_limit_gb),
+        "configured_batch_size": int(configured_batch_size),
+        "selected_batch_size": int(selected_batch_size),
+        "probe_limit": int(probe_limit),
+        "candidate_results": candidate_results,
+        "updated_at_epoch": float(time.time()),
+    }
+    _write_batch_cache(cache_path, cache_payload)
+    print(timestamped_message(
+        f"[run_map_task_gpu] {worker_label} calibrated batch_size={selected_batch_size} "
+        f"on gpu={device_name} memory={total_memory_gb:.1f}GB; "
+        f"host_limit={host_memory_limit_gb if host_memory_limit_gb is not None else 'NA'}GB; "
+        f"cache={cache_path}"
+    ))
+    return selected_batch_size
+
+
+def _resolve_forward_batch_size(
+    run_config: dict,
+    worker_label: str,
+    *,
+    reference_runtime=None,
+    predictor_states: list[dict] | None = None,
+    reference_payload: dict | None = None,
+    run_dir: str | None = None,
+) -> int:
     configured_batch_size = int(run_config.get("forward_batch_size", 512))
     if not torch.cuda.is_available():
         print(timestamped_message(
@@ -103,25 +437,59 @@ def _resolve_forward_batch_size(run_config: dict, worker_label: str) -> int:
     total_memory_gb = (
         torch.cuda.get_device_properties(device_index).total_memory / (1024 ** 3)
     )
-    memory_bucket_batch_size = _memory_bucket_batch_size(total_memory_gb)
-    gpu_specific_batch_size = _gpu_specific_batch_size(device_name, total_memory_gb)
+    host_memory_limit_gb = _host_memory_limit_gb()
+    if reference_runtime is None or predictor_states is None:
+        return configured_batch_size
 
-    if gpu_specific_batch_size is None:
-        resolved_batch_size = min(configured_batch_size, memory_bucket_batch_size)
+    cache_path = _batch_cache_path(
+        run_config=run_config,
+        reference_runtime=reference_runtime,
+        predictor_states=predictor_states,
+        device_name=device_name,
+        total_memory_gb=total_memory_gb,
+        host_memory_limit_gb=host_memory_limit_gb,
+    )
+    cache_payload = _load_batch_cache(cache_path)
+    if cache_payload is not None:
+        resolved_batch_size = int(cache_payload["selected_batch_size"])
         print(timestamped_message(
-            f"[run_map_task_gpu] {worker_label} using fallback batch_size="
-            f"{resolved_batch_size} on gpu={device_name} memory={total_memory_gb:.1f}GB; "
-            f"configured={configured_batch_size}; memory_bucket={memory_bucket_batch_size}"
+            f"[run_map_task_gpu] {worker_label} using cached batch_size={resolved_batch_size} "
+            f"on gpu={device_name} memory={total_memory_gb:.1f}GB; "
+            f"host_limit={host_memory_limit_gb if host_memory_limit_gb is not None else 'NA'}GB; "
+            f"cache={cache_path}"
         ))
-        return resolved_batch_size
+    elif reference_payload is None:
+        resolved_batch_size = configured_batch_size
+        print(timestamped_message(
+            f"[run_map_task_gpu] {worker_label} using configured batch_size={resolved_batch_size} "
+            f"because no cached calibration exists yet and no reference payload is available"
+        ))
+    else:
+        resolved_batch_size = _calibrate_forward_batch_size(
+            run_config=run_config,
+            worker_label=worker_label,
+            reference_runtime=reference_runtime,
+            predictor_states=predictor_states,
+            reference_payload=reference_payload,
+            use_cuda_autocast=bool(run_config.get("use_cuda_autocast", True)),
+            configured_batch_size=configured_batch_size,
+            device_name=device_name,
+            total_memory_gb=total_memory_gb,
+            host_memory_limit_gb=host_memory_limit_gb,
+            cache_path=cache_path,
+        )
 
-    resolved_batch_size = min(gpu_specific_batch_size, memory_bucket_batch_size)
-    print(timestamped_message(
-        f"[run_map_task_gpu] {worker_label} using adaptive batch_size={resolved_batch_size} "
-        f"on gpu={device_name} memory={total_memory_gb:.1f}GB; "
-        f"gpu_lookup={gpu_specific_batch_size}; memory_bucket={memory_bucket_batch_size}; "
-        f"configured_default={configured_batch_size}"
-    ))
+    if run_dir is not None:
+        _write_worker_batch_metadata(
+            run_dir=run_dir,
+            job_id=str(os.environ.get("SLURM_JOB_ID", "local")),
+            cache_path=cache_path,
+            selected_batch_size=resolved_batch_size,
+            configured_batch_size=configured_batch_size,
+            device_name=device_name,
+            total_memory_gb=total_memory_gb,
+            host_memory_limit_gb=host_memory_limit_gb,
+        )
     return resolved_batch_size
 
 
@@ -506,9 +874,17 @@ def _run_static_gpu_task(args, run_config: dict, manifest_df: pd.DataFrame, mode
 
     use_cuda_autocast = bool(run_config.get("use_cuda_autocast", True))
     prepared_dir = run_config["prepared_dir"]
+    first_task_row = task_rows.iloc[0]
+    reference_payload = load_prepared_tensor_payload(
+        _prepared_paths(prepared_dir, int(first_task_row["task_id"]))
+    )
     forward_batch_size = _resolve_forward_batch_size(
         run_config,
         worker_label=f"gpu job {task_id}",
+        reference_runtime=reference_runtime,
+        predictor_states=predictor_states,
+        reference_payload=reference_payload,
+        run_dir=os.path.dirname(args.manifest_path),
     )
     completed_task_count = 0
     static_job_t0 = time.perf_counter()
@@ -571,7 +947,7 @@ def _run_dynamic_gpu_worker(args, run_config: dict, manifest_df: pd.DataFrame, m
     job_id = str(os.environ.get("SLURM_JOB_ID", "local"))
     gpu_pool = str(os.environ.get("GPU_POOL", "unknown")).strip().lower()
     worker_label = f"gpu worker {worker_id} job {job_id}"
-    forward_batch_size = _resolve_forward_batch_size(run_config, worker_label=worker_label)
+    forward_batch_size = None
     endgame_flag_path = _serc_only_endgame_flag_path(run_dir)
 
     manifest_df = (
@@ -692,6 +1068,18 @@ def _run_dynamic_gpu_worker(args, run_config: dict, manifest_df: pd.DataFrame, m
             f"tile={claimed_task_row['tile_name']} {_overall_progress_label(claimed_task_row, total_fine_tasks)}"
         ))
         try:
+            if forward_batch_size is None:
+                reference_payload = load_prepared_tensor_payload(
+                    _prepared_paths(prepared_dir, fine_task_id)
+                )
+                forward_batch_size = _resolve_forward_batch_size(
+                    run_config,
+                    worker_label=worker_label,
+                    reference_runtime=reference_runtime,
+                    predictor_states=predictor_states,
+                    reference_payload=reference_payload,
+                    run_dir=run_dir,
+                )
             task_elapsed = _process_single_task(
                 task_row=claimed_task_row,
                 prepared_dir=prepared_dir,

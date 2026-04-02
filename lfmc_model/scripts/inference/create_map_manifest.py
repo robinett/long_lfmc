@@ -684,13 +684,6 @@ def main():
             if source_resolution is not None
             else STATIC_NC_PATH
         ),
-        "climate_path": (
-            source_resolution["climate_path"]
-            if source_resolution is not None
-            else CLIMATE_NC_PATH
-        ),
-        "allowed_climate_codes": allowed_climate_codes,
-        "excluded_climate_codes": excluded_climate_codes,
         "tile_metadata_dir": tile_meta_dir,
         "prepared_dir": prepared_dir,
         "shard_dir": shard_dir,
