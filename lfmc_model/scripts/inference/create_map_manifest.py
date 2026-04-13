@@ -224,6 +224,39 @@ def main():
     )
     if merge_blocks_per_job <= 0:
         raise ValueError("submission.merge_blocks_per_job must be >= 1")
+    max_prepared_ahead_of_completed_shards = int(
+        config_or_override(
+            None,
+            cfg,
+            "submission",
+            "max_prepared_ahead_of_completed_shards",
+            default=1000,
+        )
+    )
+    if max_prepared_ahead_of_completed_shards <= 0:
+        raise ValueError(
+            "submission.max_prepared_ahead_of_completed_shards must be >= 1"
+        )
+    prepare_throttle_sleep_seconds = int(
+        config_or_override(
+            None,
+            cfg,
+            "submission",
+            "prepare_throttle_sleep_seconds",
+            default=30,
+        )
+    )
+    if prepare_throttle_sleep_seconds <= 0:
+        raise ValueError("submission.prepare_throttle_sleep_seconds must be >= 1")
+    delete_prepared_payload_after_shard_complete = bool(
+        config_or_override(
+            None,
+            cfg,
+            "submission",
+            "delete_prepared_payload_after_shard_complete",
+            default=True,
+        )
+    )
     requested_start = (
         pd.Timestamp(requested_start_raw).normalize()
         if requested_start_raw not in {None, "", "None"}
@@ -646,6 +679,9 @@ def main():
         "num_gpu_job_tasks": gpu_job_task_n,
         "merge_blocks_per_job": merge_blocks_per_job,
         "num_merge_tasks": merge_task_n,
+        "max_prepared_ahead_of_completed_shards": max_prepared_ahead_of_completed_shards,
+        "prepare_throttle_sleep_seconds": prepare_throttle_sleep_seconds,
+        "delete_prepared_payload_after_shard_complete": delete_prepared_payload_after_shard_complete,
         "requested_start_date": str(requested_start.date()),
         "requested_end_date": str(requested_end.date()),
         "safe_start_date": str(safe_start.date()),

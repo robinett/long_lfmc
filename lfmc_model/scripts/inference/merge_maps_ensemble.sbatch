@@ -35,6 +35,13 @@ if [[ "${MERGE_INITIALIZE_ONLY:-0}" == "1" ]]; then
     exit 0
 fi
 
+if [[ "${MERGE_ALL_TASKS:-0}" == "1" ]]; then
+    echo "Merging all manifest shards in a single task for ${MANIFEST_PATH}"
+    python3 -u "${script_dir}/merge_map_shards.py" \
+        --manifest_path "${MANIFEST_PATH}"
+    exit 0
+fi
+
 if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
     echo "SLURM_ARRAY_TASK_ID must be set for merge array tasks" >&2
     exit 1

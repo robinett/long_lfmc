@@ -5,7 +5,6 @@ import copy
 import datetime as dt
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -77,15 +76,6 @@ def _year_sequence(start_year: int, end_year: int) -> list[int]:
     return list(range(end_year, start_year - 1, -1))
 
 
-def _cleanup_year_run_artifacts(year_run_root: Path, run_dir: Path):
-    if run_dir.exists():
-        print(f"[create_maps_multiyear] removing successful year run directory {run_dir}")
-        shutil.rmtree(run_dir)
-    if year_run_root.exists() and not any(year_run_root.iterdir()):
-        print(f"[create_maps_multiyear] removing empty year container {year_run_root}")
-        year_run_root.rmdir()
-
-
 def _write_year_config(
     cfg: dict,
     year: int,
@@ -109,9 +99,8 @@ def _write_year_config(
     cfg_year["paths"]["run_root"] = str(base_run_root / "years" / f"year_{year:04d}")
     cfg_year["paths"]["persistent_out_zarr_path"] = str(persistent_out_zarr_path)
 
-    # Multiyear mode needs a blocking coordinator and cleanup after successful validation.
+    # Multiyear mode needs a blocking coordinator through validation.
     cfg_year["submission"]["wait_for_validation_completion"] = True
-    cfg_year["submission"]["cleanup_prepared_tensors_after_success"] = True
 
     config_path = config_dir / f"map_config_year_{year:04d}.yaml"
     with open(config_path, "w") as f:
@@ -138,17 +127,10 @@ def main():
 
     completed_years = _completed_years(status_dir, start_year, end_year)
     year_sequence = _year_sequence(start_year, end_year)
-    cleanup_year_run_dir_after_success = bool(
-        get_cfg(cfg, "multiyear", "cleanup_year_run_dir_after_success", default=True)
-    )
 
     print(
         f"[create_maps_multiyear] years={start_year}-{end_year}; "
         f"persistent_out_zarr_path={persistent_out_zarr_path}"
-    )
-    print(
-        f"[create_maps_multiyear] cleanup_year_run_dir_after_success="
-        f"{cleanup_year_run_dir_after_success}"
     )
     if args.resume and completed_years:
         next_incomplete_year = next(
@@ -220,22 +202,12 @@ def main():
             "year_config_path": str(year_config_path),
             "persistent_out_zarr_path": str(persistent_out_zarr_path),
             "manifest_only": bool(args.manifest_only),
-            "run_dir_removed": False,
         }
         with open(marker_path, "w") as f:
             json.dump(marker_payload, f, indent=2, sort_keys=True)
         print(
             f"[create_maps_multiyear] completed year {year}; marker={marker_path}"
         )
-        if cleanup_year_run_dir_after_success and not args.manifest_only:
-            _cleanup_year_run_artifacts(year_run_root, latest_run_dir)
-            marker_payload["run_dir_removed"] = True
-            marker_payload["run_dir_removed_at"] = dt.datetime.now().isoformat(timespec="seconds")
-            with open(marker_path, "w") as f:
-                json.dump(marker_payload, f, indent=2, sort_keys=True)
-            print(
-                f"[create_maps_multiyear] cleaned year {year} scratch artifacts after success"
-            )
 
 
 if __name__ == "__main__":

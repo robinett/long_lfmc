@@ -21,9 +21,15 @@ if [[ -z "${MANIFEST_PATH:-}" ]]; then
     exit 1
 fi
 
-echo "Running CPU prepare array task ${SLURM_ARRAY_TASK_ID}"
+prepare_task_id="${PREPARE_TASK_ID:-${SLURM_ARRAY_TASK_ID:-}}"
+if [[ -z "${prepare_task_id}" ]]; then
+    echo "PREPARE_TASK_ID or SLURM_ARRAY_TASK_ID must be set before running ${BASH_SOURCE[0]}" >&2
+    exit 1
+fi
+
+echo "Running CPU prepare task ${prepare_task_id}"
 echo "manifest_path=${MANIFEST_PATH}"
 
 python3 -u "${script_dir}/prepare_map_task.py" \
     --manifest_path "${MANIFEST_PATH}" \
-    --task_id "${SLURM_ARRAY_TASK_ID}"
+    --task_id "${prepare_task_id}"

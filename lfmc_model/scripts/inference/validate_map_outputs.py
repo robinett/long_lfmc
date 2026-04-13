@@ -119,6 +119,10 @@ def _extract_point_series(
     return out
 
 
+def _normalize_dates_to_midnight(dates) -> np.ndarray:
+    return pd.to_datetime(dates).normalize().values
+
+
 def _write_prediction_timeseries_plot(
     infer_df: pd.DataFrame,
     save_path: str,
@@ -144,7 +148,7 @@ def _write_prediction_timeseries_plot(
     lfmc_upper_vals = [infer_upper]
 
     if train_pred_dates is not None and train_pred_vals is not None and len(train_pred_vals) > 0:
-        train_pred_dates = pd.to_datetime(train_pred_dates).values
+        train_pred_dates = _normalize_dates_to_midnight(train_pred_dates)
         lfmc_dates.append(train_pred_dates)
         lfmc_vals.append(np.asarray(train_pred_vals, dtype=float))
         lfmc_labels.append("lfmc_train_pred")
@@ -161,7 +165,7 @@ def _write_prediction_timeseries_plot(
             lfmc_upper_vals.append(None)
 
     if measurement_dates is not None and measurement_vals is not None and len(measurement_vals) > 0:
-        lfmc_dates.append(pd.to_datetime(measurement_dates).values)
+        lfmc_dates.append(_normalize_dates_to_midnight(measurement_dates))
         lfmc_vals.append(np.asarray(measurement_vals, dtype=float))
         lfmc_labels.append("lfmc_true")
         lfmc_linestyles.append("")
@@ -225,7 +229,7 @@ def _write_validation_site_plots(
                 missing_site_keys.append(site_key)
                 continue
             site_data = site_error[site_key]
-            dates = pd.to_datetime(site_data["dates"])
+            dates = pd.to_datetime(site_data["dates"]).normalize()
             keep = (dates >= month_start) & (dates <= month_end)
             if not np.any(keep):
                 continue
@@ -293,7 +297,7 @@ def _write_validation_site_plots(
             train_pred_std=train_pred_std,
         )
         infer_on_obs = []
-        obs_dates_ts = pd.to_datetime(measure_dates)
+        obs_dates_ts = pd.to_datetime(measure_dates).normalize()
         infer_series = pd.Series(infer_vals, index=pd.to_datetime(infer_dates))
         for obs_date in obs_dates_ts:
             infer_on_obs.append(float(infer_series.get(obs_date, np.nan)))

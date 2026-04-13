@@ -122,10 +122,12 @@ job_failed() {
     esac
 }
 
-job_retryable() {
+state_in_csv() {
     local state="$1"
+    local csv_states="$2"
     local retry_state=""
-    IFS=',' read -r -a retryable_states <<< "${gpu_retry_states}"
+    local retryable_states=()
+    IFS=',' read -r -a retryable_states <<< "${csv_states}"
     for retry_state in "${retryable_states[@]}"; do
         retry_state="$(echo "${retry_state}" | tr -d '[:space:]')"
         if [[ -n "${retry_state}" && "${state}" == "${retry_state}" ]]; then
@@ -133,6 +135,14 @@ job_retryable() {
         fi
     done
     return 1
+}
+
+job_retryable() {
+    state_in_csv "$1" "${gpu_retry_states}"
+}
+
+prepare_retryable() {
+    state_in_csv "$1" "${prepare_retry_states}"
 }
 
 hhmmss_to_seconds() {
@@ -286,7 +296,12 @@ PYMULTI
 }
 
 count_prepared_reference_payloads() {
-    find "${latest_run_dir}/prepared_tensors" -maxdepth 1 -type f -name '*_reference.pt' | wc -l
+    local prepared_dir="${latest_run_dir}/prepared_tensors"
+    if [[ ! -d "${prepared_dir}" ]]; then
+        printf '0\n'
+        return 0
+    fi
+    find "${prepared_dir}" -maxdepth 1 -type f -name '*_reference.pt' | wc -l
 }
 
 count_shards_on_disk() {
@@ -326,6 +341,7 @@ requested_start_date="${REQUESTED_START_DATE:-$(cfg_value data requested_start_d
 requested_end_date="${REQUESTED_END_DATE:-$(cfg_value data requested_end_date 2024-12-31)}"
 array_concurrency="${ARRAY_CONCURRENCY:-$(cfg_value submission array_concurrency 32)}"
 tasks_per_job="${TASKS_PER_JOB:-$(cfg_value submission tasks_per_job 1)}"
+max_prepared_ahead_of_completed_shards="${MAX_PREPARED_AHEAD_OF_COMPLETED_SHARDS:-$(cfg_value submission max_prepared_ahead_of_completed_shards 1000)}"
 use_gpu_forward="${USE_GPU_FORWARD:-$(cfg_value submission use_gpu_forward false)}"
 dynamic_gpu_work_queue="${DYNAMIC_GPU_WORK_QUEUE:-$(cfg_value submission dynamic_gpu_work_queue false)}"
 gpu_fine_tasks_per_job="${GPU_FINE_TASKS_PER_JOB:-$(cfg_value submission gpu_fine_tasks_per_job 1)}"
@@ -353,6 +369,11 @@ serc_endgame_min_samples="${SERC_ENDGAME_MIN_SAMPLES:-$(cfg_value submission ser
 serc_endgame_recent_completion_count="${SERC_ENDGAME_RECENT_COMPLETION_COUNT:-$(cfg_value submission serc_endgame_recent_completion_count 32)}"
 gpu_max_retries="${GPU_MAX_RETRIES:-$(cfg_value submission gpu_max_retries 20)}"
 gpu_retry_states="${GPU_RETRY_STATES:-$(cfg_value submission gpu_retry_states PREEMPTED,REVOKED,BOOT_FAIL,NODE_FAIL)}"
+prepare_time_limit="${PREPARE_TIME_LIMIT:-$(cfg_value submission prepare_time_limit 01:00:00)}"
+prepare_cpus_per_task="${PREPARE_CPUS_PER_TASK:-$(cfg_value submission prepare_cpus_per_task 8)}"
+prepare_mem="${PREPARE_MEM:-$(cfg_value submission prepare_mem 128G)}"
+prepare_max_retries="${PREPARE_MAX_RETRIES:-$(cfg_value submission prepare_max_retries 8)}"
+prepare_retry_states="${PREPARE_RETRY_STATES:-$(cfg_value submission prepare_retry_states PREEMPTED,REVOKED,BOOT_FAIL,NODE_FAIL,TIMEOUT,OUT_OF_MEMORY)}"
 merge_blocks_per_job="${MERGE_BLOCKS_PER_JOB:-$(cfg_value submission merge_blocks_per_job 1)}"
 model_type="${MODEL_TYPE:-$(cfg_value ensemble model_type standard)}"
 cleanup_prepared_tensors_after_success="${CLEANUP_PREPARED_TENSORS_AFTER_SUCCESS:-$(cfg_value submission cleanup_prepared_tensors_after_success false)}"
@@ -368,6 +389,8 @@ multiyear_year_started_at_epoch="${MULTIYEAR_YEAR_STARTED_AT_EPOCH:-}"
 start_from_gpu="${START_FROM_GPU:-false}"
 existing_run_dir="${EXISTING_RUN_DIR:-}"
 auto_resume_complete_run="${AUTO_RESUME_COMPLETE_RUN:-true}"
+resume_partial_run="false"
+resume_completed_run="false"
 
 find_resumable_run_dir() {
     local run_root="$1"
@@ -403,32 +426,91 @@ with open(run_config_path, "r", encoding="utf-8") as f:
     run_config = json.load(f)
 
 out_zarr_path = run_config.get("out_zarr_path") or run_config.get("persistent_out_zarr_path")
-if out_zarr_path and Path(out_zarr_path).exists():
+persistent_out_zarr_path = run_config.get("persistent_out_zarr_path")
+if (not persistent_out_zarr_path) and out_zarr_path and Path(out_zarr_path).exists():
     raise SystemExit(1)
 
 with open(manifest_path, newline="", encoding="utf-8") as f:
     task_count = sum(1 for _ in csv.DictReader(f))
 
-prepared_count = sum(1 for p in prepared_dir.glob("*") if p.is_file()) if prepared_dir.exists() else 0
 shard_count = sum(1 for p in shards_dir.glob("*.npz")) if shards_dir.exists() else 0
 completed_count = sum(1 for _ in completed_log.open("r", encoding="utf-8")) if completed_log.exists() else 0
 
 if task_count <= 0:
     raise SystemExit(1)
-if prepared_count != task_count or shard_count != task_count or completed_count != task_count:
+if shard_count != task_count or completed_count != task_count:
     raise SystemExit(1)
 
 print(str(run_dir))
 PYRESUME
 }
 
+find_partial_run_dir() {
+    local run_root="$1"
+    RUN_ROOT_FOR_RESUME="${run_root}" python3 - <<'PYPARTIAL'
+import csv
+import json
+import os
+from pathlib import Path
+
+run_root = Path(os.environ["RUN_ROOT_FOR_RESUME"])
+if not run_root.exists():
+    raise SystemExit(1)
+
+run_dirs = sorted(
+    [p for p in run_root.iterdir() if p.is_dir() and p.name.startswith("run_")],
+    key=lambda p: p.stat().st_mtime,
+    reverse=True,
+)
+if not run_dirs:
+    raise SystemExit(1)
+
+run_dir = run_dirs[0]
+manifest_path = run_dir / "manifest.csv"
+run_config_path = run_dir / "run_config.json"
+prepared_dir = run_dir / "prepared_tensors"
+shards_dir = run_dir / "shards"
+
+if not manifest_path.exists() or not run_config_path.exists():
+    raise SystemExit(1)
+
+with open(run_config_path, "r", encoding="utf-8") as f:
+    run_config = json.load(f)
+
+out_zarr_path = run_config.get("out_zarr_path") or run_config.get("persistent_out_zarr_path")
+persistent_out_zarr_path = run_config.get("persistent_out_zarr_path")
+if (not persistent_out_zarr_path) and out_zarr_path and Path(out_zarr_path).exists():
+    raise SystemExit(1)
+
+with open(manifest_path, newline="", encoding="utf-8") as f:
+    task_count = sum(1 for _ in csv.DictReader(f))
+
+prepared_count = sum(1 for p in prepared_dir.glob("*_reference.pt")) if prepared_dir.exists() else 0
+shard_count = sum(1 for p in shards_dir.glob("*.npz")) if shards_dir.exists() else 0
+
+if task_count <= 0:
+    raise SystemExit(1)
+if shard_count <= 0 and prepared_count <= 0:
+    raise SystemExit(1)
+if shard_count >= task_count:
+    raise SystemExit(1)
+
+print(str(run_dir))
+PYPARTIAL
+}
+
 configured_run_root="${RUN_ROOT:-$(cfg_value paths run_root '')}"
 if [[ "${start_from_gpu}" != "true" && -z "${existing_run_dir}" && "${auto_resume_complete_run}" == "true" && -n "${configured_run_root}" ]]; then
     if resumable_run_dir="$(find_resumable_run_dir "${configured_run_root}")"; then
-        start_from_gpu="true"
+        resume_completed_run="true"
         existing_run_dir="${resumable_run_dir}"
         echo "Detected completed-shard run ready for resume: ${existing_run_dir}"
         echo "Skipping manifest/prepare/GPU submission and resuming at merge/validation."
+    elif partial_run_dir="$(find_partial_run_dir "${configured_run_root}")"; then
+        existing_run_dir="${partial_run_dir}"
+        resume_partial_run="true"
+        echo "Detected partially completed run ready for resume: ${existing_run_dir}"
+        echo "Skipping manifest rebuild and resuming prepare/GPU scheduling from the existing run."
     fi
 fi
 
@@ -477,11 +559,17 @@ if [[ -n "${max_tiles}" ]]; then
     manifest_args+=(--max_tiles "${max_tiles}")
 fi
 
-if [[ "${start_from_gpu}" == "true" ]]; then
+if [[ "${start_from_gpu}" == "true" || "${resume_partial_run}" == "true" || "${resume_completed_run}" == "true" ]]; then
     latest_run_dir="${existing_run_dir}"
     manifest_path="${latest_run_dir}/manifest.csv"
     run_name="$(basename "${latest_run_dir}")"
-    echo "GPU-only restart mode active; reusing run directory ${latest_run_dir}"
+    if [[ "${resume_completed_run}" == "true" ]]; then
+        echo "Completed-run resume mode active; reusing run directory ${latest_run_dir}"
+    elif [[ "${start_from_gpu}" == "true" ]]; then
+        echo "GPU-only restart mode active; reusing run directory ${latest_run_dir}"
+    else
+        echo "Partial-run resume active; reusing run directory ${latest_run_dir}"
+    fi
     if [[ ! -d "${latest_run_dir}" ]]; then
         echo "Existing run directory does not exist: ${latest_run_dir}" >&2
         exit 1
@@ -494,6 +582,22 @@ if [[ "${start_from_gpu}" == "true" ]]; then
         echo "Existing run_config.json not found in ${latest_run_dir}" >&2
         exit 1
     fi
+    persistent_out_zarr_path="$(
+        python3 - <<PYRUNCFG
+import json
+from pathlib import Path
+run_config = json.loads(Path("${latest_run_dir}/run_config.json").read_text())
+print(run_config.get("persistent_out_zarr_path") or "")
+PYRUNCFG
+    )"
+    out_zarr_path="$(
+        python3 - <<PYRUNCFG
+import json
+from pathlib import Path
+run_config = json.loads(Path("${latest_run_dir}/run_config.json").read_text())
+print(run_config.get("out_zarr_path") or "")
+PYRUNCFG
+    )"
 else
     echo "Submitting manifest build job..."
     manifest_job_id="$(submit_with_retry \
@@ -691,6 +795,24 @@ submit_gpu_job() {
     printf '%s\n' "${gpu_job_id}"
 }
 
+submit_prepare_job() {
+    local prepare_task_id="$1"
+    local prepare_job_id=""
+    if ! prepare_job_id="$(submit_with_retry \
+        "prepare_maps_${prepare_task_id}" \
+        sbatch \
+            --parsable \
+            --job-name="prepare_maps_${prepare_task_id}" \
+            --time="${prepare_time_limit}" \
+            --cpus-per-task="${prepare_cpus_per_task}" \
+            --mem="${prepare_mem}" \
+            --export=ALL,MANIFEST_PATH="${manifest_path}",PREPARE_TASK_ID="${prepare_task_id}" \
+            "${script_dir}/prepare_maps_ensemble.sbatch")"; then
+        return 1
+    fi
+    printf '%s\n' "${prepare_job_id}"
+}
+
 num_fine_tasks="$(python3 - <<PYCOUNT
 import pandas as pd
 df = pd.read_csv("${manifest_path}")
@@ -710,6 +832,25 @@ print(int(df["job_task_id"].max()) + 1)
 PYCOUNT
 )"
 
+declare -a prepare_task_fine_counts
+mapfile -t prepare_task_count_lines < <(python3 - <<PYCOUNTS
+import pandas as pd
+
+df = pd.read_csv("${manifest_path}")
+counts = (
+    df.groupby("job_task_id")
+    .size()
+    .sort_index()
+)
+for job_task_id, count in counts.items():
+    print(f"{int(job_task_id)}|{int(count)}")
+PYCOUNTS
+)
+for line in "${prepare_task_count_lines[@]}"; do
+    IFS='|' read -r prepare_task_id prepare_fine_count <<< "${line}"
+    prepare_task_fine_counts[${prepare_task_id}]="${prepare_fine_count}"
+done
+
 num_gpu_job_tasks=0
 if [[ "${dynamic_gpu_work_queue}" != "true" ]]; then
     num_gpu_job_tasks="$(python3 - <<PYCOUNT
@@ -727,8 +868,8 @@ print(int(df["merge_task_id"].max()) + 1)
 PYCOUNT
 )"
 
-prepared_tensor_count="$(find "${latest_run_dir}/prepared_tensors" -maxdepth 1 -type f | wc -l)"
-if [[ "${start_from_gpu}" == "true" ]]; then
+prepared_tensor_count="$(count_prepared_reference_payloads)"
+if [[ "${start_from_gpu}" == "true" && "${resume_completed_run}" != "true" ]]; then
     if [[ "${prepared_tensor_count}" -ne "${num_fine_tasks}" ]]; then
         echo "GPU-only restart requested, but prepared tensor count ${prepared_tensor_count} does not match manifest tasks ${num_fine_tasks}" >&2
         exit 1
@@ -748,20 +889,53 @@ echo "merge_blocks_per_job=${merge_blocks_per_job}; num_merge_tasks=${num_merge_
 after_gpu_dependency=""
 if [[ "${use_gpu_forward}" == "true" ]]; then
     if [[ "${dynamic_gpu_work_queue}" == "true" ]]; then
+        if [[ "${resume_completed_run}" == "true" ]]; then
+            echo "Completed-run resume mode: skipping CPU prepare and GPU scheduling because all shards are already complete in ${latest_run_dir}"
+        else
         declare -a gpu_job_ids
         declare -a gpu_job_pool
         declare -a gpu_retry_counts
         declare -a gpu_submission_counts
         declare -a gpu_endgame_cancelled
-        prepare_job_id=""
+        declare -a prepare_job_ids
+        declare -a prepare_completed_flags
+        declare -a prepare_retry_counts
+        declare -a prepare_submission_counts
+        next_prepare_task_id=0
         if [[ "${start_from_gpu}" == "true" ]]; then
             echo "GPU-only restart mode: skipping CPU prepare array and starting directly from prepared tensors in ${latest_run_dir}"
+        elif [[ "${resume_partial_run}" == "true" ]]; then
+            echo "Partial-run resume mode: rebuilding prepare submission state from ${latest_run_dir}"
+            mapfile -t prepare_resume_lines < <(python3 - <<PYRESUME_PREP
+import csv
+from pathlib import Path
+
+manifest_path = Path("${manifest_path}")
+prepared_dir = Path("${latest_run_dir}") / "prepared_tensors"
+
+groups = {}
+with manifest_path.open(newline="", encoding="utf-8") as f:
+    for row in csv.DictReader(f):
+        job_task_id = int(row["job_task_id"])
+        fine_task_id = int(row["task_id"])
+        shard_exists = Path(row["shard_path"]).exists()
+        prepared_exists = (prepared_dir / f"task_{fine_task_id:06d}_reference.pt").exists()
+        groups.setdefault(job_task_id, []).append(shard_exists or prepared_exists)
+
+for job_task_id in sorted(groups):
+    materialized = int(all(groups[job_task_id]))
+    print(f"{job_task_id}|{materialized}")
+PYRESUME_PREP
+            )
+            for line in "${prepare_resume_lines[@]}"; do
+                IFS='|' read -r prepare_task_id materialized_flag <<< "${line}"
+                prepare_completed_flags[${prepare_task_id}]="${materialized_flag}"
+            done
+            while [[ "${next_prepare_task_id}" -lt "${num_job_tasks}" && "${prepare_completed_flags[$next_prepare_task_id]:-0}" == "1" ]]; do
+                next_prepare_task_id=$(( next_prepare_task_id + 1 ))
+            done
         else
-            prepare_job_id="$(submit_with_retry \
-                "prepare_maps_ensemble" \
-                sbatch --parsable --array="0-$(( num_job_tasks - 1 ))%${array_concurrency}" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/prepare_maps_ensemble.sbatch")"
-            echo "Submitted CPU prepare array job ${prepare_job_id}"
-            echo "Monitoring prepare tasks and submitting GPU jobs under shared lock budget ${gpu_max_jobs} from ${gpu_lock_dir}"
+            echo "Monitoring incremental CPU prepare jobs and submitting GPU jobs under shared lock budget ${gpu_max_jobs} from ${gpu_lock_dir}"
         fi
 
         echo "GPU scheduler config: serc_partition=${serc_partition}; serc_cap=${gpu_max_jobs}; owners_partition=${owners_partition}; owners_cap=${owners_gpu_max_jobs}; retry_states=${gpu_retry_states}; max_retries=${gpu_max_retries}; dynamic_gpu_work_queue=${dynamic_gpu_work_queue}"
@@ -783,6 +957,9 @@ if [[ "${use_gpu_forward}" == "true" ]]; then
             running_serc_jobs=0
             pending_serc_jobs=0
             active_owner_jobs=0
+            active_prepare_jobs=0
+            running_prepare_jobs=0
+            pending_prepare_jobs=0
 
             completed_shards="$(count_shards_on_disk)"
             prepared_reference_count="$(count_prepared_reference_payloads)"
@@ -790,17 +967,52 @@ if [[ "${use_gpu_forward}" == "true" ]]; then
             if [[ "${remaining_shards}" -lt 0 ]]; then
                 remaining_shards=0
             fi
-            prepare_complete=0
-            if [[ "${start_from_gpu}" == "true" || "${prepared_reference_count}" -ge "${num_fine_tasks}" ]]; then
-                prepare_complete=1
-            fi
             if [[ -f "$(serc_endgame_flag_path)" ]]; then
                 serc_only_endgame_active=1
             fi
-            if [[ -n "${prepare_job_id}" ]] && array_has_failed_tasks "${prepare_job_id}" >/dev/null; then
-                failed_prepare_state="$(array_has_failed_tasks "${prepare_job_id}")"
-                echo "Prepare array ${prepare_job_id} encountered failed task state ${failed_prepare_state}; aborting GPU submission monitor." >&2
-                exit 1
+            if [[ "${start_from_gpu}" != "true" ]]; then
+                for (( prepare_task_id=0; prepare_task_id<next_prepare_task_id; prepare_task_id++ )); do
+                    prepare_job_id="${prepare_job_ids[$prepare_task_id]:-}"
+                    if [[ -z "${prepare_job_id}" ]]; then
+                        continue
+                    fi
+                    prepare_job_state="$(job_state "${prepare_job_id}")"
+                    if [[ "${prepare_job_state}" == "COMPLETED" ]]; then
+                        prepare_job_ids[$prepare_task_id]=""
+                        prepare_completed_flags[$prepare_task_id]=1
+                        progress_made=1
+                        echo "Prepare worker job ${prepare_job_id} for prepare_task_id=${prepare_task_id} completed"
+                        continue
+                    fi
+                    if job_failed "${prepare_job_state}"; then
+                        if prepare_retryable "${prepare_job_state}"; then
+                            retry_count=$(( ${prepare_retry_counts[$prepare_task_id]:-0} + 1 ))
+                            prepare_retry_counts[$prepare_task_id]="${retry_count}"
+                            if [[ "${retry_count}" -gt "${prepare_max_retries}" ]]; then
+                                echo "Prepare worker job ${prepare_job_id} for prepare_task_id=${prepare_task_id} exceeded retry cap ${prepare_max_retries} after state ${prepare_job_state}" >&2
+                                exit 1
+                            fi
+                            prepare_job_ids[$prepare_task_id]=""
+                            progress_made=1
+                            echo "Prepare worker job ${prepare_job_id} for prepare_task_id=${prepare_task_id} ended with retryable state ${prepare_job_state}; retry ${retry_count}/${prepare_max_retries} queued"
+                            continue
+                        fi
+                        echo "Prepare worker job ${prepare_job_id} for prepare_task_id=${prepare_task_id} failed with non-retryable state ${prepare_job_state}; aborting GPU submission monitor." >&2
+                        exit 1
+                    fi
+                    active_prepare_jobs=$(( active_prepare_jobs + 1 ))
+                    if [[ "${prepare_job_state}" == "PENDING" || "${prepare_job_state}" == "CONFIGURING" ]]; then
+                        pending_prepare_jobs=$(( pending_prepare_jobs + 1 ))
+                    else
+                        running_prepare_jobs=$(( running_prepare_jobs + 1 ))
+                    fi
+                done
+            fi
+            prepare_complete=0
+            if [[ "${start_from_gpu}" == "true" ]]; then
+                prepare_complete=1
+            elif [[ "${next_prepare_task_id}" -ge "${num_job_tasks}" && "${active_prepare_jobs}" -eq 0 ]]; then
+                prepare_complete=1
             fi
 
             for (( gpu_task_id=0; gpu_task_id<next_gpu_task_id; gpu_task_id++ )); do
@@ -908,19 +1120,25 @@ if [[ "${use_gpu_forward}" == "true" ]]; then
             year_eta_dhms="NA"
             overall_eta_seconds="NA"
             overall_eta_dhms="NA"
-            if [[ "${serc_only_endgame}" == "true" && "${serc_only_endgame_active}" != "1" && "${remaining_shards}" -gt 0 && "${gpu_max_jobs}" -gt 0 ]]; then
-                if serc_estimated_task_seconds="$(estimate_serc_task_seconds)"; then
-                    serc_estimated_finish_seconds=$(( (remaining_shards * serc_estimated_task_seconds + gpu_max_jobs - 1) / gpu_max_jobs ))
-                    if [[ "${serc_estimated_finish_seconds}" -le $(( serc_endgame_minutes_threshold * 60 )) ]]; then
-                        serc_only_endgame_active=1
-                        activate_serc_only_endgame "${remaining_shards}" "${gpu_max_jobs}" "${serc_estimated_task_seconds}" "${serc_estimated_finish_seconds}"
-                        progress_made=1
+            if [[ "${remaining_shards}" -le 0 ]]; then
+                year_eta_seconds="0"
+                year_eta_dhms="0:00:00:00"
+                overall_eta_seconds="0"
+                overall_eta_dhms="0:00:00:00"
+            else
+                if [[ "${serc_only_endgame}" == "true" && "${serc_only_endgame_active}" != "1" && "${gpu_max_jobs}" -gt 0 ]]; then
+                    if serc_estimated_task_seconds="$(estimate_serc_task_seconds)"; then
+                        serc_estimated_finish_seconds=$(( (remaining_shards * serc_estimated_task_seconds + gpu_max_jobs - 1) / gpu_max_jobs ))
+                        if [[ "${serc_estimated_finish_seconds}" -le $(( serc_endgame_minutes_threshold * 60 )) ]]; then
+                            serc_only_endgame_active=1
+                            activate_serc_only_endgame "${remaining_shards}" "${gpu_max_jobs}" "${serc_estimated_task_seconds}" "${serc_estimated_finish_seconds}"
+                            progress_made=1
+                        fi
                     fi
                 fi
-            fi
-            recent_shard_rate_per_second=""
-            if recent_shard_rate_per_second="$(estimate_recent_shard_rate_per_second)"; then
-                year_eta_seconds="$(python3 - <<PYETA
+                recent_shard_rate_per_second=""
+                if recent_shard_rate_per_second="$(estimate_recent_shard_rate_per_second)"; then
+                    year_eta_seconds="$(python3 - <<PYETA
 import math
 rate = float("${recent_shard_rate_per_second}")
 remaining = int("${remaining_shards}")
@@ -928,38 +1146,30 @@ if rate <= 0 or remaining <= 0:
     raise SystemExit(1)
 print(int(math.ceil(remaining / rate)))
 PYETA
-                )"
-                year_eta_dhms="$(format_dhms "${year_eta_seconds}")"
-            fi
+                    )"
+                    year_eta_dhms="$(format_dhms "${year_eta_seconds}")"
+                fi
 
-            current_year_elapsed_seconds=""
-            current_year_full_estimate_seconds=""
-            if [[ -n "${multiyear_year_started_at_epoch}" && "${multiyear_year_started_at_epoch}" != "NA" ]]; then
-                current_year_elapsed_seconds="$(python3 - <<PYELAPSED
+                current_year_elapsed_seconds=""
+                current_year_full_estimate_seconds=""
+                if [[ -n "${multiyear_year_started_at_epoch}" && "${multiyear_year_started_at_epoch}" != "NA" ]]; then
+                    current_year_elapsed_seconds="$(python3 - <<PYELAPSED
 import time
 started = float("${multiyear_year_started_at_epoch}")
 print(int(max(time.time() - started, 0)))
 PYELAPSED
-                )"
-            fi
-            if [[ "${year_eta_seconds}" != "NA" && -n "${current_year_elapsed_seconds}" ]]; then
-                current_year_full_estimate_seconds=$(( current_year_elapsed_seconds + year_eta_seconds ))
-            fi
-
-            multiyear_future_metrics=""
-            if multiyear_future_metrics="$(estimate_multiyear_future_years_and_median_seconds)"; then
-                IFS=$'\t' read -r remaining_future_years future_year_median_seconds <<< "${multiyear_future_metrics}"
-                future_year_estimate_seconds=""
-                if [[ "${future_year_median_seconds}" != "NA" ]]; then
-                    future_year_estimate_seconds="${future_year_median_seconds%.*}"
-                elif [[ -n "${current_year_full_estimate_seconds}" ]]; then
-                    future_year_estimate_seconds="${current_year_full_estimate_seconds}"
+                    )"
                 fi
-                if [[ "${year_eta_seconds}" != "NA" ]]; then
-                    overall_eta_seconds="${year_eta_seconds}"
-                    if [[ -n "${future_year_estimate_seconds}" && -n "${remaining_future_years}" && "${remaining_future_years}" -gt 0 ]]; then
-                        overall_eta_seconds=$(( overall_eta_seconds + remaining_future_years * future_year_estimate_seconds ))
-                    fi
+                if [[ "${year_eta_seconds}" != "NA" && -n "${current_year_elapsed_seconds}" ]]; then
+                    current_year_full_estimate_seconds=$(( current_year_elapsed_seconds + year_eta_seconds ))
+                fi
+
+                remaining_years_including_current=""
+                if [[ -n "${multiyear_year_ordinal}" && -n "${multiyear_total_years}" ]]; then
+                    remaining_years_including_current=$(( multiyear_total_years - multiyear_year_ordinal + 1 ))
+                fi
+                if [[ "${year_eta_seconds}" != "NA" && -n "${current_year_full_estimate_seconds}" && -n "${current_year_elapsed_seconds}" && -n "${remaining_years_including_current}" && "${remaining_years_including_current}" -gt 0 ]]; then
+                    overall_eta_seconds=$(( remaining_years_including_current * current_year_full_estimate_seconds - current_year_elapsed_seconds ))
                     overall_eta_dhms="$(format_dhms "${overall_eta_seconds}")"
                 fi
             fi
@@ -988,10 +1198,61 @@ PYELAPSED
                 break
             fi
 
-            ready_unsharded=$(( prepared_reference_count - completed_shards ))
-            if [[ "${ready_unsharded}" -lt 0 ]]; then
-                ready_unsharded=0
+            effective_prepare_backlog="${prepared_reference_count}"
+            if [[ "${start_from_gpu}" != "true" ]]; then
+                while [[ "${next_prepare_task_id}" -lt "${num_job_tasks}" && "${prepare_completed_flags[$next_prepare_task_id]:-0}" == "1" ]]; do
+                    next_prepare_task_id=$(( next_prepare_task_id + 1 ))
+                done
+                for (( prepare_task_id=0; prepare_task_id<next_prepare_task_id; prepare_task_id++ )); do
+                    prepare_job_id="${prepare_job_ids[$prepare_task_id]:-}"
+                    if [[ -z "${prepare_job_id}" ]]; then
+                        continue
+                    fi
+                    prepare_fine_count="${prepare_task_fine_counts[$prepare_task_id]:-${tasks_per_job}}"
+                    effective_prepare_backlog=$(( effective_prepare_backlog + prepare_fine_count ))
+                done
+
+                for (( prepare_task_id=0; prepare_task_id<next_prepare_task_id; prepare_task_id++ )); do
+                    if [[ "${prepare_completed_flags[$prepare_task_id]:-0}" == "1" ]]; then
+                        continue
+                    fi
+                    if [[ -n "${prepare_job_ids[$prepare_task_id]:-}" ]]; then
+                        continue
+                    fi
+                    prepare_fine_count="${prepare_task_fine_counts[$prepare_task_id]:-${tasks_per_job}}"
+                    if ! prepare_job_id="$(submit_prepare_job "${prepare_task_id}")"; then
+                        echo "Failed to resubmit prepare worker for prepare_task_id=${prepare_task_id}" >&2
+                        exit 1
+                    fi
+                    prepare_job_ids[$prepare_task_id]="${prepare_job_id}"
+                    prepare_submission_counts[$prepare_task_id]=$(( ${prepare_submission_counts[$prepare_task_id]:-0} + 1 ))
+                    active_prepare_jobs=$(( active_prepare_jobs + 1 ))
+                    pending_prepare_jobs=$(( pending_prepare_jobs + 1 ))
+                    effective_prepare_backlog=$(( effective_prepare_backlog + prepare_fine_count ))
+                    progress_made=1
+                    echo "Resubmitted prepare worker job ${prepare_job_id} for prepare_task_id=${prepare_task_id}; prepare_fine_tasks=${prepare_fine_count}; attempts=${prepare_submission_counts[$prepare_task_id]}"
+                done
+
+                while [[ "${next_prepare_task_id}" -lt "${num_job_tasks}" && "${effective_prepare_backlog}" -lt "${max_prepared_ahead_of_completed_shards}" ]]; do
+                    prepare_task_id="${next_prepare_task_id}"
+                    prepare_fine_count="${prepare_task_fine_counts[$prepare_task_id]:-${tasks_per_job}}"
+                    if ! prepare_job_id="$(submit_prepare_job "${prepare_task_id}")"; then
+                        echo "Failed to submit prepare worker for prepare_task_id=${prepare_task_id}" >&2
+                        exit 1
+                    fi
+                    prepare_job_ids[$prepare_task_id]="${prepare_job_id}"
+                    prepare_completed_flags[$prepare_task_id]=0
+                    prepare_submission_counts[$prepare_task_id]=$(( ${prepare_submission_counts[$prepare_task_id]:-0} + 1 ))
+                    next_prepare_task_id=$(( next_prepare_task_id + 1 ))
+                    active_prepare_jobs=$(( active_prepare_jobs + 1 ))
+                    pending_prepare_jobs=$(( pending_prepare_jobs + 1 ))
+                    effective_prepare_backlog=$(( effective_prepare_backlog + prepare_fine_count ))
+                    progress_made=1
+                    echo "Submitted prepare worker job ${prepare_job_id} for prepare_task_id=${prepare_task_id}; prepare_fine_tasks=${prepare_fine_count}; effective_prepare_backlog=${effective_prepare_backlog}/${max_prepared_ahead_of_completed_shards}; submitted_prepare_jobs=${next_prepare_task_id}/${num_job_tasks}"
+                done
             fi
+
+            ready_unsharded="${prepared_reference_count}"
 
             while [[ "${ready_unsharded}" -gt "${active_gpu_jobs}" ]]; do
                 target_pool=""
@@ -1029,10 +1290,11 @@ PYELAPSED
                 blocked_by_prepare=$(( blocked_by_prepare + 1 ))
             fi
 
-            echo "GPU scheduler: iteration=${scheduler_iteration}; current_year=${multiyear_current_year}; year_ordinal=${multiyear_year_ordinal:-NA}/${multiyear_total_years:-NA}; year_eta=${year_eta_dhms}; overall_eta=${overall_eta_dhms}; shards=${completed_shards}/${num_fine_tasks}; prepared_refs=${prepared_reference_count}/${num_fine_tasks}; running=${running_gpu_jobs}; pending=${pending_gpu_jobs}; total_retries=${retry_waiting_total}; serc_retry_events=${serc_retry_events_total}/50; owners_failure_events=${owners_failure_events_total}; blocked_by_prepare=${blocked_by_prepare}; blocked_by_capacity=${blocked_by_capacity}; serc_locks=$(lock_count)/${gpu_max_jobs}; serc_running=${running_serc_jobs}; owners_active=${active_owner_jobs}/${owners_gpu_max_jobs}; serc_only_endgame=${serc_only_endgame_active}; serc_estimated_task_seconds=${serc_estimated_task_seconds:-NA}; serc_estimated_finish_seconds=${serc_estimated_finish_seconds:-NA}; sleeping ${gpu_submit_sleep_seconds}s"
+            echo "GPU scheduler: iteration=${scheduler_iteration}; current_year=${multiyear_current_year}; year_ordinal=${multiyear_year_ordinal:-NA}/${multiyear_total_years:-NA}; year_eta=${year_eta_dhms}; overall_eta=${overall_eta_dhms}; shards=${completed_shards}/${num_fine_tasks}; prepared_refs=${prepared_reference_count}/${num_fine_tasks}; effective_prepare_backlog=${effective_prepare_backlog}/${max_prepared_ahead_of_completed_shards}; prepare_running=${running_prepare_jobs}; prepare_pending=${pending_prepare_jobs}; prepare_submitted=${next_prepare_task_id}/${num_job_tasks}; running=${running_gpu_jobs}; pending=${pending_gpu_jobs}; total_retries=${retry_waiting_total}; serc_retry_events=${serc_retry_events_total}/50; owners_failure_events=${owners_failure_events_total}; blocked_by_prepare=${blocked_by_prepare}; blocked_by_capacity=${blocked_by_capacity}; serc_locks=$(lock_count)/${gpu_max_jobs}; serc_running=${running_serc_jobs}; owners_active=${active_owner_jobs}/${owners_gpu_max_jobs}; serc_only_endgame=${serc_only_endgame_active}; serc_estimated_task_seconds=${serc_estimated_task_seconds:-NA}; serc_estimated_finish_seconds=${serc_estimated_finish_seconds:-NA}; sleeping ${gpu_submit_sleep_seconds}s"
             sleep "${gpu_submit_sleep_seconds}"
         done
         echo "All GPU work completed."
+        fi
     else
         declare -a gpu_prepare_task_ids
         declare -a gpu_job_ids
@@ -1041,7 +1303,9 @@ PYELAPSED
         declare -a gpu_retry_counts
         declare -a gpu_submission_counts
 
-        if [[ "${start_from_gpu}" == "true" ]]; then
+        if [[ "${resume_completed_run}" == "true" ]]; then
+            echo "Completed-run resume mode: skipping CPU prepare and GPU scheduling because all shards are already complete in ${latest_run_dir}"
+        elif [[ "${start_from_gpu}" == "true" ]]; then
             echo "GPU-only restart mode: skipping CPU prepare array and starting directly from prepared tensors in ${latest_run_dir}"
             for (( gpu_task_id=0; gpu_task_id<num_gpu_job_tasks; gpu_task_id++ )); do
                 gpu_prepare_task_ids[${gpu_task_id}]="PREBUILT"
@@ -1239,6 +1503,11 @@ else
     after_gpu_dependency="${array_job_id}"
 fi
 
+merge_overwrite_flag="1"
+if [[ -n "${persistent_out_zarr_path:-}" && "${persistent_out_zarr_path}" != "None" ]]; then
+    merge_overwrite_flag="0"
+fi
+
 merge_init_args=(
     --parsable
 )
@@ -1246,30 +1515,21 @@ if [[ -n "${after_gpu_dependency}" ]]; then
     merge_init_args+=(--dependency=afterok:${after_gpu_dependency})
 fi
 merge_init_args+=(
-    --export=ALL,MANIFEST_PATH="${manifest_path}",OVERWRITE_MERGE=1,MERGE_INITIALIZE_ONLY=1
+    --export=ALL,MANIFEST_PATH="${manifest_path}",OVERWRITE_MERGE="${merge_overwrite_flag}",MERGE_INITIALIZE_ONLY=1
     "${script_dir}/merge_maps_ensemble.sbatch"
 )
 merge_init_job_id="$(submit_with_retry "merge_init" sbatch "${merge_init_args[@]}")"
-echo "Submitted merge initialization job ${merge_init_job_id}"
+echo "Submitted merge initialization job ${merge_init_job_id}; overwrite_merge=${merge_overwrite_flag}"
 
 merge_array_job_id="$(submit_with_retry \
-    "merge_array" \
-    sbatch --parsable --dependency=afterok:${merge_init_job_id} --array="0-$(( num_merge_tasks - 1 ))%${array_concurrency}" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/merge_maps_ensemble.sbatch")"
-echo "Submitted merge array job ${merge_array_job_id}"
+    "merge_all" \
+    sbatch --parsable --dependency=afterok:${merge_init_job_id} --export=ALL,MANIFEST_PATH="${manifest_path}",MERGE_ALL_TASKS=1 "${script_dir}/merge_maps_ensemble.sbatch")"
+echo "Submitted single-writer merge job ${merge_array_job_id}"
 
 validate_job_id="$(submit_with_retry \
     "validate_maps" \
     sbatch --parsable --dependency=afterok:${merge_array_job_id} --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/validate_maps_ensemble.sbatch")"
 echo "Submitted validation job ${validate_job_id}"
-
-if [[ "${cleanup_prepared_tensors_after_success}" == "true" ]]; then
-    cleanup_job_id="$(submit_with_retry \
-        "cleanup_prepared_tensors" \
-        sbatch --parsable --dependency=afterok:${validate_job_id} --job-name="cleanup_prepared_tensors" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/cleanup_prepared_tensors.sbatch")"
-    echo "Submitted prepared-tensor cleanup job ${cleanup_job_id} after validation success"
-else
-    echo "Skipping prepared-tensor cleanup after validation stage."
-fi
 
 if [[ "${wait_for_validation_completion}" == "true" ]]; then
     echo "Waiting for validation job ${validate_job_id} to complete"

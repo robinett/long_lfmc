@@ -1,5 +1,6 @@
-# Current July/August 2023 inference config for the active multitask clim20 model family.
-# Keep the ensemble paths here aligned with lfmc_model/scripts/current_model_family.yaml.
+# Current multiyear inference config for the active multitask clim20 model family.
+# Runs years in reverse order via create_maps_multiyear.py and resumes from the next
+# missing year when completion markers already exist.
 ensemble:
   outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
   input_data_name: ensemble/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
@@ -12,15 +13,20 @@ ensemble:
 
 data:
   grid_path: /scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4
-  requested_start_date: 2023-07-01
-  requested_end_date: 2023-08-31
+  requested_start_date: 2001-01-01
+  requested_end_date: 2024-12-31
+
+multiyear:
+  start_year: 2001
+  end_year: 2024
+  cleanup_year_run_dir_after_success: true
 
 sources:
   registry_path: /home/users/trobinet/long_lfmc/lfmc_model/scripts/inference/source_registry.yaml
 
 paths:
-  run_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_multisource_fusion_clim20_2023_07_08
-  persistent_out_zarr_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/final_products/lfmc_vh_vv_365_multisource_fusion_clim20_2023_07_08.zarr
+  run_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_multisource_fusion_clim20_multiyear
+  persistent_out_zarr_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/final_products/lfmc_vh_vv_365_multisource_fusion_clim20_2001_2024.zarr
   tile_metadata_subdir: tile_metadata
   prepared_subdir: prepared_tensors
   shard_subdir: shards
@@ -69,11 +75,18 @@ submission:
   gpu_next_task_safety_factor: 1.15
   max_prepared_ahead_of_completed_shards: 1000
   prepare_throttle_sleep_seconds: 30
+  prepare_time_limit: "04:00:00"
+  prepare_cpus_per_task: 8
+  prepare_mem: 128G
+  prepare_max_retries: 12
+  prepare_retry_states: PREEMPTED,REVOKED,BOOT_FAIL,NODE_FAIL,TIMEOUT,OUT_OF_MEMORY
   delete_prepared_payload_after_shard_complete: true
   serc_only_endgame: true
   serc_endgame_minutes_threshold: 60
   serc_endgame_min_samples: 4
   serc_endgame_recent_completion_count: 32
+  cleanup_prepared_tensors_after_success: false
+  wait_for_validation_completion: true
 
 product:
   tier: final
