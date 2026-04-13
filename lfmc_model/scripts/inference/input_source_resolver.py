@@ -129,14 +129,25 @@ def resolve_inference_sources(
         'canopy height dataset',
     )
     nlcd_path = _require_path(sources.get('nlcd', {}).get('annual_path'), 'annual NLCD zarr')
-    archive_daymet_path = _require_path(
-        sources.get('daymet', {}).get('archive_path'),
-        'archive Daymet zarr',
-    )
-    anomaly_daymet_path = _require_path(
-        sources.get('daymet', {}).get('anomalies_path'),
-        'Daymet anomaly zarr',
-    )
+    daymet_layout = str(tier_cfg.get('daymet_layout', 'split_archive_anomaly'))
+    combined_daymet_path = sources.get('daymet', {}).get('combined_path')
+    if daymet_layout == 'combined':
+        archive_daymet_path = _require_path(
+            combined_daymet_path,
+            'combined Daymet zarr',
+        )
+        anomaly_daymet_path = None
+    elif daymet_layout == 'split_archive_anomaly':
+        archive_daymet_path = _require_path(
+            sources.get('daymet', {}).get('archive_path'),
+            'archive Daymet zarr',
+        )
+        anomaly_daymet_path = _require_path(
+            sources.get('daymet', {}).get('anomalies_path'),
+            'Daymet anomaly zarr',
+        )
+    else:
+        raise ValueError(f'Unsupported daymet_layout: {daymet_layout}')
     monthly_latency_daymet_path = sources.get('daymet', {}).get('monthly_latency_path')
     low_latency_climate_path = sources.get('climate_low_latency', {}).get('path')
 
@@ -197,6 +208,8 @@ def resolve_inference_sources(
         'soils_path': soils_path,
         'canopy_height_path': canopy_height_path,
         'landcover_path': nlcd_path,
+        'daymet_layout': daymet_layout,
+        'combined_daymet_path': combined_daymet_path,
         'archive_daymet_path': archive_daymet_path,
         'anomaly_daymet_path': anomaly_daymet_path,
         'monthly_latency_daymet_path': monthly_latency_daymet_path,
@@ -227,10 +240,13 @@ def open_inference_datasets_from_resolution(source_resolution: Dict[str, object]
         if time_index.has_duplicates:
             keep_mask = ~time_index.duplicated(keep='last')
             daymet_ds = daymet_ds.isel(time=np.where(keep_mask)[0])
-    anomaly_daymet_ds = xr.open_zarr(
-        str(source_resolution['anomaly_daymet_path']),
-        consolidated=False,
-    )
+    anomaly_daymet_path = source_resolution.get('anomaly_daymet_path')
+    anomaly_daymet_ds = None
+    if anomaly_daymet_path not in {None, '', 'None'}:
+        anomaly_daymet_ds = xr.open_zarr(
+            str(anomaly_daymet_path),
+            consolidated=False,
+        )
     daymet_ds = _merge_daymet_datasets(daymet_ds, anomaly_daymet_ds)
     return {
         'daymet': daymet_ds,

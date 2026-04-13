@@ -195,6 +195,7 @@ def clamp_runtime_window_for_sources(
         end_date,
         runtime["short_lag_days"],
         runtime["long_lag_days"],
+        var_names=runtime.get("var_names"),
     )
     static_sources = runtime_static_sources(runtime, var_locs=var_locs)
     if "landcover_frac" in static_sources:
@@ -823,6 +824,16 @@ def _tile_native_tensor_payload(
     norm_params = runtime["norm_params"]
     var_to_source = _var_to_source(VAR_LOCS)
 
+    short_source_vars = [var_name for var_name in short_vars if var_name != "lfrac"]
+    long_source_vars = [var_name for var_name in long_vars if var_name != "lfrac"]
+    static_source_vars = [
+        var_name
+        for var_name in static_vars
+        if var_name not in {"latitude", "longitude"}
+        and not _static_var_is_landcover(var_name)
+    ]
+    landcover_vars = [var_name for var_name in static_vars if _static_var_is_landcover(var_name)]
+
     short_input = np.full(
         (n_pixels, n_days, len(short_lag_days), len(short_vars)),
         np.nan,
@@ -837,9 +848,10 @@ def _tile_native_tensor_payload(
 
     full_grid_sources = {
         "modis": dss["modis"],
-        "daymet": dss["daymet"],
         "landcover_frac": dss["landcover_frac"],
     }
+    if len(long_source_vars) > 0:
+        full_grid_sources["daymet"] = dss["daymet"]
     subset_sources = {
         "static": dss["static"],
         "soils": dss["soils"],
@@ -855,23 +867,13 @@ def _tile_native_tensor_payload(
         for source_name, ds in {**full_grid_sources, **subset_sources}.items()
     }
 
-    short_source_vars = [var_name for var_name in short_vars if var_name != "lfrac"]
-    long_source_vars = [var_name for var_name in long_vars if var_name != "lfrac"]
-    static_source_vars = [
-        var_name
-        for var_name in static_vars
-        if var_name not in {"latitude", "longitude"}
-        and not _static_var_is_landcover(var_name)
-    ]
-    landcover_vars = [var_name for var_name in static_vars if _static_var_is_landcover(var_name)]
-
     short_max_lag = int(short_lag_days.max()) if len(short_lag_days) > 0 else 0
     long_max_lag = int(long_lag_days.max()) if len(long_lag_days) > 0 else 0
     short_time_start = start_date - pd.Timedelta(days=short_max_lag)
     long_time_start = start_date - pd.Timedelta(days=long_max_lag)
 
     modis_idx = source_indexers["modis"]
-    daymet_idx = source_indexers["daymet"]
+    daymet_idx = source_indexers.get("daymet")
     landcover_idx = source_indexers["landcover_frac"]
     modis_cube = _stack_source_vars(
         dss["modis"],
@@ -980,8 +982,12 @@ def _tile_native_tensor_payload(
         pix_slice = slice(pix_start, pix_end)
         modis_y_local = modis_idx["local_iy"][pix_slice].astype(np.int64)
         modis_x_local = modis_idx["local_ix"][pix_slice].astype(np.int64)
-        daymet_y_local = daymet_idx["local_iy"][pix_slice].astype(np.int64)
-        daymet_x_local = daymet_idx["local_ix"][pix_slice].astype(np.int64)
+        if daymet_idx is not None:
+            daymet_y_local = daymet_idx["local_iy"][pix_slice].astype(np.int64)
+            daymet_x_local = daymet_idx["local_ix"][pix_slice].astype(np.int64)
+        else:
+            daymet_y_local = None
+            daymet_x_local = None
         landcover_y_local = landcover_idx["local_iy"][pix_slice].astype(np.int64)
         landcover_x_local = landcover_idx["local_ix"][pix_slice].astype(np.int64)
         batch_lat = lat_vals[pix_slice]

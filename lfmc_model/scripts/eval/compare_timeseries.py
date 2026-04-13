@@ -35,7 +35,7 @@ DEFAULT_SCRATCH_ROOT = "/scratch/users/trobinet/long_lfmc/final_lfmc"
 DAYMET_ZARR_PATH = os.path.join(
     DEFAULT_SCRATCH_ROOT,
     "daymet",
-    "daymet_vars_and_anoms.zarr",
+    "daymet_vars_and_anoms_clim20.zarr",
 )
 DAYMET_ANOM_ZARR_PATH = None
 MODIS_ZARR_PATH = os.path.join(
@@ -1083,20 +1083,37 @@ def _run_runtime_forward(runtime, model_type, tensor_payload, batch_size=4096, p
     }
 
 
-def _clamp_inference_window(dss, start_date, end_date, short_lag_days, long_lag_days):
+def _runtime_uses_daymet(var_names):
+    if var_names is None:
+        return True
+    var_to_source = {
+        var_name: source_name
+        for source_name, vars_here in VAR_LOCS.items()
+        for var_name in vars_here
+    }
+    long_vars = var_names.get("long_vars", [])
+    return any(
+        var_name != "lfrac" and var_to_source.get(var_name) == "daymet"
+        for var_name in long_vars
+    )
+
+
+def _clamp_inference_window(dss, start_date, end_date, short_lag_days, long_lag_days, var_names=None):
     modis_time = pd.to_datetime(dss["modis"]["time"].values)
-    daymet_time = pd.to_datetime(dss["daymet"]["time"].values)
     modis_min = pd.Timestamp(modis_time.min()).normalize()
     modis_max = pd.Timestamp(modis_time.max()).normalize()
-    daymet_min = pd.Timestamp(daymet_time.min()).normalize()
-    daymet_max = pd.Timestamp(daymet_time.max()).normalize()
     short_lag_needed = int(max(short_lag_days)) if len(short_lag_days) > 0 else 0
     long_lag_needed = int(max(long_lag_days)) if len(long_lag_days) > 0 else 0
-    min_start = max(
-        modis_min + pd.DateOffset(days=short_lag_needed),
-        daymet_min + pd.DateOffset(days=long_lag_needed),
-    )
-    max_end = min(modis_max, daymet_max)
+    min_start_candidates = [modis_min + pd.DateOffset(days=short_lag_needed)]
+    max_end_candidates = [modis_max]
+    if _runtime_uses_daymet(var_names):
+        daymet_time = pd.to_datetime(dss["daymet"]["time"].values)
+        daymet_min = pd.Timestamp(daymet_time.min()).normalize()
+        daymet_max = pd.Timestamp(daymet_time.max()).normalize()
+        min_start_candidates.append(daymet_min + pd.DateOffset(days=long_lag_needed))
+        max_end_candidates.append(daymet_max)
+    min_start = max(min_start_candidates)
+    max_end = min(max_end_candidates)
     safe_start = max(pd.Timestamp(start_date).normalize(), min_start)
     safe_end = min(pd.Timestamp(end_date).normalize(), max_end)
     return safe_start, safe_end
@@ -1155,6 +1172,7 @@ def _get_or_build_inference_tensors(
         end_date,
         runtime["short_lag_days"],
         runtime["long_lag_days"],
+        var_names=runtime["var_names"],
     )
     if safe_start > safe_end:
         return {

@@ -148,9 +148,9 @@ def build_tensors(
     short_input[:, :, :] = np.nan
     long_input[:, :, :] = np.nan
     static_input[:, :, :] = np.nan
-    short_lag_needed = short_lag_days[-1]
-    long_lag_needed = long_lag_days[-1]
-    max_lag_needed = max(short_lag_needed, long_lag_needed)
+    short_lag_needed = short_lag_days[-1] if len(short_lag_days) > 0 else 0
+    long_lag_needed = long_lag_days[-1] if len(long_lag_days) > 0 else 0
+    needs_daymet = any(var_to_ds.get(var_name) == 'daymet' for var_name in long_vars_needed if var_name != 'lfrac')
     trns = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
     loc_xys = [trns.transform(loc[0], loc[1]) for loc in locs]
     preloaded_chunks = {}
@@ -197,7 +197,7 @@ def build_tensors(
             y1 = min((chunk_key[1] + 1) * y_chunk, modis_y.size)
             chunk_start = min(start_dates[i] for i in loc_idxs)
             chunk_end = max(end_dates[i] for i in loc_idxs)
-            preloaded_chunks[chunk_key] = {
+            preloaded_chunk = {
                 'modis': (
                     dss['modis']
                     .isel(x=slice(x0, x1), y=slice(y0, y1))
@@ -209,7 +209,14 @@ def build_tensors(
                     )
                     .compute()
                 ),
-                'daymet': (
+                'landcover_frac': (
+                    dss['landcover_frac']
+                    .isel(x=slice(x0, x1), y=slice(y0, y1))
+                    .load()
+                ),
+            }
+            if needs_daymet:
+                preloaded_chunk['daymet'] = (
                     dss['daymet']
                     .isel(x=slice(x0, x1), y=slice(y0, y1))
                     .sel(
@@ -219,29 +226,24 @@ def build_tensors(
                         )
                     )
                     .compute()
-                ),
-                'landcover_frac': (
-                    dss['landcover_frac']
-                    .isel(x=slice(x0, x1), y=slice(y0, y1))
-                    .load()
-                ),
-            }
+                )
+            preloaded_chunks[chunk_key] = preloaded_chunk
     starting_B = 0
     #for l,loc in enumerate(locs):
-    for l, loc in tqdm(
+    for loc_idx, loc in tqdm(
         enumerate(locs),
         total=len(locs),
         desc="Creating tensor for each location"
     ):
-        this_x, this_y = loc_xys[l]
-        this_start = start_dates[l]
-        this_end = end_dates[l]
+        this_x, this_y = loc_xys[loc_idx]
+        this_start = start_dates[loc_idx]
+        this_end = end_dates[loc_idx]
         date_range = pd.date_range(this_start, this_end)
         # create the lists that we will turn into our info df
         lats_to_add = np.repeat(loc[1], len(date_range))
         lons_to_add = np.repeat(loc[0], len(date_range))
         times_to_add = date_range
-        if l == 0:
+        if loc_idx == 0:
             info_df = pd.DataFrame({
                 'lat': lats_to_add,
                 'lon': lons_to_add,
@@ -253,20 +255,23 @@ def build_tensors(
                 'lon': lons_to_add,
                 'date': times_to_add
             })])
-        if l > 0:
-            starting_B += (end_dates[l-1] - start_dates[l-1]).days + 1
+        if loc_idx > 0:
+            starting_B += (end_dates[loc_idx - 1] - start_dates[loc_idx - 1]).days + 1
         if all_nearby and loc_chunk_keys is not None:
-            chunk_ds = preloaded_chunks[loc_chunk_keys[l]]
+            chunk_ds = preloaded_chunks[loc_chunk_keys[loc_idx]]
             modis_data = chunk_ds['modis'].sel(
                 x=this_x,
                 y=this_y,
                 method='nearest'
             )
-            daymet_data = chunk_ds['daymet'].sel(
-                x=this_x,
-                y=this_y,
-                method='nearest'
-            )
+            if needs_daymet:
+                daymet_data = chunk_ds['daymet'].sel(
+                    x=this_x,
+                    y=this_y,
+                    method='nearest'
+                )
+            else:
+                daymet_data = None
         else:
             modis_data = dss['modis'].sel(
                 x=this_x,
@@ -276,38 +281,42 @@ def build_tensors(
             modis_data = modis_data.sel(
                 time=slice(this_start - pd.Timedelta(days=short_lag_needed), this_end),
             ).compute()
-            daymet_data = dss['daymet'].sel(
-                x=this_x,
-                y=this_y,
-                method='nearest'
-            )
-            daymet_data = (
-                daymet_data
-                .sel(time=slice(this_start - pd.Timedelta(days=long_lag_needed), this_end + pd.Timedelta(days=1)))
-                .compute()
-            )
-        # set daymet to midnight
-        #daymet_data = daymet_data.resample(time='1D').mean()
-        daymet_data['time'] = daymet_data['time'].dt.floor('D')
-        # for daymet we need to copy Dec 30 to be Dec 31 on leap years because they
-        # refuse to give us leap years 
-        ds = daymet_data
-        years = np.unique(ds.time.dt.year.values)
-        new_slices = []
-        for y in years:
-            if (
-                (pd.Timestamp(f"{y}-01-01").is_leap_year) and
-                this_end >= pd.Timestamp(f"{y}-12-31")
-            ):
-                dec30 = pd.Timestamp(f"{y}-12-30")
-                dec31 = pd.Timestamp(f"{y}-12-31")
-                if dec31 not in ds.time.values:
-                    s31 = ds.sel(time=dec30).copy(deep=True)
-                    s31 = s31.assign_coords(time=dec31)
-                    new_slices.append(s31)
-        if new_slices:
-            ds = xr.concat([ds] + new_slices, dim="time").sortby("time")
-        daymet_data = ds
+            if needs_daymet:
+                daymet_data = dss['daymet'].sel(
+                    x=this_x,
+                    y=this_y,
+                    method='nearest'
+                )
+                daymet_data = (
+                    daymet_data
+                    .sel(time=slice(this_start - pd.Timedelta(days=long_lag_needed), this_end + pd.Timedelta(days=1)))
+                    .compute()
+                )
+            else:
+                daymet_data = None
+        if needs_daymet:
+            # set daymet to midnight
+            #daymet_data = daymet_data.resample(time='1D').mean()
+            daymet_data['time'] = daymet_data['time'].dt.floor('D')
+            # for daymet we need to copy Dec 30 to be Dec 31 on leap years because they
+            # refuse to give us leap years
+            ds = daymet_data
+            years = np.unique(ds.time.dt.year.values)
+            new_slices = []
+            for y in years:
+                if (
+                    (pd.Timestamp(f"{y}-01-01").is_leap_year) and
+                    this_end >= pd.Timestamp(f"{y}-12-31")
+                ):
+                    dec30 = pd.Timestamp(f"{y}-12-30")
+                    dec31 = pd.Timestamp(f"{y}-12-31")
+                    if dec31 not in ds.time.values:
+                        s31 = ds.sel(time=dec30).copy(deep=True)
+                        s31 = s31.assign_coords(time=dec31)
+                        new_slices.append(s31)
+            if new_slices:
+                ds = xr.concat([ds] + new_slices, dim="time").sortby("time")
+            daymet_data = ds
         for s,s_var in enumerate(short_vars_needed):
             this_norm_mean = norm_params['train_short_mean'][s]
             this_norm_std = norm_params['train_short_std'][s]
@@ -347,16 +356,16 @@ def build_tensors(
                     f'Dataset {this_ds_name} not implemented'
                 )
         # add the long vars
-        for l,l_var in enumerate(long_vars_needed):
-            this_norm_mean = norm_params['train_long_mean'][l]
-            this_norm_std = norm_params['train_long_std'][l]
+        for long_idx,l_var in enumerate(long_vars_needed):
+            this_norm_mean = norm_params['train_long_mean'][long_idx]
+            this_norm_std = norm_params['train_long_std'][long_idx]
             if l_var == 'lfrac':
                 this_vals = np.arange(long_lag_needed+1)
                 this_vals = this_vals / long_lag_needed
                 #this_vals = this_vals[::-1]
                 this_vals = (this_vals - this_norm_mean) / this_norm_std
                 for d,date in enumerate(date_range):
-                    long_input[starting_B + d, :, l] = this_vals
+                    long_input[starting_B + d, :, long_idx] = this_vals
                 continue
             this_ds_name = var_to_ds[l_var]
             if this_ds_name == 'daymet':
@@ -374,7 +383,7 @@ def build_tensors(
                     vals_to_add = vals_to_add[::-1]
                     # normalize
                     vals_to_add_norm = (vals_to_add - this_norm_mean) / this_norm_std
-                    long_input[starting_B + d, :, l] = vals_to_add_norm
+                    long_input[starting_B + d, :, long_idx] = vals_to_add_norm
             else:
                 raise NotImplementedError(
                     f'Dataset {this_ds_name} not implemented'
@@ -406,7 +415,7 @@ def build_tensors(
                 'wetlands' in st_var
             ):
                 if all_nearby and loc_chunk_keys is not None:
-                    this_ds = preloaded_chunks[loc_chunk_keys[l]]['landcover_frac']
+                    this_ds = preloaded_chunks[loc_chunk_keys[loc_idx]]['landcover_frac']
                 else:
                     this_ds = dss['landcover_frac']
                 this_vals = this_ds[st_var].sel(

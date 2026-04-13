@@ -6,6 +6,7 @@ sources:
   modis:
     path: /scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_regrid_interpolated/modis_interp_5d.zarr
   daymet:
+    combined_path: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_vars_and_anoms_clim20.zarr
     archive_path: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_long_inputs_with_vpd.zarr
     anomalies_path: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_anomalies_all_vars.zarr
     monthly_latency_path: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_monthly_latency_all_vars.zarr
@@ -65,10 +66,12 @@ processing:
 
 tiers:
   final:
+    daymet_layout: combined
     daymet_mode: archive_only
     nlcd_mode: same_year_required
     quality_flag: 0
   low_latency:
+    daymet_layout: split_archive_anomaly
     daymet_mode: archive_then_low_latency_climate
     nlcd_mode: latest_available_year
     quality_flag: 1
