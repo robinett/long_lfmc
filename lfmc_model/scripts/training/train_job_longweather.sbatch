@@ -37,7 +37,7 @@ import os
 import sys
 
 state_dir, marker_name, run_name, run_tag, pool, job_id, node_name, exit_code = sys.argv[1:9]
-now_utc = dt.datetime.now(dt.UTC)
+now_utc = dt.datetime.now(dt.timezone.utc)
 payload = {
     "timestamp_utc": now_utc.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     "timestamp_unix": now_utc.timestamp(),

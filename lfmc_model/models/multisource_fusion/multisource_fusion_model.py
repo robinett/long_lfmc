@@ -160,11 +160,15 @@ class SequenceTransformerEncoder(nn.Module):
 
 
 class FusionTransformer(nn.Module):
-    def __init__(self, d_common, dropout, num_layers=2):
+    def __init__(self, d_common, dropout, num_layers=2, num_modality_tokens=3):
         super().__init__()
+        if num_modality_tokens < 1:
+            raise ValueError("FusionTransformer needs at least one modality token")
         nhead = max(2, d_common // 32)
         self.cls_token = nn.Parameter(torch.randn(1, 1, d_common) * 0.02)
-        self.modality_embeddings = nn.Parameter(torch.randn(1, 4, d_common) * 0.02)
+        self.modality_embeddings = nn.Parameter(
+            torch.randn(1, num_modality_tokens + 1, d_common) * 0.02
+        )
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_common,
             nhead=nhead,
@@ -180,9 +184,15 @@ class FusionTransformer(nn.Module):
             norm=nn.LayerNorm(d_common),
         )
 
-    def forward(self, weather_token, static_token, modis_token):
-        cls = self.cls_token.expand(weather_token.size(0), 1, weather_token.size(-1))
-        tokens = torch.stack([weather_token, static_token, modis_token], dim=1)
+    def forward(self, *modality_tokens):
+        if len(modality_tokens) == 0:
+            raise ValueError("FusionTransformer.forward needs at least one token")
+        cls = self.cls_token.expand(
+            modality_tokens[0].size(0),
+            1,
+            modality_tokens[0].size(-1),
+        )
+        tokens = torch.stack(list(modality_tokens), dim=1)
         tokens = torch.cat([tokens, cls], dim=1)
         tokens = tokens + self.modality_embeddings
         fused = self.encoder(tokens)
@@ -209,6 +219,8 @@ class LFMCMultiSourceFusion(nn.Module):
     ):
         super().__init__()
         self.task_weights = nn.Parameter(torch.ones(num_task_weights, dtype=torch.float32))
+        self.long_input_dim = int(long_input_dim)
+        self.use_weather_encoder = self.long_input_dim > 0
         self.shared_latent_dim = int(shared_latent_dim)
         self.lfmc_private_dim = int(lfmc_private_dim)
         self.sar_private_dim = int(sar_private_dim)
@@ -218,13 +230,18 @@ class LFMCMultiSourceFusion(nn.Module):
             and self.sar_private_dim > 0
         )
 
-        self.weather_encoder = WeatherTCNEncoder(
-            input_dim=long_input_dim,
-            d_weather=weather_d_model,
-            kernel_size=weather_kernel_size,
-            dropout=dropout,
-            max_dilation=weather_max_dilation,
-        )
+        if self.use_weather_encoder:
+            self.weather_encoder = WeatherTCNEncoder(
+                input_dim=self.long_input_dim,
+                d_weather=weather_d_model,
+                kernel_size=weather_kernel_size,
+                dropout=dropout,
+                max_dilation=weather_max_dilation,
+            )
+            self.weather_to_common = nn.Linear(weather_d_model, common_d_model)
+        else:
+            self.weather_encoder = None
+            self.weather_to_common = None
         self.static_encoder = StaticMLPEncoder(
             input_dim=static_input_dim,
             d_static=static_d_model,
@@ -237,7 +254,6 @@ class LFMCMultiSourceFusion(nn.Module):
             num_layers=2,
         )
 
-        self.weather_to_common = nn.Linear(weather_d_model, common_d_model)
         self.static_to_common = nn.Linear(static_d_model, common_d_model)
         self.modis_to_common = nn.Linear(modis_d_model, common_d_model)
 
@@ -245,6 +261,7 @@ class LFMCMultiSourceFusion(nn.Module):
             d_common=common_d_model,
             dropout=dropout,
             num_layers=2,
+            num_modality_tokens=3 if self.use_weather_encoder else 2,
         )
 
         if self.use_task_private_latents:
@@ -283,11 +300,17 @@ class LFMCMultiSourceFusion(nn.Module):
     def forward(self, short_history, long_history, static_features):
         static_flat = static_features.squeeze(1)
 
-        weather_token = self.weather_to_common(self.weather_encoder(long_history))
+        weather_token = None
+        if self.use_weather_encoder:
+            weather_token = self.weather_to_common(self.weather_encoder(long_history))
         static_token = self.static_to_common(self.static_encoder(static_flat))
         modis_token = self.modis_to_common(self.modis_encoder(short_history))
 
-        fused_cls = self.fusion(weather_token, static_token, modis_token)
+        modality_tokens = []
+        if weather_token is not None:
+            modality_tokens.append(weather_token)
+        modality_tokens.extend([static_token, modis_token])
+        fused_cls = self.fusion(*modality_tokens)
 
         if self.use_task_private_latents:
             shared_latent = self.shared_branch(fused_cls)

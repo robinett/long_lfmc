@@ -4,6 +4,10 @@ current_model_family:
     outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
     input_data_name: ensemble/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
     model_num_tasks: 3
+  multitask_no_daymet:
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_multisource_fusion_no_daymet_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+    input_data_name: ensemble/lfmc_vh_vv_365_multisource_fusion_no_daymet_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+    model_num_tasks: 3
   single_task:
     outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
     input_data_name: lfmc_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20

@@ -52,6 +52,15 @@ SCHEDULER_T_MAX = "40"
 
 MODEL_FAMILY = "multisource_fusion"
 DAYMET_ZARR_CLIM20 = str(SCRATCH_ROOT / "daymet" / "daymet_vars_and_anoms_clim20.zarr")
+DEFAULT_SUBMISSION_TAG = (
+    "multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4"
+    "_tw5_vpd_anoms_nozone_clim20"
+)
+DEFAULT_EXISTING_TENSOR_TAG = "dm128_vpd_anoms_nozone_clim20"
+NO_DAYMET_SUBMISSION_TAG = (
+    "multisource_fusion_no_daymet_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32"
+    "_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20"
+)
 
 D_MODEL = "128"
 NHEAD = "4"
@@ -93,7 +102,7 @@ def now_ts():
 
 
 def utc_now_iso():
-    return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def log(message):
@@ -239,14 +248,34 @@ def parse_args():
     parser.add_argument("--use-existing-tensors", action="store_true")
     parser.add_argument("--multitask-only", action="store_true")
     parser.add_argument("--single-task-only", action="store_true")
+    parser.add_argument(
+        "--no-daymet-multitask",
+        action="store_true",
+        help=(
+            "Train the derived multitask no-Daymet variant from existing tensors. "
+            "Run derive_no_daymet_multitask_tensors.py first."
+        ),
+    )
     parser.add_argument("--ensemble-size", type=int, default=16)
     parser.add_argument(
         "--submission-tag",
-        default="multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20",
+        default=DEFAULT_SUBMISSION_TAG,
     )
-    parser.add_argument("--existing-tensor-tag", default="dm128_vpd_anoms_nozone_clim20")
+    parser.add_argument("--existing-tensor-tag", default=DEFAULT_EXISTING_TENSOR_TAG)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
+
+    if args.no_daymet_multitask:
+        if args.build_tensors:
+            raise RuntimeError("--no-daymet-multitask uses pre-derived tensors; do not pass --build-tensors.")
+        if args.single_task_only:
+            raise RuntimeError("--no-daymet-multitask is only defined for multitask training.")
+        args.use_existing_tensors = True
+        args.multitask_only = True
+        if args.submission_tag == DEFAULT_SUBMISSION_TAG:
+            args.submission_tag = NO_DAYMET_SUBMISSION_TAG
+        if args.existing_tensor_tag == DEFAULT_EXISTING_TENSOR_TAG:
+            args.existing_tensor_tag = NO_DAYMET_SUBMISSION_TAG
 
     if args.build_tensors and args.use_existing_tensors:
         raise RuntimeError("Choose only one of --build-tensors or --use-existing-tensors.")
@@ -368,27 +397,37 @@ def build_training_specs(args, paths):
 
 def upsert_training_specs(conn, specs):
     for spec in specs:
-        conn.execute(
+        updated = conn.execute(
             """
-            INSERT INTO training_jobs (run_name, run_tag, task_group, member_idx, input_dir, save_root, state)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(run_name) DO UPDATE SET
-                run_tag=excluded.run_tag,
-                task_group=excluded.task_group,
-                member_idx=excluded.member_idx,
-                input_dir=excluded.input_dir,
-                save_root=excluded.save_root
+            UPDATE training_jobs
+            SET run_tag = ?, task_group = ?, member_idx = ?, input_dir = ?, save_root = ?
+            WHERE run_name = ?
             """,
             (
-                spec["run_name"],
                 spec["run_tag"],
                 spec["task_group"],
                 spec["member_idx"],
                 spec["input_dir"],
                 spec["save_root"],
-                "NEW",
+                spec["run_name"],
             ),
         )
+        if updated.rowcount == 0:
+            conn.execute(
+                """
+                INSERT INTO training_jobs (run_name, run_tag, task_group, member_idx, input_dir, save_root, state)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    spec["run_name"],
+                    spec["run_tag"],
+                    spec["task_group"],
+                    spec["member_idx"],
+                    spec["input_dir"],
+                    spec["save_root"],
+                    "NEW",
+                ),
+            )
     conn.commit()
 
 
@@ -455,17 +494,22 @@ def preprocess_output_complete(step):
 
 def sync_preprocess_defs(conn, defs):
     for step in defs:
-        conn.execute(
+        updated = conn.execute(
             """
-            INSERT INTO preprocess_steps (step_key, step_type, job_name, output_path, state)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(step_key) DO UPDATE SET
-                step_type=excluded.step_type,
-                job_name=excluded.job_name,
-                output_path=excluded.output_path
+            UPDATE preprocess_steps
+            SET step_type = ?, job_name = ?, output_path = ?
+            WHERE step_key = ?
             """,
-            (step["step_key"], step["step_type"], step["job_name"], str(step["output_path"]), "NEW"),
+            (step["step_type"], step["job_name"], str(step["output_path"]), step["step_key"]),
         )
+        if updated.rowcount == 0:
+            conn.execute(
+                """
+                INSERT INTO preprocess_steps (step_key, step_type, job_name, output_path, state)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (step["step_key"], step["step_type"], step["job_name"], str(step["output_path"]), "NEW"),
+            )
     conn.commit()
 
 
@@ -899,7 +943,7 @@ def submit_training_job(conn, spec, pool, paths):
             "--parsable",
             "--export=%s" % export_arg,
             "--job-name=%s" % spec["run_name"],
-            "train_job_longweather.sbatch",
+            str(SCRIPT_DIR / "train_job_longweather.sbatch"),
             "--input_data_dir",
             spec["input_dir"],
             "--save_dir",
