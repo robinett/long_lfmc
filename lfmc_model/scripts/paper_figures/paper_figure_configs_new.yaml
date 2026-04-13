@@ -39,6 +39,15 @@ models:
     ensemble_selection_key:
     model_num_tasks: 1
     color: "#2f5d50"
+  multitask_no_daymet_16:
+    display_name: Multitask LFMC Model, no Daymet (16-member ensemble)
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_multisource_fusion_no_daymet_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+    input_data_name: ensemble/lfmc_vh_vv_365_multisource_fusion_no_daymet_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+    is_ensemble: true
+    ensemble_member_name_prefix:
+    ensemble_selection_key:
+    model_num_tasks: 3
+    color: "#6f6a2f"
 
 timeseries_selection:
   r2_percentiles:
@@ -92,6 +101,11 @@ figures:
     model_keys:
       - multitask_16
       - single_task_16
+      - multitask_no_daymet_16
+    legend_labels:
+      - Multi-task model
+      - Single-task model
+      - Multi-task model w/o Daymet
     figsize: [11.8, 13.2]
     filename: figure_05_landcover_model_comparison.png
 
@@ -119,19 +133,38 @@ figures:
 
   supplementary_figure_2:
     enabled: true
-    anchor_model_key: multitask_16
-    model_keys:
-      - multitask_16
-      - single_task_16
-    selection_mode: medium_by_landcover
-    num_sites_per_criterion: 1
-    min_measurements: 10
-    years_to_plot: 3
-    landcover_order:
-      - shrub
-      - evergreen_forest
-      - deciduous_forest
-      - grass
-    padding_days: 60
-    figsize: [12.0, 10.5]
-    filename: supplementary_figure_02_model_comparison_timeseries.png
+    model_key: multitask_16
+    site_min_obs: 10
+    x_limits: [-1.0, 1.0]
+    figsize: [10.2, 5.8]
+    filename: supplementary_figure_02_site_r2_landcover_distribution.png
+
+  supplementary_figure_3:
+    enabled: true
+    title: Supplementary Figure S3 Placeholder
+    description: Evergreen-focused analyses will be added here in a future revision.
+    figsize: [9.8, 4.6]
+    filename: supplementary_figure_03_evergreen_placeholder.png
+
+  supplementary_figure_4:
+    enabled: true
+    count_mode: all_targets
+    figsize: [11.2, 5.8]
+    note: LFMC-only fractions are computed from the current single-task sample index. LFMC/VV/VH fractions are computed from a current multitask sample index using all LFMC, VV, and VH sample rows together.
+    filename: supplementary_figure_04_training_sample_landcover_distribution.png
+    datasets:
+      lfmc_only:
+        label: LFMC-only
+        color: "#2f5d50"
+        sample_index_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/indexes/sample_index_longweather_2000_2024_lfmc_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20.parquet
+      lfmc_vv_vh:
+        label: LFMC/VV/VH
+        color: "#cf5c36"
+        sample_index_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/indexes/ensemble/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20/sample_index_longweather_2000_2024_lfmc_vh_vv_ds1000.parquet
+
+  supplementary_figure_5:
+    enabled: true
+    title: Supplementary Figure S5 Placeholder
+    description: Low-latency versus normal-pipeline comparisons will be added here in a future revision.
+    figsize: [9.8, 4.6]
+    filename: supplementary_figure_05_low_latency_placeholder.png

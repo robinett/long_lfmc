@@ -11,6 +11,7 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from matplotlib.colors import LogNorm, Normalize
 from matplotlib.patches import Patch
 
@@ -662,6 +663,249 @@ def plot_sar_sampling_summary(
         plt.close(fig)
 
 
+def plot_site_r2_landcover_distribution(
+    site_r2_df: pd.DataFrame,
+    categories: Sequence[str],
+    save_path: str,
+    fontsize: int,
+    figsize: Sequence[float],
+    dpi: int,
+    x_limits: Sequence[float],
+) -> None:
+    if len(site_r2_df) == 0:
+        raise ValueError("No site-level R2 rows provided for landcover distribution plot")
+    if len(categories) == 0:
+        raise ValueError("No landcover categories provided for site-level R2 plot")
+    x_min = float(x_limits[0])
+    x_max = float(x_limits[1])
+    if not np.isfinite(x_min) or not np.isfinite(x_max) or x_max <= x_min:
+        raise ValueError(f"Invalid x_limits for site-level R2 plot: {x_limits}")
+    work = site_r2_df.copy()
+    work["site_r2"] = pd.to_numeric(work["site_r2"], errors="coerce")
+    work = work[np.isfinite(work["site_r2"])].copy()
+    work = work[work["dominant_landcover"].isin(categories)].copy()
+    if len(work) == 0:
+        raise ValueError("No finite site-level R2 rows remain after filtering to landcover categories")
+    work["site_r2_clipped"] = work["site_r2"].clip(lower=x_min, upper=x_max)
+    palette = sns.color_palette("colorblind", n_colors=max(len(categories), 1))
+    with plt.rc_context(_paper_rc_params(fontsize)):
+        fig, ax = plt.subplots(figsize=tuple(figsize))
+        for idx, category in enumerate(categories):
+            class_df = work[work["dominant_landcover"] == category].copy()
+            if len(class_df) == 0:
+                continue
+            label = f"{LANDCOVER_DISPLAY.get(str(category), str(category))} (n={len(class_df)})"
+            color = palette[idx]
+            if len(class_df) >= 2:
+                sns.kdeplot(
+                    data=class_df,
+                    x="site_r2_clipped",
+                    ax=ax,
+                    linewidth=2.2,
+                    label=label,
+                    color=color,
+                    fill=False,
+                    common_norm=False,
+                    bw_adjust=0.35,
+                    cut=0,
+                    clip=(x_min, x_max),
+                    gridsize=512,
+                )
+            else:
+                ax.axvline(
+                    float(class_df["site_r2_clipped"].iloc[0]),
+                    color=color,
+                    linewidth=2.2,
+                    label=label,
+                )
+        handles, labels = ax.get_legend_handles_labels()
+        if len(handles) > 0:
+            ax.legend(
+                handles,
+                labels,
+                frameon=False,
+                fontsize=max(fontsize - 2, 8),
+                title=None,
+            )
+        ax.set_xlim(x_min, x_max)
+        ax.set_xlabel("Site-level LFMC R²", fontsize=fontsize)
+        ax.set_ylabel("Density", fontsize=fontsize)
+        ax.tick_params(axis="both", labelsize=max(fontsize - 2, 8))
+        ax.text(
+            0.98,
+            0.98,
+            (
+                f"Sites = {len(work):,}\n"
+                f"Land covers = {work['dominant_landcover'].nunique()}"
+            ),
+            transform=ax.transAxes,
+            va="top",
+            ha="right",
+            bbox={
+                "boxstyle": "round",
+                "facecolor": "white",
+                "alpha": 0.9,
+                "edgecolor": "0.45",
+            },
+            fontsize=max(fontsize - 3, 8),
+        )
+        fig.tight_layout()
+        _ensure_parent_dir(save_path)
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_training_sample_landcover_comparison(
+    categories: Sequence[str],
+    dataset_labels: Sequence[str],
+    colors: Sequence[str],
+    values: np.ndarray,
+    errors: Optional[np.ndarray],
+    total_ns: Optional[Sequence[float]],
+    save_path: str,
+    fontsize: int,
+    figsize: Sequence[float],
+    dpi: int,
+    note_text: Optional[str] = None,
+) -> None:
+    if len(categories) == 0:
+        raise ValueError("No landcover categories provided for training-sample comparison plot")
+    if len(dataset_labels) == 0:
+        raise ValueError("No dataset labels provided for training-sample comparison plot")
+    val_arr = np.asarray(values, dtype=float)
+    if val_arr.ndim != 2:
+        raise ValueError("Training-sample comparison values must be a 2D array")
+    err_arr = None if errors is None else np.asarray(errors, dtype=float)
+    total_n_arr = None if total_ns is None else np.asarray(total_ns, dtype=float)
+    with plt.rc_context(_paper_rc_params(fontsize)):
+        fig, ax = plt.subplots(figsize=tuple(figsize))
+        x = np.arange(len(categories))
+        width = 0.82 / float(len(dataset_labels))
+        ymax = 0.0
+        for dataset_idx, dataset_label in enumerate(dataset_labels):
+            offset = (dataset_idx - ((len(dataset_labels) - 1) / 2.0)) * width
+            yerr = None if err_arr is None else err_arr[:, dataset_idx]
+            bars = ax.bar(
+                x + offset,
+                val_arr[:, dataset_idx],
+                width=width,
+                label=dataset_label,
+                color=colors[dataset_idx],
+                yerr=yerr,
+                ecolor="0.25",
+                capsize=2.5,
+                error_kw={"elinewidth": 1.2, "capthick": 1.1, "zorder": 4},
+                zorder=2,
+            )
+            finite_vals = val_arr[:, dataset_idx][np.isfinite(val_arr[:, dataset_idx])]
+            if finite_vals.size > 0:
+                ymax = max(ymax, float(np.max(finite_vals)))
+            if err_arr is not None:
+                finite_tops = (val_arr[:, dataset_idx] + err_arr[:, dataset_idx])[
+                    np.isfinite(val_arr[:, dataset_idx] + err_arr[:, dataset_idx])
+                ]
+                if finite_tops.size > 0:
+                    ymax = max(ymax, float(np.max(finite_tops)))
+            if total_n_arr is not None and dataset_idx < len(total_n_arr) and np.isfinite(total_n_arr[dataset_idx]):
+                labels = []
+                top_positions = []
+                for row_idx, value in enumerate(val_arr[:, dataset_idx]):
+                    if not np.isfinite(value):
+                        labels.append("")
+                        top_positions.append(np.nan)
+                        continue
+                    err_val = 0.0
+                    if err_arr is not None:
+                        err_candidate = err_arr[row_idx, dataset_idx]
+                        err_val = 0.0 if not np.isfinite(err_candidate) else float(err_candidate)
+                    labels.append(f"N={int(round(float(total_n_arr[dataset_idx]))):,}")
+                    top_positions.append(float(value) + err_val)
+                _annotate_bars(
+                    ax,
+                    bars,
+                    labels,
+                    fontsize=max(fontsize - 5, 7),
+                    zero_floor_for_negative=False,
+                    tops=top_positions,
+                )
+        ax.set_xticks(x, _format_landcover_labels(categories))
+        ax.tick_params(axis="x", rotation=25)
+        for tick in ax.get_xticklabels():
+            tick.set_horizontalalignment("right")
+        ax.set_xlabel("Land cover")
+        ax.set_ylabel("Fraction of training samples")
+        ax.set_ylim(0.0, min(1.0, ymax * 1.12 if ymax > 0 else 1.0))
+        legend = ax.legend(frameon=True, loc="upper left")
+        legend.get_frame().set_alpha(1.0)
+        legend.get_frame().set_edgecolor("0.4")
+        if note_text not in {None, ""}:
+            ax.text(
+                0.98,
+                0.98,
+                str(note_text),
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                bbox={
+                    "boxstyle": "round",
+                    "facecolor": "white",
+                    "alpha": 0.92,
+                    "edgecolor": "0.45",
+                },
+                fontsize=max(fontsize - 3, 8),
+            )
+        fig.tight_layout()
+        _ensure_parent_dir(save_path)
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_placeholder_figure(
+    title: str,
+    description: str,
+    save_path: str,
+    fontsize: int,
+    figsize: Sequence[float],
+    dpi: int,
+) -> None:
+    with plt.rc_context(_paper_rc_params(fontsize)):
+        fig, ax = plt.subplots(figsize=tuple(figsize))
+        fig.patch.set_facecolor("#f5f1e8")
+        ax.set_facecolor("#f5f1e8")
+        ax.axis("off")
+        ax.text(
+            0.5,
+            0.62,
+            title,
+            ha="center",
+            va="center",
+            fontsize=fontsize + 4,
+            color="#2f3b33",
+            transform=ax.transAxes,
+        )
+        ax.text(
+            0.5,
+            0.42,
+            description,
+            ha="center",
+            va="center",
+            fontsize=max(fontsize, 10),
+            color="#4f5d53",
+            transform=ax.transAxes,
+            wrap=True,
+            bbox={
+                "boxstyle": "round",
+                "facecolor": "white",
+                "alpha": 0.82,
+                "edgecolor": "0.55",
+            },
+        )
+        fig.tight_layout()
+        _ensure_parent_dir(save_path)
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
+
 def _scatter_stats_text(metrics: Dict[str, float]) -> str:
     r2 = metrics.get("r2", np.nan)
     rmse = metrics.get("rmse", np.nan)
@@ -1021,19 +1265,17 @@ def plot_landcover_comparison_panels(
             ax.set_ylabel(panel["ylabel"])
             ax.set_title(panel["title"], loc="left", pad=4)
         handles, _ = axes[0].get_legend_handles_labels()
-        legend = fig.legend(
+        fig.legend(
             handles,
             model_labels,
-            frameon=True,
-            ncol=len(model_labels),
-            loc="upper center",
-            bbox_to_anchor=(0.5, 0.992),
+            frameon=False,
+            ncol=max(1, min(len(model_labels), 4)),
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.028),
         )
-        legend.get_frame().set_alpha(1.0)
-        legend.get_frame().set_edgecolor("0.4")
         axes[-1].set_xticks(x, _format_landcover_labels(categories))
         axes[-1].set_xlabel("Land cover")
-        fig.subplots_adjust(left=0.09, right=0.985, bottom=0.11, top=0.93, hspace=0.34)
+        fig.subplots_adjust(left=0.09, right=0.985, bottom=0.115, top=0.93, hspace=0.34)
         _ensure_parent_dir(save_path)
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)

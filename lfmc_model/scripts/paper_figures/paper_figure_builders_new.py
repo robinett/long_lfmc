@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import contextlib
+import glob
 import hashlib
 import io
 import os
@@ -11,6 +12,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import xarray as xr
 from shapely.geometry import Point
 
 here = os.path.dirname(os.path.abspath(__file__))
@@ -31,6 +33,7 @@ from compare_timeseries import (  # noqa: E402
     select_ensemble_member_dirs,
 )
 from eval_deep import (  # noqa: E402
+    _WGS84_TO_5070,
     _build_ensemble_eval_df,
     build_lfmc_space_time_tables,
     build_lfmc_y2y_df,
@@ -38,13 +41,17 @@ from eval_deep import (  # noqa: E402
     build_site_landcover_lookup,
     compute_landcover_decomposition_metrics,
     compute_basic_metrics,
+    get_nlcd_frac_ds,
     load_fold_predictions,
 )
 from paper_figure_plotting import (  # noqa: E402
     plot_landcover_comparison_panels,
     plot_landcover_metric_grouped,
+    plot_placeholder_figure,
     plot_scatter_triptych,
+    plot_site_r2_landcover_distribution,
     plot_stacked_timeseries_panels,
+    plot_training_sample_landcover_comparison,
 )
 
 
@@ -84,6 +91,114 @@ def _metric_std(values: Sequence[float]) -> float:
     if arr.size <= 1:
         return np.nan
     return float(np.std(arr, ddof=0))
+
+
+def _sample_index_point_key(latitude: pd.Series, longitude: pd.Series) -> pd.Series:
+    lat_text = latitude.map(lambda value: f"{float(value):.6f}")
+    lon_text = longitude.map(lambda value: f"{float(value):.6f}")
+    return lat_text + "_" + lon_text
+
+
+def _build_point_landcover_lookup_fast(point_df: pd.DataFrame, save_path: str) -> pd.DataFrame:
+    required_cols = ["point_key", "latitude", "longitude", "year"]
+    missing_cols = [col for col in required_cols if col not in point_df.columns]
+    if len(missing_cols) > 0:
+        raise KeyError(
+            f"Point dataframe is missing required columns for land-cover lookup: {missing_cols}"
+        )
+    requested_points = (
+        point_df[required_cols]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+    requested_points["point_key"] = requested_points["point_key"].astype(str)
+    requested_points["year"] = pd.to_numeric(requested_points["year"], errors="coerce")
+    requested_points["latitude"] = pd.to_numeric(requested_points["latitude"], errors="coerce")
+    requested_points["longitude"] = pd.to_numeric(requested_points["longitude"], errors="coerce")
+    requested_points = requested_points.dropna(subset=["point_key", "year", "latitude", "longitude"]).copy()
+    requested_points["year"] = requested_points["year"].astype(int)
+    required_lookup_cols = [
+        "point_key",
+        "year",
+        "latitude",
+        "longitude",
+        "dominant_landcover",
+        "dominant_landcover_frac",
+    ]
+    if os.path.exists(save_path):
+        existing_df = pd.read_csv(save_path, dtype={"point_key": str})
+        if all(col in existing_df.columns for col in required_lookup_cols):
+            existing_df["point_key"] = existing_df["point_key"].astype(str)
+            existing_df["year"] = pd.to_numeric(existing_df["year"], errors="coerce")
+            existing_df = existing_df[existing_df["year"].notna()].copy()
+            existing_df["year"] = existing_df["year"].astype(int)
+            existing_df = (
+                existing_df[required_lookup_cols]
+                .drop_duplicates(subset=["point_key", "year"])
+                .reset_index(drop=True)
+            )
+        else:
+            existing_df = pd.DataFrame(columns=required_lookup_cols)
+    else:
+        existing_df = pd.DataFrame(columns=required_lookup_cols)
+    if len(requested_points) == 0:
+        return existing_df
+    cached_keys = set(
+        zip(
+            existing_df["point_key"].tolist(),
+            existing_df["year"].tolist(),
+        )
+    )
+    requested_keys = list(
+        zip(
+            requested_points["point_key"].tolist(),
+            requested_points["year"].tolist(),
+        )
+    )
+    missing_mask = np.asarray([key not in cached_keys for key in requested_keys], dtype=bool)
+    if not missing_mask.any():
+        print(f"Using cached point land-cover lookup: {save_path}")
+        return existing_df
+    missing_points = requested_points.loc[missing_mask].reset_index(drop=True)
+    print(
+        f"Computing vectorized land-cover lookup for {len(missing_points):,} missing point-years: "
+        f"{os.path.basename(save_path)}"
+    )
+    x_vals, y_vals = _WGS84_TO_5070.transform(
+        missing_points["longitude"].to_numpy(),
+        missing_points["latitude"].to_numpy(),
+    )
+    nlcd_ds = get_nlcd_frac_ds()
+    landcover_vars = list(nlcd_ds.data_vars)
+    point_cube = nlcd_ds.sel(
+        x=xr.DataArray(x_vals, dims="point"),
+        y=xr.DataArray(y_vals, dims="point"),
+        method="nearest",
+    )
+    point_years = pd.to_datetime(missing_points["year"].astype(str) + "-01-01")
+    point_cube = point_cube.sel(
+        year=xr.DataArray(point_years.to_numpy(), dims="point"),
+        method="nearest",
+    ).load()
+    frac_arr = point_cube.to_array("landcover").transpose("point", "landcover").values
+    valid_mask = np.isfinite(frac_arr).any(axis=1)
+    dominant_idx = np.full(len(missing_points), -1, dtype=int)
+    if bool(valid_mask.any()):
+        dominant_idx[valid_mask] = np.nanargmax(frac_arr[valid_mask], axis=1)
+    dominant_landcover = np.full(len(missing_points), "unknown", dtype=object)
+    dominant_frac = np.full(len(missing_points), np.nan, dtype=float)
+    if bool(valid_mask.any()):
+        dominant_landcover[valid_mask] = np.asarray(landcover_vars, dtype=object)[dominant_idx[valid_mask]]
+        dominant_frac[valid_mask] = frac_arr[valid_mask, dominant_idx[valid_mask]]
+    lookup_df = missing_points.copy()
+    lookup_df["dominant_landcover"] = dominant_landcover
+    lookup_df["dominant_landcover_frac"] = dominant_frac
+    lookup_df = lookup_df[required_lookup_cols]
+    lookup_df = pd.concat([existing_df, lookup_df], ignore_index=True)
+    lookup_df = lookup_df.drop_duplicates(subset=["point_key", "year"], keep="last").reset_index(drop=True)
+    lookup_df.to_csv(save_path, index=False)
+    print(f"Wrote point land-cover lookup: {save_path}")
+    return lookup_df
 
 
 def _filtered_landcover_df(df: pd.DataFrame, cfg: Dict[str, object]) -> pd.DataFrame:
@@ -779,6 +894,279 @@ def _prepend_overall_landcover_metrics(
     return pd.concat([pd.DataFrame([overall_row]), metric_df], ignore_index=True)
 
 
+def _build_site_r2_landcover_df(
+    runtime: Dict[str, object],
+    model_key: str,
+    min_obs: int,
+) -> pd.DataFrame:
+    cache_key = (model_key, int(min_obs))
+    if cache_key in runtime["site_r2_landcover_tables"]:
+        return runtime["site_r2_landcover_tables"][cache_key].copy()
+    context = _load_eval_context(runtime, model_key)
+    lfmc_df = context["eval_df"][context["eval_df"]["target"] == "lfmc"].reset_index(drop=True)
+    if len(lfmc_df) == 0:
+        out = pd.DataFrame(
+            columns=[
+                "site_key",
+                "latitude",
+                "longitude",
+                "year",
+                "n_points",
+                "site_r2",
+                "dominant_landcover",
+                "dominant_landcover_frac",
+            ]
+        )
+        runtime["site_r2_landcover_tables"][cache_key] = out
+        return out.copy()
+    lfmc_df = lfmc_df.copy()
+    if "site_key" not in lfmc_df.columns:
+        if "latitude" not in lfmc_df.columns or "longitude" not in lfmc_df.columns:
+            raise KeyError("LFMC evaluation rows are missing site_key and latitude/longitude columns")
+        lfmc_df["site_key"] = (
+            pd.to_numeric(lfmc_df["latitude"], errors="coerce").astype(str)
+            + "_"
+            + pd.to_numeric(lfmc_df["longitude"], errors="coerce").astype(str)
+        )
+    if "year" not in lfmc_df.columns:
+        if "date" not in lfmc_df.columns:
+            raise KeyError("LFMC evaluation rows are missing year and date columns")
+        lfmc_df["year"] = pd.to_datetime(lfmc_df["date"], errors="coerce").dt.year
+    site_df = (
+        lfmc_df.groupby("site_key", dropna=False)
+        .apply(
+            lambda group: pd.Series(
+                {
+                    "latitude": float(pd.to_numeric(group["latitude"], errors="coerce").iloc[0]),
+                    "longitude": float(pd.to_numeric(group["longitude"], errors="coerce").iloc[0]),
+                    "year": int(pd.to_numeric(group["year"], errors="coerce").dropna().min()),
+                    "n_points": int(len(group)),
+                    "obs": np.asarray(group["obs"], dtype=float),
+                    "pred": np.asarray(group["pred"], dtype=float),
+                }
+            ),
+            include_groups=False,
+        )
+        .reset_index()
+    )
+    site_df = site_df[site_df["n_points"] >= int(min_obs)].copy()
+    if len(site_df) == 0:
+        out = pd.DataFrame(
+            columns=[
+                "site_key",
+                "latitude",
+                "longitude",
+                "year",
+                "n_points",
+                "site_r2",
+                "dominant_landcover",
+                "dominant_landcover_frac",
+            ]
+        )
+        runtime["site_r2_landcover_tables"][cache_key] = out
+        return out.copy()
+    site_df["site_r2"] = site_df.apply(
+        lambda row: float(compute_basic_metrics(row["obs"], row["pred"]).get("r2", np.nan)),
+        axis=1,
+    )
+    lookup_path = os.path.join(
+        _model_cache_dir(runtime, model_key),
+        "site_r2_landcover_lookup.csv",
+    )
+    lookup_df = build_site_landcover_lookup(
+        site_df[["site_key", "latitude", "longitude", "year"]].copy(),
+        lookup_path,
+    )
+    lookup_df["site_key"] = lookup_df["site_key"].astype(str)
+    site_df["site_key"] = site_df["site_key"].astype(str)
+    site_df = site_df.merge(
+        lookup_df[["site_key", "dominant_landcover", "dominant_landcover_frac"]],
+        on="site_key",
+        how="left",
+    )
+    site_df = site_df[site_df["dominant_landcover"].notna()].copy()
+    site_df = site_df.drop(columns=["obs", "pred"])
+    site_df = _filtered_landcover_df(site_df, runtime["cfg"])
+    site_df = site_df.sort_values(
+        ["dominant_landcover", "site_r2", "site_key"],
+        ascending=[True, False, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+    runtime["site_r2_landcover_tables"][cache_key] = site_df
+    return site_df.copy()
+
+
+def _count_landcover_rows_from_sample_index(
+    runtime: Dict[str, object],
+    sample_index_path: str,
+    count_mode: str,
+    cache_stem: str,
+) -> pd.DataFrame:
+    count_mode = str(count_mode).strip().lower()
+    columns = ["landcover", "date", "latitude", "longitude"]
+    if count_mode != "all_targets":
+        columns.append("target_name")
+    df = pd.read_parquet(sample_index_path, columns=columns)
+    if count_mode == "lfmc_only":
+        df = df[df["target_name"] == "lfmc"].copy()
+    elif count_mode != "all_targets":
+        raise ValueError(
+            f"Unsupported training-sample count_mode '{count_mode}'. "
+            "Expected one of: all_targets, lfmc_only."
+        )
+    landcover = df["landcover"].astype("string").str.strip().str.lower()
+    df = df.assign(dominant_landcover=landcover)
+    missing_lc_mask = df["dominant_landcover"].isna() | (df["dominant_landcover"] == "")
+    if bool(missing_lc_mask.any()):
+        work = df.loc[missing_lc_mask, ["date", "latitude", "longitude"]].copy()
+        work["date"] = pd.to_datetime(work["date"], errors="coerce")
+        work["year"] = work["date"].dt.year
+        work["latitude"] = pd.to_numeric(work["latitude"], errors="coerce")
+        work["longitude"] = pd.to_numeric(work["longitude"], errors="coerce")
+        work = work.dropna(subset=["year", "latitude", "longitude"]).copy()
+        if len(work) > 0:
+            work["point_key"] = _sample_index_point_key(
+                work["latitude"],
+                work["longitude"],
+            )
+            lookup_path = os.path.join(
+                runtime["cache_dir"],
+                f"{cache_stem}_point_landcover_lookup.csv",
+            )
+            point_lookup_df = _build_point_landcover_lookup_fast(
+                work[["point_key", "latitude", "longitude", "year"]]
+                .drop_duplicates()
+                .reset_index(drop=True),
+                lookup_path,
+            )
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            df["year"] = df["date"].dt.year
+            df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+            df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
+            df["point_key"] = _sample_index_point_key(
+                df["latitude"],
+                df["longitude"],
+            )
+            point_lookup_df = point_lookup_df.rename(
+                columns={"dominant_landcover": "lookup_dominant_landcover"}
+            )
+            df = df.merge(
+                point_lookup_df[["point_key", "year", "lookup_dominant_landcover"]],
+                on=["point_key", "year"],
+                how="left",
+            )
+            lookup_landcover = (
+                df["lookup_dominant_landcover"]
+                .astype("string")
+                .str.strip()
+                .str.lower()
+            )
+            df["dominant_landcover"] = df["dominant_landcover"].fillna(lookup_landcover)
+            df = df.drop(columns=["lookup_dominant_landcover"])
+    df = df[df["dominant_landcover"].notna() & (df["dominant_landcover"] != "")].copy()
+    counts = (
+        df.groupby("dominant_landcover", as_index=False)
+        .size()
+        .rename(columns={"size": "n_samples"})
+    )
+    return counts
+
+
+def _build_training_sample_landcover_tables(
+    runtime: Dict[str, object],
+    fig_cfg: Dict[str, object],
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    dataset_cfgs = dict(fig_cfg.get("datasets", {}))
+    dataset_order = list(fig_cfg.get("dataset_order", dataset_cfgs.keys()))
+    if len(dataset_cfgs) == 0:
+        raise ValueError("Supplementary Figure 4 requires at least one configured dataset")
+    member_records = []
+    count_mode = str(fig_cfg.get("count_mode", "all_targets"))
+    for dataset_key in dataset_order:
+        dataset_cfg = dataset_cfgs[dataset_key]
+        label = str(dataset_cfg["label"])
+        color = str(dataset_cfg["color"])
+        member_paths = []
+        if dataset_cfg.get("sample_index_path") not in {None, ""}:
+            member_paths = [str(dataset_cfg["sample_index_path"])]
+        else:
+            sample_index_root = str(dataset_cfg.get("sample_index_root", ""))
+            sample_index_glob = str(dataset_cfg.get("sample_index_glob", "*.parquet"))
+            member_paths = sorted(glob.glob(os.path.join(sample_index_root, sample_index_glob)))
+        if len(member_paths) == 0:
+            raise ValueError(f"No sample-index files were found for dataset '{dataset_key}'")
+        for member_path in member_paths:
+            counts_df = _count_landcover_rows_from_sample_index(
+                runtime=runtime,
+                sample_index_path=member_path,
+                count_mode=count_mode,
+                cache_stem=f"supplementary_figure_04_{dataset_key}_{os.path.splitext(os.path.basename(member_path))[0]}",
+            )
+            for row in counts_df.itertuples(index=False):
+                member_records.append(
+                    {
+                        "dataset_key": dataset_key,
+                        "label": label,
+                        "color": color,
+                        "member_id": os.path.splitext(os.path.basename(member_path))[0],
+                        "dominant_landcover": str(row.dominant_landcover),
+                        "n_samples": int(row.n_samples),
+                    }
+                )
+    member_df = pd.DataFrame.from_records(member_records)
+    if len(member_df) == 0:
+        empty = pd.DataFrame(
+            columns=[
+                "dataset_key",
+                "label",
+                "color",
+                "dominant_landcover",
+                "mean_n_samples",
+                "std_n_samples",
+                "fraction",
+                "fraction_std",
+                "total_n",
+                "n_members",
+            ]
+        )
+        return empty, empty.copy()
+    member_df = _filtered_landcover_df(member_df, runtime["cfg"])
+    summary_df = (
+        member_df.groupby(
+            ["dataset_key", "label", "color", "dominant_landcover"],
+            as_index=False,
+            dropna=False,
+            observed=True,
+        )
+        .agg(
+            mean_n_samples=("n_samples", "mean"),
+            std_n_samples=("n_samples", "std"),
+            n_members=("member_id", "nunique"),
+        )
+    )
+    summary_df["std_n_samples"] = pd.to_numeric(
+        summary_df["std_n_samples"],
+        errors="coerce",
+    ).fillna(0.0)
+    summary_df["total_n"] = summary_df.groupby(
+        "dataset_key",
+        dropna=False,
+        observed=True,
+    )["mean_n_samples"].transform("sum")
+    summary_df["fraction"] = np.where(
+        summary_df["total_n"] > 0,
+        summary_df["mean_n_samples"] / summary_df["total_n"],
+        np.nan,
+    )
+    summary_df["fraction_std"] = np.where(
+        summary_df["total_n"] > 0,
+        summary_df["std_n_samples"] / summary_df["total_n"],
+        np.nan,
+    )
+    summary_df = _filtered_landcover_df(summary_df, runtime["cfg"])
+    return summary_df, member_df
+
+
 def _load_ensemble_site_entry(cfg: Dict[str, object], model_key: str) -> Dict[str, object]:
     model_cfg = _model_cfg(cfg, model_key)
     member_dirs = _select_model_member_dirs(model_cfg)
@@ -1389,6 +1777,7 @@ def init_runtime(cfg: Dict[str, object]) -> Dict[str, object]:
         "vhvv_fold_cache": {},
         "eval_contexts": {},
         "landcover_metric_tables": {},
+        "site_r2_landcover_tables": {},
     }
 
 
@@ -1515,50 +1904,114 @@ def build_supplementary_figure_1(runtime: Dict[str, object]) -> str:
 def build_supplementary_figure_2(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
     fig_cfg = cfg["figures"]["supplementary_figure_2"]
-    model_entries = [
-        _load_ensemble_site_entry(cfg, str(model_key))
-        for model_key in fig_cfg["model_keys"]
-    ]
-    anchor_entry, selected = _select_timeseries_sites_by_landcover(
+    site_min_obs = int(fig_cfg.get("site_min_obs", cfg["variability"]["site_min_obs"]))
+    site_r2_df = _build_site_r2_landcover_df(
         runtime=runtime,
-        model_entries=model_entries,
-        anchor_model_key=str(fig_cfg["anchor_model_key"]),
-        num_sites_per_landcover=int(fig_cfg["num_sites_per_criterion"]),
-        min_measurements=int(fig_cfg["min_measurements"]),
-        years_to_plot=int(fig_cfg.get("years_to_plot", 3)),
-        landcover_order=list(fig_cfg.get("landcover_order", cfg["filters"]["landcover_order"])),
+        model_key=str(fig_cfg["model_key"]),
+        min_obs=site_min_obs,
     )
-    panels = []
-    panel_order = list(fig_cfg.get("landcover_order", cfg["filters"]["landcover_order"]))
-    for criterion in panel_order:
-        site_list = selected.get(criterion, [])
-        if len(site_list) == 0:
-            continue
-        panels.append(
-            _build_timeseries_comparison_panel(
-                runtime=runtime,
-                model_entries=model_entries,
-                anchor_entry=anchor_entry,
-                site_key=site_list[0],
-                criterion_label=str(criterion).replace("_", " ").title(),
-                years_to_plot=int(fig_cfg.get("years_to_plot", 3)),
-            )
-        )
+    if len(site_r2_df) == 0:
+        raise ValueError("No site-level R2 rows were available for Supplementary Figure 2")
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
-    table_path = _table_output_path(runtime, "supplementary_figure_02_sites")
-    site_rows = []
-    for criterion, site_list in selected.items():
-        for rank_idx, site_key in enumerate(site_list, start=1):
-            site_rows.append(
-                {
-                    "criterion": criterion,
-                    "rank": rank_idx,
-                    "site_key": site_key,
-                }
-            )
-    pd.DataFrame.from_records(site_rows).to_csv(table_path, index=False)
-    plot_stacked_timeseries_panels(
-        panels=panels,
+    table_path = _table_output_path(runtime, "supplementary_figure_02_site_r2_by_landcover")
+    site_r2_df.to_csv(table_path, index=False)
+    categories = [
+        category for category in cfg["filters"]["landcover_order"]
+        if category in site_r2_df["dominant_landcover"].astype(str).tolist()
+    ]
+    plot_site_r2_landcover_distribution(
+        site_r2_df=site_r2_df,
+        categories=categories,
+        save_path=save_path,
+        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"].get("dpi", 350)),
+        x_limits=fig_cfg.get("x_limits", [-1.0, 1.0]),
+    )
+    return save_path
+
+
+def build_supplementary_figure_3(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["supplementary_figure_3"]
+    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
+    plot_placeholder_figure(
+        title=str(fig_cfg.get("title", "Supplementary Figure Placeholder")),
+        description=str(fig_cfg.get("description", "")),
+        save_path=save_path,
+        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"].get("dpi", 350)),
+    )
+    return save_path
+
+
+def build_supplementary_figure_4(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["supplementary_figure_4"]
+    summary_df, member_df = _build_training_sample_landcover_tables(runtime, fig_cfg)
+    if len(summary_df) == 0:
+        raise ValueError("No training-sample landcover rows were available for Supplementary Figure 4")
+    summary_table_path = _table_output_path(runtime, "supplementary_figure_04_training_sample_landcover_counts")
+    member_table_path = _table_output_path(runtime, "supplementary_figure_04_training_sample_landcover_member_counts")
+    summary_df.to_csv(summary_table_path, index=False)
+    member_df.to_csv(member_table_path, index=False)
+    categories = [
+        category for category in cfg["filters"]["landcover_order"]
+        if category in summary_df["dominant_landcover"].astype(str).tolist()
+    ]
+    dataset_order = list(fig_cfg.get("dataset_order", fig_cfg["datasets"].keys()))
+    dataset_lookup = {
+        row["dataset_key"]: row
+        for _, row in summary_df[["dataset_key", "label", "color"]].drop_duplicates().iterrows()
+    }
+    total_n_lookup = {
+        row["dataset_key"]: float(row["total_n"])
+        for _, row in summary_df[["dataset_key", "total_n"]].drop_duplicates().iterrows()
+    }
+    dataset_labels = [
+        str(dataset_lookup[key]["label"])
+        for key in dataset_order
+    ]
+    colors = [str(dataset_lookup[key]["color"]) for key in dataset_order]
+    total_ns = [float(total_n_lookup[key]) for key in dataset_order]
+    values = []
+    for category in categories:
+        value_row = []
+        for dataset_key in dataset_order:
+            row = summary_df[
+                (summary_df["dataset_key"] == dataset_key)
+                & (summary_df["dominant_landcover"] == category)
+            ]
+            if len(row) == 0:
+                value_row.append(np.nan)
+                continue
+            value_row.append(float(row.iloc[0]["fraction"]))
+        values.append(value_row)
+    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
+    plot_training_sample_landcover_comparison(
+        categories=categories,
+        dataset_labels=dataset_labels,
+        colors=colors,
+        values=np.asarray(values, dtype=float),
+        errors=None,
+        total_ns=np.asarray(total_ns, dtype=float),
+        save_path=save_path,
+        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"].get("dpi", 350)),
+        note_text=None,
+    )
+    return save_path
+
+
+def build_supplementary_figure_5(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["supplementary_figure_5"]
+    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
+    plot_placeholder_figure(
+        title=str(fig_cfg.get("title", "Supplementary Figure Placeholder")),
+        description=str(fig_cfg.get("description", "")),
         save_path=save_path,
         fontsize=int(cfg["plotting"].get("fontsize", 14)),
         figsize=fig_cfg["figsize"],
@@ -1881,12 +2334,17 @@ def build_figure_5(runtime: Dict[str, object]) -> str:
         anomaly_counts.append(anomaly_count_row)
         mean_counts.append(mean_count_row)
         monthly_counts.append(monthly_count_row)
+    legend_labels = list(fig_cfg.get("legend_labels", model_labels))
+    if len(legend_labels) != len(model_labels):
+        raise ValueError(
+            "Figure 5 legend_labels length must match the number of configured model_keys"
+        )
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
     table_path = _table_output_path(runtime, "figure_05_landcover_model_comparison")
     pd.DataFrame.from_records(merged_rows).to_csv(table_path, index=False)
     plot_landcover_comparison_panels(
         categories=categories,
-        model_labels=model_labels,
+        model_labels=legend_labels,
         colors=colors,
         panels=[
             {
@@ -1940,6 +2398,9 @@ def build_enabled_figures(
         "figure_6": build_figure_6,
         "supplementary_figure_1": build_supplementary_figure_1,
         "supplementary_figure_2": build_supplementary_figure_2,
+        "supplementary_figure_3": build_supplementary_figure_3,
+        "supplementary_figure_4": build_supplementary_figure_4,
+        "supplementary_figure_5": build_supplementary_figure_5,
     }
     outputs = {}
     for fig_key, fig_cfg in cfg["figures"].items():
