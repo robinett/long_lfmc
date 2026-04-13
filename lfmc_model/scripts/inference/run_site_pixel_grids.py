@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import torch
 import xarray as xr
+import yaml
 from pyproj import Transformer
 
 here = os.path.dirname(os.path.abspath(__file__))
@@ -52,23 +53,44 @@ from map_runtime_utils import (
 
 
 DEFAULT_SITE_CSV = (
-    "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/"
-    "test_locations/valid_locations_wus.csv"
+    "/scratch/users/trobinet/long_lfmc/final_lfmc/inference/"
+    "sites_for_mitch/valid_psinet_sites.csv"
 )
 DEFAULT_OUTPUT_DIR = (
-    "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/"
-    "test_locations/pixel_grids_shared_dm128"
+    "/scratch/users/trobinet/long_lfmc/final_lfmc/inference/"
+    "sites_for_mitch/pixel_grids_multisource_fusion_clim20"
 )
-DEFAULT_ENSEMBLE_ROOT = (
-    "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/"
-    "lfmc_vh_vv_365_shared_ensemble"
-)
-DEFAULT_INPUT_DATA_NAME = "ensemble/lfmc_vh_vv_365_shared_ensemble"
 DEFAULT_INPUTS_ROOT = "/scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs"
 DEFAULT_GRID_PATH = (
     "/scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4"
 )
-DEFAULT_MEMBER_NAME_PREFIX = "transformer_dm128_"
+DEFAULT_MEMBER_NAME_PREFIX = "multisource_fusion_"
+DEFAULT_OVERRIDE_START_DATE = "2001-01-01"
+DEFAULT_OVERRIDE_END_DATE = "2024-12-31"
+DEFAULT_MAX_PLOT_YEARS = 2
+
+
+def _load_current_multitask_defaults() -> Dict[str, str]:
+    config_path = os.path.join(project_root, "lfmc_model", "scripts", "current_model_family.yaml")
+    with open(config_path, "r") as f:
+        cfg = yaml.safe_load(f) or {}
+    multitask_cfg = cfg.get("current_model_family", {}).get("multitask", {})
+    outputs_root = str(multitask_cfg.get("outputs_root", "")).strip()
+    input_data_name = str(multitask_cfg.get("input_data_name", "")).strip()
+    if outputs_root == "" or input_data_name == "":
+        raise ValueError(
+            f"Missing current multitask defaults in {config_path}"
+        )
+    return {
+        "config_path": config_path,
+        "outputs_root": outputs_root,
+        "input_data_name": input_data_name,
+    }
+
+
+CURRENT_MULTITASK_DEFAULTS = _load_current_multitask_defaults()
+DEFAULT_ENSEMBLE_ROOT = CURRENT_MULTITASK_DEFAULTS["outputs_root"]
+DEFAULT_INPUT_DATA_NAME = CURRENT_MULTITASK_DEFAULTS["input_data_name"]
 
 
 def get_args():
@@ -97,10 +119,37 @@ def get_args():
         "--member_name_prefix",
         type=str,
         default=DEFAULT_MEMBER_NAME_PREFIX,
-        help="Restrict ensemble members to transformer directories with this prefix.",
+        help="Restrict ensemble members to model directories with this prefix.",
     )
     parser.add_argument("--model_type", type=str, default=DEFAULT_MODEL_TYPE)
     parser.add_argument("--forward_batch_size", type=int, default=8192)
+    parser.add_argument(
+        "--override_start_date",
+        type=str,
+        default=None,
+        help="Optional YYYY-MM-DD start date applied to every site row before runtime clamping.",
+    )
+    parser.add_argument(
+        "--override_end_date",
+        type=str,
+        default=None,
+        help="Optional YYYY-MM-DD end date applied to every site row before runtime clamping.",
+    )
+    parser.add_argument(
+        "--max_period_2001_2024",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Override every site row to the broad 2001-01-01 through 2024-12-31 window "
+            "before source/runtime clamping."
+        ),
+    )
+    parser.add_argument(
+        "--max_plot_years",
+        type=float,
+        default=DEFAULT_MAX_PLOT_YEARS,
+        help="If the output span exceeds this many years, only plot the most recent slice.",
+    )
     return parser.parse_args()
 
 
@@ -115,6 +164,65 @@ def _year_coord_to_int(value: object) -> int:
     if isinstance(value, (np.datetime64, pd.Timestamp)):
         return int(pd.Timestamp(value).year)
     return int(value)
+
+
+def _normalize_site_dataframe(site_df: pd.DataFrame) -> pd.DataFrame:
+    out = site_df.copy()
+    unnamed_cols = [col for col in out.columns if str(col).startswith("Unnamed:")]
+    if len(unnamed_cols) > 0:
+        out = out.drop(columns=unnamed_cols)
+    rename_map = {}
+    if "latitude_wgs84" in out.columns and "lat" not in out.columns:
+        rename_map["latitude_wgs84"] = "lat"
+    if "longitude_wgs84" in out.columns and "lon" not in out.columns:
+        rename_map["longitude_wgs84"] = "lon"
+    if "min_date" in out.columns and "start_date" not in out.columns:
+        rename_map["min_date"] = "start_date"
+    if "max_date" in out.columns and "end_date" not in out.columns:
+        rename_map["max_date"] = "end_date"
+    if len(rename_map) > 0:
+        out = out.rename(columns=rename_map)
+    required_cols = {"lat", "lon", "start_date", "end_date"}
+    missing_cols = sorted(required_cols - set(out.columns))
+    if len(missing_cols) > 0:
+        raise KeyError(f"site_csv is missing required columns after normalization: {missing_cols}")
+    return out
+
+
+def _resolve_site_date_overrides(args) -> Tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    if args.max_period_2001_2024:
+        return (
+            pd.Timestamp(DEFAULT_OVERRIDE_START_DATE).normalize(),
+            pd.Timestamp(DEFAULT_OVERRIDE_END_DATE).normalize(),
+        )
+    override_start = None
+    override_end = None
+    if args.override_start_date is not None:
+        override_start = pd.Timestamp(args.override_start_date).normalize()
+    if args.override_end_date is not None:
+        override_end = pd.Timestamp(args.override_end_date).normalize()
+    if (override_start is None) != (override_end is None):
+        raise ValueError("override_start_date and override_end_date must be provided together")
+    return override_start, override_end
+
+
+def _slice_plot_payload(
+    dates,
+    mean_cube: np.ndarray,
+    std_cube: np.ndarray,
+    max_plot_years: float,
+) -> Tuple[pd.DatetimeIndex, np.ndarray, np.ndarray]:
+    dates = pd.DatetimeIndex(pd.to_datetime(dates))
+    if len(dates) == 0 or max_plot_years <= 0:
+        return dates, mean_cube, std_cube
+    span_days = (dates[-1] - dates[0]).days
+    if span_days <= int(round(max_plot_years * 365.25)):
+        return dates, mean_cube, std_cube
+    plot_start = dates[-1] - pd.Timedelta(days=int(round(max_plot_years * 365.25)))
+    keep_mask = dates >= plot_start
+    if not np.any(keep_mask):
+        return dates, mean_cube, std_cube
+    return dates[keep_mask], mean_cube[keep_mask, :, :], std_cube[keep_mask, :, :]
 
 
 def _build_site_payload(
@@ -366,16 +474,18 @@ def main():
         )
     if args.forward_batch_size <= 0:
         raise ValueError("forward_batch_size must be >= 1")
+    if args.max_plot_years <= 0:
+        raise ValueError("max_plot_years must be > 0")
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(os.path.join(args.output_dir, "plots"), exist_ok=True)
 
-    site_df = pd.read_csv(args.site_csv)
-    required_cols = {"lat", "lon", "start_date", "end_date"}
-    missing_cols = sorted(required_cols - set(site_df.columns))
-    if len(missing_cols) > 0:
-        raise KeyError(f"site_csv is missing required columns: {missing_cols}")
+    site_df = _normalize_site_dataframe(pd.read_csv(args.site_csv))
     site_df["start_date"] = pd.to_datetime(site_df["start_date"]).dt.normalize()
     site_df["end_date"] = pd.to_datetime(site_df["end_date"]).dt.normalize()
+    override_start, override_end = _resolve_site_date_overrides(args)
+    if override_start is not None and override_end is not None:
+        site_df["start_date"] = override_start
+        site_df["end_date"] = override_end
     if (site_df["end_date"] < site_df["start_date"]).any():
         raise ValueError("Each site row must have end_date >= start_date")
 
@@ -390,6 +500,25 @@ def main():
 
     print(timestamped_message(f"[site_pixel_grids] reading site csv {args.site_csv}"))
     print(timestamped_message(f"[site_pixel_grids] rows={len(site_df)} output_dir={args.output_dir}"))
+    print(
+        timestamped_message(
+            "[site_pixel_grids] using current multitask family from "
+            f"{CURRENT_MULTITASK_DEFAULTS['config_path']}"
+        )
+    )
+    print(
+        timestamped_message(
+            f"[site_pixel_grids] ensemble_root={args.ensemble_root} "
+            f"input_data_name={args.input_data_name}"
+        )
+    )
+    if override_start is not None and override_end is not None:
+        print(
+            timestamped_message(
+                f"[site_pixel_grids] overriding all site windows to "
+                f"{override_start.date()} through {override_end.date()}"
+            )
+        )
     source_resolution = resolve_inference_sources(
         registry_path=args.source_registry_path,
         product_tier=args.product_tier,
@@ -431,10 +560,11 @@ def main():
             )
         )
     reference_runtime = build_static_superset_runtime(runtimes[0], runtimes)
-
-    site_states: List[Dict[str, object]] = []
-    for row_idx in range(len(site_df)):
+    total_sites = len(site_df)
+    total_members = len(runtimes)
+    for row_idx in range(total_sites):
         site_row = site_df.iloc[row_idx]
+        site_label = str(site_row.get("dataset_name", f"row_{row_idx:03d}"))
         requested_start = pd.Timestamp(site_row["start_date"]).normalize()
         requested_end = pd.Timestamp(site_row["end_date"]).normalize()
         safe_start, safe_end = resolve_common_runtime_window(
@@ -469,71 +599,54 @@ def main():
             output_years=output_years,
         )
         out_path = _site_output_path(args.output_dir, site_row)
-        site_states.append(
-            {
-                "row": site_row,
-                "output_path": out_path,
-                "site_payload": site_payload,
-                "reference_payload": reference_payload,
-                "requested_start": requested_start,
-                "requested_end": requested_end,
-                "safe_start": safe_start,
-                "safe_end": safe_end,
-                "landcover_meta": landcover_meta,
-                "plot_path": _site_plot_path(args.output_dir, site_row),
-                "aggregator": initialize_running_ensemble_predictions(reference_payload["info_df"]),
-            }
-        )
+        plot_path = _site_plot_path(args.output_dir, site_row)
+        aggregator = initialize_running_ensemble_predictions(reference_payload["info_df"])
         print(
             timestamped_message(
                 f"[site_pixel_grids] prepared row={row_idx} "
-                f"site={site_row.get('dataset_name', f'row_{row_idx:03d}')!s} "
+                f"site={site_label} "
                 f"window={safe_start.date()} to {safe_end.date()} "
                 f"output={out_path}"
             )
         )
 
-    total_members = len(runtimes)
-    tensor_cache: Dict[Tuple[str, ...], Dict[str, object]] = {}
-    for member_idx, runtime in enumerate(runtimes, start=1):
-        member_name = os.path.basename(member_dirs[member_idx - 1])
-        print(
-            timestamped_message(
-                f"[site_pixel_grids] loading member {member_idx}/{total_members}: {member_name}"
-            )
-        )
-        member_t0 = time.perf_counter()
-        predictor = load_runtime_forward_predictor(
-            runtime,
-            model_type=args.model_type,
-            device=device,
-        )
-        try:
-            for state_idx, site_state in enumerate(site_states, start=1):
-                site_label = str(
-                    site_state["row"].get("dataset_name", f"row_{int(site_state['row'].name):03d}")
+        tensor_cache: Dict[Tuple[str, ...], Dict[str, object]] = {}
+        for member_idx, runtime in enumerate(runtimes, start=1):
+            member_name = os.path.basename(member_dirs[member_idx - 1])
+            print(
+                timestamped_message(
+                    f"[site_pixel_grids] site {row_idx + 1}/{total_sites} {site_label} "
+                    f"loading member {member_idx}/{total_members}: {member_name}"
                 )
+            )
+            member_t0 = time.perf_counter()
+            predictor = load_runtime_forward_predictor(
+                runtime,
+                model_type=args.model_type,
+                device=device,
+            )
+            try:
                 print(
                     timestamped_message(
-                        f"[site_pixel_grids] member {member_idx}/{total_members} "
-                        f"site {state_idx}/{len(site_states)} {site_label}"
+                        f"[site_pixel_grids] site {row_idx + 1}/{total_sites} {site_label} "
+                        f"member {member_idx}/{total_members}"
                     )
                 )
                 try:
                     tensor_payload = convert_tensor_payload_to_runtime(
-                        reference_payload=site_state["reference_payload"],
+                        reference_payload=reference_payload,
                         reference_runtime=reference_runtime,
                         runtime=runtime,
                         tensor_cache=tensor_cache,
-                        site=f"{site_label}_{int(site_state['row'].name):03d}",
+                        site=f"{site_label}_{int(site_row.name):03d}",
                     )
                 except ValueError:
                     tensor_payload = build_reference_tensor_payload(
-                        tile_payload=site_state["site_payload"]["tile_payload"],
+                        tile_payload=site_payload["tile_payload"],
                         runtime=runtime,
                         dss=dss,
-                        start_date=site_state["safe_start"],
-                        end_date=site_state["safe_end"],
+                        start_date=safe_start,
+                        end_date=safe_end,
                     )
                 pred_arrays = run_runtime_forward_loaded(
                     predictor=predictor,
@@ -543,49 +656,55 @@ def main():
                     use_cuda_autocast=True,
                 )
                 update_running_ensemble_predictions(
-                    site_state["aggregator"],
+                    aggregator,
                     pred_arrays["lfmc_pred"],
                 )
-        finally:
-            del predictor
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        print(
-            timestamped_message(
-                f"[site_pixel_grids] member {member_idx}/{total_members} complete in "
-                f"{time.perf_counter() - member_t0:.1f}s"
+            finally:
+                del predictor
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            print(
+                timestamped_message(
+                    f"[site_pixel_grids] site {row_idx + 1}/{total_sites} {site_label} "
+                    f"member {member_idx}/{total_members} complete in "
+                    f"{time.perf_counter() - member_t0:.1f}s"
+                )
             )
-        )
 
-    for site_state in site_states:
-        agg_df = finalize_running_ensemble_predictions(site_state["aggregator"])
+        agg_df = finalize_running_ensemble_predictions(aggregator)
         dense_payload = densify_tile_predictions(
             agg_df,
-            site_state["site_payload"]["tile_payload"],
+            site_payload["tile_payload"],
         )
         ds = _build_site_dataset(
-            site_row=site_state["row"],
-            site_payload=site_state["site_payload"],
+            site_row=site_row,
+            site_payload=site_payload,
             dense_payload=dense_payload,
-            landcover_meta=site_state["landcover_meta"],
+            landcover_meta=landcover_meta,
             quality_flag_value=int(source_resolution["quality_flag_value"]),
             ensemble_member_count=len(member_dirs),
-            requested_start=site_state["requested_start"],
-            requested_end=site_state["requested_end"],
+            requested_start=requested_start,
+            requested_end=requested_end,
         )
-        ds.to_netcdf(site_state["output_path"])
-        print(timestamped_message(f"[site_pixel_grids] wrote {site_state['output_path']}"))
-        plot_pixel_grid_timeseries(
+        ds.to_netcdf(out_path)
+        print(timestamped_message(f"[site_pixel_grids] wrote {out_path}"))
+        plot_dates, plot_mean, plot_std = _slice_plot_payload(
             dates=dense_payload["dates"],
             mean_cube=ds[OUTPUT_MEAN_NAME].values,
             std_cube=ds[OUTPUT_STD_NAME].values,
-            save_path=site_state["plot_path"],
-            site_label=site_state["row"].get("dataset_name", f"row_{int(site_state['row'].name):03d}"),
-            center_lat=site_state["site_payload"]["center_lat"],
-            center_lon=site_state["site_payload"]["center_lon"],
+            max_plot_years=float(args.max_plot_years),
+        )
+        plot_pixel_grid_timeseries(
+            dates=plot_dates,
+            mean_cube=plot_mean,
+            std_cube=plot_std,
+            save_path=plot_path,
+            site_label=site_label,
+            center_lat=site_payload["center_lat"],
+            center_lon=site_payload["center_lon"],
             y_label="LFMC ensemble mean (%)",
         )
-        print(timestamped_message(f"[site_pixel_grids] wrote {site_state['plot_path']}"))
+        print(timestamped_message(f"[site_pixel_grids] wrote {plot_path}"))
 
 
 if __name__ == "__main__":
