@@ -125,6 +125,12 @@ def _parse_args():
         default="",
         help="Optional suffix appended to each output CSV basename.",
     )
+    parser.add_argument(
+        "--sar-zarr-path",
+        type=str,
+        default="/scratch/users/trobinet/long_lfmc/final_lfmc/sar/sar_all_vars.zarr",
+        help="SAR zarr store to sample from.",
+    )
     return parser.parse_args()
 
 
@@ -249,6 +255,7 @@ def main():
     vars_to_sample = list(args.vars_to_sample)
     output_dir = str(args.output_dir)
     output_tag = str(args.output_tag).strip()
+    sar_zarr_path = str(args.sar_zarr_path)
     os.makedirs(output_dir, exist_ok=True)
     _log("Starting SAR sample selection script.")
     _log(
@@ -259,12 +266,13 @@ def main():
         f"min_dominant_landcover_fraction={min_dominant_landcover_fraction}, "
         f"min_lfmc_sites_per_climate_zone={min_lfmc_sites_per_climate_zone}, "
         f"strict_target={strict_target}, vars_to_sample={vars_to_sample}, "
-        f"output_dir={output_dir}, output_tag={output_tag!r}"
+        f"output_dir={output_dir}, output_tag={output_tag!r}, "
+        f"sar_zarr_path={sar_zarr_path}"
     )
     # glob pattern to pick up everything
     _log("Opening SAR zarr dataset...")
     sar_ds = xr.open_zarr(
-        "/scratch/users/trobinet/long_lfmc/final_lfmc/sar/sar_all_vars.zarr",
+        sar_zarr_path,
         chunks="auto",
     )
     _log(

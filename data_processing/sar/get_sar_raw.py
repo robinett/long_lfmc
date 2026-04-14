@@ -53,12 +53,16 @@ def process_range(
     out_dir,
     scratch_dir,
     polarization="VV",
+    flight_direction="DESCENDING",
     out_var_name=None,
     skip_existing=False,
 ):
     polarization = polarization.upper()
     if polarization not in {"VV", "VH"}:
         raise ValueError(f"Unsupported polarization: {polarization}")
+    flight_direction = flight_direction.upper()
+    if flight_direction not in {"ASCENDING", "DESCENDING"}:
+        raise ValueError(f"Unsupported flight direction: {flight_direction}")
     if out_var_name is None:
         out_var_name = f"{polarization.lower()}_backscatter"
     tif_suffix = f"_{polarization}.tif"
@@ -100,7 +104,7 @@ def process_range(
                     #beamMode="IW",
                     #polarization="VH",
                     polarization=polarization,
-                    flightDirection="DESCENDING",
+                    flightDirection=flight_direction,
                     start=date_utc_iso,
                     end=date_utc_iso_end,
                     intersectsWith=geom.wkt,
@@ -390,6 +394,12 @@ def main():
         help='Polarization to download/process (VV or VH)'
     )
     p.add_argument(
+        '--flight_direction',
+        type=str,
+        default='DESCENDING',
+        help='Orbit direction to download/process (ASCENDING or DESCENDING)'
+    )
+    p.add_argument(
         '--out_dir',
         type=str,
         default=None,
@@ -414,6 +424,7 @@ def main():
     start_date = pd.Timestamp(args.start_date)
     end_date = pd.Timestamp(args.end_date)
     pol = args.polarization.upper()
+    flight_direction = args.flight_direction.upper()
     out_var_name = args.out_var_name or f'{pol.lower()}_backscatter'
     out_dir = args.out_dir or f'/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_raw_daily_{pol.lower()}/'
     scratch_dir = f'/scratch/users/trobinet/long_lfmc/trent_datasets/sar/temp/{args.job_num}/'
@@ -429,6 +440,7 @@ def main():
         out_dir,
         scratch_dir,
         polarization=pol,
+        flight_direction=flight_direction,
         out_var_name=out_var_name,
         skip_existing=args.skip_existing,
     )

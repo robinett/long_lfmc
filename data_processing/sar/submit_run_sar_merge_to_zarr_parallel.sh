@@ -6,17 +6,17 @@
 
 set -euo pipefail
 
-VH_ZARR="/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_500m_full.zarr"
-VV_ZARR="/scratch/users/trobinet/long_lfmc/trent_datasets/sar/sar_500m_full_vv.zarr"
-OUTPUT_ZARR="/scratch/users/trobinet/long_lfmc/final_lfmc/sar/sar_all_vars.zarr"
-COORD_DIR="/scratch/users/trobinet/long_lfmc/final_lfmc/sar/sar_merge_queue_coord"
-TIME_BLOCK_DAYS="16"
-NUM_WORKERS="16"
-OVERWRITE_OUT="1"
-MAKE_QA_PLOTS="1"
-QA_PLOT_SEED="42"
-QA_PLOT_BASE_DIR="/scratch/users/trobinet/long_lfmc/final_lfmc/sar/qc_plots"
-MAX_CLAIMS=""
+VH_ZARR="${VH_ZARR:-/oak/stanford/groups/konings/trobinet/long_lfmc/trent_datasets/sar/sar_500m_full.zarr}"
+VV_ZARR="${VV_ZARR:-/scratch/users/trobinet/long_lfmc/trent_datasets/sar/sar_500m_full_vv.zarr}"
+OUTPUT_ZARR="${OUTPUT_ZARR:-/scratch/users/trobinet/long_lfmc/final_lfmc/sar/sar_all_vars.zarr}"
+COORD_DIR="${COORD_DIR:-/scratch/users/trobinet/long_lfmc/final_lfmc/sar/sar_merge_queue_coord}"
+TIME_BLOCK_DAYS="${TIME_BLOCK_DAYS:-16}"
+NUM_WORKERS="${NUM_WORKERS:-16}"
+OVERWRITE_OUT="${OVERWRITE_OUT:-1}"
+MAKE_QA_PLOTS="${MAKE_QA_PLOTS:-1}"
+QA_PLOT_SEED="${QA_PLOT_SEED:-42}"
+QA_PLOT_BASE_DIR="${QA_PLOT_BASE_DIR:-/scratch/users/trobinet/long_lfmc/final_lfmc/sar/qc_plots}"
+MAX_CLAIMS="${MAX_CLAIMS:-}"
 
 if [[ "${NUM_WORKERS}" -lt 1 ]]; then
     echo "NUM_WORKERS must be >= 1"

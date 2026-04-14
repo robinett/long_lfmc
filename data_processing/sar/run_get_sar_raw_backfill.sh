@@ -20,6 +20,7 @@ START_DATE="${START_DATE:?START_DATE is required}"
 END_DATE="${END_DATE:?END_DATE is required}"
 CHUNK_MONTHS="${CHUNK_MONTHS:-1}"
 POLARIZATION="${POLARIZATION:?POLARIZATION is required}"
+FLIGHT_DIRECTION="${FLIGHT_DIRECTION:-DESCENDING}"
 OUT_DIR="${OUT_DIR:?OUT_DIR is required}"
 OUT_VAR_NAME="${OUT_VAR_NAME:?OUT_VAR_NAME is required}"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
@@ -41,6 +42,7 @@ fi
 
 echo "MODE=download"
 echo "POLARIZATION=${POLARIZATION}"
+echo "FLIGHT_DIRECTION=${FLIGHT_DIRECTION}"
 echo "TASK_ID=${TASK_ID}"
 echo "RANGE=${chunk_start} -> ${chunk_end}"
 echo "OUT_DIR=${OUT_DIR}"
@@ -53,6 +55,7 @@ cmd=(
     --end_date "${chunk_end}"
     --job_num "${JOB_NUM}"
     --polarization "${POLARIZATION}"
+    --flight_direction "${FLIGHT_DIRECTION}"
     --out_dir "${OUT_DIR}"
     --out_var_name "${OUT_VAR_NAME}"
 )
