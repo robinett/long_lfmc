@@ -761,7 +761,7 @@ def plot_training_sample_landcover_comparison(
     colors: Sequence[str],
     values: np.ndarray,
     errors: Optional[np.ndarray],
-    total_ns: Optional[Sequence[float]],
+    count_values: Optional[np.ndarray],
     save_path: str,
     fontsize: int,
     figsize: Sequence[float],
@@ -776,7 +776,7 @@ def plot_training_sample_landcover_comparison(
     if val_arr.ndim != 2:
         raise ValueError("Training-sample comparison values must be a 2D array")
     err_arr = None if errors is None else np.asarray(errors, dtype=float)
-    total_n_arr = None if total_ns is None else np.asarray(total_ns, dtype=float)
+    count_arr = None if count_values is None else np.asarray(count_values, dtype=float)
     with plt.rc_context(_paper_rc_params(fontsize)):
         fig, ax = plt.subplots(figsize=tuple(figsize))
         x = np.arange(len(categories))
@@ -806,7 +806,7 @@ def plot_training_sample_landcover_comparison(
                 ]
                 if finite_tops.size > 0:
                     ymax = max(ymax, float(np.max(finite_tops)))
-            if total_n_arr is not None and dataset_idx < len(total_n_arr) and np.isfinite(total_n_arr[dataset_idx]):
+            if count_arr is not None:
                 labels = []
                 top_positions = []
                 for row_idx, value in enumerate(val_arr[:, dataset_idx]):
@@ -818,7 +818,11 @@ def plot_training_sample_landcover_comparison(
                     if err_arr is not None:
                         err_candidate = err_arr[row_idx, dataset_idx]
                         err_val = 0.0 if not np.isfinite(err_candidate) else float(err_candidate)
-                    labels.append(f"N={int(round(float(total_n_arr[dataset_idx]))):,}")
+                    count_value = count_arr[row_idx, dataset_idx]
+                    count_text = "" if not np.isfinite(count_value) else f"\nN={int(round(float(count_value))):,}"
+                    labels.append(
+                        f"{float(value):.2f}{count_text}"
+                    )
                     top_positions.append(float(value) + err_val)
                 _annotate_bars(
                     ax,
@@ -834,8 +838,8 @@ def plot_training_sample_landcover_comparison(
             tick.set_horizontalalignment("right")
         ax.set_xlabel("Land cover")
         ax.set_ylabel("Fraction of training samples")
-        ax.set_ylim(0.0, min(1.0, ymax * 1.12 if ymax > 0 else 1.0))
-        legend = ax.legend(frameon=True, loc="upper left")
+        ax.set_ylim(0.0, min(1.0, ymax * 1.2 if ymax > 0 else 1.0))
+        legend = ax.legend(frameon=True, loc="upper right")
         legend.get_frame().set_alpha(1.0)
         legend.get_frame().set_edgecolor("0.4")
         if note_text not in {None, ""}:

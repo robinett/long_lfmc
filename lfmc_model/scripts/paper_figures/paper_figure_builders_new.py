@@ -1965,19 +1965,16 @@ def build_supplementary_figure_4(runtime: Dict[str, object]) -> str:
         row["dataset_key"]: row
         for _, row in summary_df[["dataset_key", "label", "color"]].drop_duplicates().iterrows()
     }
-    total_n_lookup = {
-        row["dataset_key"]: float(row["total_n"])
-        for _, row in summary_df[["dataset_key", "total_n"]].drop_duplicates().iterrows()
-    }
     dataset_labels = [
         str(dataset_lookup[key]["label"])
         for key in dataset_order
     ]
     colors = [str(dataset_lookup[key]["color"]) for key in dataset_order]
-    total_ns = [float(total_n_lookup[key]) for key in dataset_order]
     values = []
+    count_values = []
     for category in categories:
         value_row = []
+        count_row = []
         for dataset_key in dataset_order:
             row = summary_df[
                 (summary_df["dataset_key"] == dataset_key)
@@ -1985,9 +1982,12 @@ def build_supplementary_figure_4(runtime: Dict[str, object]) -> str:
             ]
             if len(row) == 0:
                 value_row.append(np.nan)
+                count_row.append(np.nan)
                 continue
             value_row.append(float(row.iloc[0]["fraction"]))
+            count_row.append(float(row.iloc[0]["mean_n_samples"]))
         values.append(value_row)
+        count_values.append(count_row)
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
     plot_training_sample_landcover_comparison(
         categories=categories,
@@ -1995,7 +1995,7 @@ def build_supplementary_figure_4(runtime: Dict[str, object]) -> str:
         colors=colors,
         values=np.asarray(values, dtype=float),
         errors=None,
-        total_ns=np.asarray(total_ns, dtype=float),
+        count_values=np.asarray(count_values, dtype=float),
         save_path=save_path,
         fontsize=int(cfg["plotting"].get("fontsize", 14)),
         figsize=fig_cfg["figsize"],
