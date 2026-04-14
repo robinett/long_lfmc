@@ -570,6 +570,130 @@ def build_static_superset_runtime(
     return out
 
 
+def _denormalize_tensor_to_numpy(
+    tensor: torch.Tensor,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> np.ndarray:
+    arr = tensor.detach().cpu().numpy().astype(np.float32, copy=True)
+    mean = np.asarray(mean, dtype=np.float32)
+    std = np.asarray(std, dtype=np.float32)
+    safe_std = np.where(np.abs(std) > 0, std, 1.0)
+    reshape = (1,) * (arr.ndim - 1) + (arr.shape[-1],)
+    return arr * safe_std.reshape(reshape) + mean.reshape(reshape)
+
+
+def _renormalize_numpy_to_tensor(
+    raw_arr: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    mean = np.asarray(mean, dtype=np.float32)
+    std = np.asarray(std, dtype=np.float32)
+    safe_std = np.where(np.abs(std) > 0, std, 1.0)
+    reshape = (1,) * (raw_arr.ndim - 1) + (raw_arr.shape[-1],)
+    renorm = (raw_arr - mean.reshape(reshape)) / safe_std.reshape(reshape)
+    return torch.tensor(renorm, dtype=dtype)
+
+
+def build_reference_raw_tensor_cache(
+    reference_payload: Dict[str, object],
+    reference_runtime: Dict[str, object],
+) -> Dict[str, object]:
+    ref_static_vars = list(reference_runtime["var_names"]["static_vars"])
+    static_ref_mean, static_ref_std = _effective_static_norm_arrays(
+        ref_static_vars,
+        reference_runtime["norm_params"],
+    )
+    return {
+        "short_raw": _denormalize_tensor_to_numpy(
+            reference_payload["short_tensor"],
+            reference_runtime["norm_params"]["train_short_mean"],
+            reference_runtime["norm_params"]["train_short_std"],
+        ),
+        "long_raw": _denormalize_tensor_to_numpy(
+            reference_payload["long_tensor"],
+            reference_runtime["norm_params"]["train_long_mean"],
+            reference_runtime["norm_params"]["train_long_std"],
+        ),
+        "static_raw_full": _denormalize_tensor_to_numpy(
+            reference_payload["static_tensor"],
+            static_ref_mean,
+            static_ref_std,
+        ),
+        "ref_static_idx": {
+            var_name: idx for idx, var_name in enumerate(ref_static_vars)
+        },
+        "static_raw_by_layout": {},
+    }
+
+
+def convert_tensor_payload_to_runtime_bounded(
+    reference_payload: Dict[str, object],
+    reference_runtime: Dict[str, object],
+    runtime: Dict[str, object],
+    raw_cache: Dict[str, object],
+) -> Dict[str, object]:
+    if not runtimes_share_short_long_layout(reference_runtime, runtime):
+        raise ValueError("Short/long feature layout differs; full tensor rebuild required")
+
+    short_tensor = _renormalize_numpy_to_tensor(
+        raw_cache["short_raw"],
+        runtime["norm_params"]["train_short_mean"],
+        runtime["norm_params"]["train_short_std"],
+        reference_payload["short_tensor"].dtype,
+    )
+    long_tensor = _renormalize_numpy_to_tensor(
+        raw_cache["long_raw"],
+        runtime["norm_params"]["train_long_mean"],
+        runtime["norm_params"]["train_long_std"],
+        reference_payload["long_tensor"].dtype,
+    )
+
+    if _runtimes_share_feature_layout(reference_runtime, runtime):
+        static_raw = raw_cache["static_raw_full"]
+    else:
+        new_static_vars = tuple(runtime["var_names"]["static_vars"])
+        static_raw = raw_cache["static_raw_by_layout"].get(new_static_vars)
+        if static_raw is None:
+            missing_static = [
+                var_name
+                for var_name in new_static_vars
+                if var_name not in raw_cache["ref_static_idx"]
+            ]
+            if len(missing_static) > 0:
+                raise ValueError(
+                    f"Reference static superset is missing runtime static vars: {missing_static}"
+                )
+            static_indices = np.asarray(
+                [raw_cache["ref_static_idx"][var_name] for var_name in new_static_vars],
+                dtype=np.int64,
+            )
+            static_raw = raw_cache["static_raw_full"][..., static_indices]
+            raw_cache["static_raw_by_layout"][new_static_vars] = static_raw
+
+    static_new_mean, static_new_std = _effective_static_norm_arrays(
+        runtime["var_names"]["static_vars"],
+        runtime["norm_params"],
+    )
+    static_tensor = _renormalize_numpy_to_tensor(
+        static_raw,
+        static_new_mean,
+        static_new_std,
+        reference_payload["static_tensor"].dtype,
+    )
+    return {
+        "empty": False,
+        "safe_start": reference_payload["safe_start"],
+        "safe_end": reference_payload["safe_end"],
+        "short_tensor": short_tensor,
+        "long_tensor": long_tensor,
+        "static_tensor": static_tensor,
+        "info_df": reference_payload["info_df"].copy(),
+    }
+
+
 def convert_tensor_payload_to_runtime(
     reference_payload: Dict[str, object],
     reference_runtime: Dict[str, object],

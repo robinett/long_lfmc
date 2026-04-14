@@ -19,7 +19,9 @@ from map_runtime_utils import (
     DEFAULT_MODEL_TYPE,
     DEFAULT_SCRATCH_ROOT,
     build_static_superset_runtime,
+    build_reference_raw_tensor_cache,
     convert_tensor_payload_to_runtime,
+    convert_tensor_payload_to_runtime_bounded,
     densify_tile_predictions,
     finalize_running_ensemble_predictions,
     initialize_running_ensemble_predictions,
@@ -858,6 +860,10 @@ def _process_single_task(
             ) from exc
         raise
     aggregator = initialize_running_ensemble_predictions(reference_payload["info_df"])
+    raw_tensor_cache = build_reference_raw_tensor_cache(
+        reference_payload,
+        reference_runtime,
+    )
     preload_elapsed = time.perf_counter() - preload_t0
     print(timestamped_message(
         f"[run_map_task_gpu] preloaded {progress_label} in {_format_seconds(preload_elapsed)}"
@@ -896,12 +902,11 @@ def _process_single_task(
         member_t0 = time.perf_counter()
         runtime = predictor_state["runtime"]
         try:
-            tensor_payload = convert_tensor_payload_to_runtime(
+            tensor_payload = convert_tensor_payload_to_runtime_bounded(
                 reference_payload,
                 reference_runtime,
                 runtime,
-                {},
-                site=f"tile_{task_row['tile_name']}_{task_row['start_date']}",
+                raw_tensor_cache,
             )
         except ValueError:
             member_path = _prepared_paths(

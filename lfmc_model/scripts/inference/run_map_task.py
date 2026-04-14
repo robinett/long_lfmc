@@ -11,8 +11,9 @@ from map_runtime_utils import (
     DEFAULT_MODEL_TYPE,
     aggregate_member_predictions,
     build_reference_tensor_payload,
+    build_reference_raw_tensor_cache,
     build_static_superset_runtime,
-    convert_tensor_payload_to_runtime,
+    convert_tensor_payload_to_runtime_bounded,
     densify_tile_predictions,
     get_inference_datasets,
     load_ensemble_runtimes,
@@ -80,38 +81,31 @@ def process_task_row(
         f"with {len(tile_payload['iy'])} pixels"
     ))
 
-    renorm_cache = {}
+    raw_tensor_cache = build_reference_raw_tensor_cache(
+        reference_payload,
+        reference_runtime,
+    )
     member_dfs = []
     for member_idx, runtime in enumerate(runtimes, start=1):
-        if member_idx == 1:
-            tensor_payload = convert_tensor_payload_to_runtime(
+        try:
+            tensor_payload = convert_tensor_payload_to_runtime_bounded(
                 reference_payload,
                 reference_runtime,
                 runtime,
-                renorm_cache,
-                site=f"tile_{task_row['tile_name']}_{task_row['start_date']}",
+                raw_tensor_cache,
             )
-        else:
-            try:
-                tensor_payload = convert_tensor_payload_to_runtime(
-                    reference_payload,
-                    reference_runtime,
-                    runtime,
-                    renorm_cache,
-                    site=f"tile_{task_row['tile_name']}_{task_row['start_date']}",
-                )
-            except ValueError:
-                print(timestamped_message(
-                    f"[run_map_task] member {member_idx}/{len(runtimes)} requires tensor rebuild "
-                    "because short/long feature layout differs"
-                ))
-                tensor_payload = build_reference_tensor_payload(
-                    tile_payload=tile_payload,
-                    runtime=runtime,
-                    dss=dss,
-                    start_date=block_start,
-                    end_date=block_end,
-                )
+        except ValueError:
+            print(timestamped_message(
+                f"[run_map_task] member {member_idx}/{len(runtimes)} requires tensor rebuild "
+                "because short/long feature layout differs"
+            ))
+            tensor_payload = build_reference_tensor_payload(
+                tile_payload=tile_payload,
+                runtime=runtime,
+                dss=dss,
+                start_date=block_start,
+                end_date=block_end,
+            )
         preds_df = run_runtime_forward(
             runtime=runtime,
             tensor_payload=tensor_payload,

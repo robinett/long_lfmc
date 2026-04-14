@@ -11,7 +11,6 @@ from dask.diagnostics import ProgressBar
 import torch
 import re
 from pathlib import Path
-from torch.utils.data import DataLoader, TensorDataset
 from dask.cache import Cache
 
 here = os.path.dirname(os.path.abspath(__file__))
@@ -577,6 +576,16 @@ def load_model_for_inference(
     return model, device
 
 
+def _pin_if_needed(tensor, enable):
+    if not enable:
+        return tensor
+    if tensor.device.type != "cpu":
+        return tensor
+    if tensor.is_pinned():
+        return tensor
+    return tensor.pin_memory()
+
+
 def predict_with_loaded_model(
     short_tensor,
     long_tensor,
@@ -587,59 +596,70 @@ def predict_with_loaded_model(
     batch_size=512,
     use_cuda_autocast=True,
 ):
-    dataset = TensorDataset(short_tensor, long_tensor, static_tensor)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    n_obs = short_tensor.shape[0]
+    n_obs = int(short_tensor.shape[0])
     preds_i = np.zeros(n_obs, dtype=np.float64)
     preds_vv = np.full(n_obs, np.nan, dtype=np.float64)
     preds_vh = np.full(n_obs, np.nan, dtype=np.float64)
     preds_i_std = np.full(n_obs, np.nan, dtype=np.float64)
     preds_vv_std = np.full(n_obs, np.nan, dtype=np.float64)
     preds_vh_std = np.full(n_obs, np.nan, dtype=np.float64)
-    batch_counter = 0
     use_cuda_autocast = bool(use_cuda_autocast) and device.type == "cuda"
     autocast_dtype = torch.float16
+    use_cuda_non_blocking = device.type == "cuda"
     with torch.inference_mode():
-        for Xsh_b, Xl_b, Xst_b in dataloader:
-            Xsh_b = Xsh_b.to(device=device, dtype=torch.float32)
-            Xl_b = Xl_b.to(device=device, dtype=torch.float32)
-            Xst_b = Xst_b.to(device=device, dtype=torch.float32)
+        for start_idx in range(0, n_obs, int(batch_size)):
+            end_idx = min(start_idx + int(batch_size), n_obs)
+            Xsh_cpu = _pin_if_needed(short_tensor[start_idx:end_idx], enable=use_cuda_non_blocking)
+            Xl_cpu = _pin_if_needed(long_tensor[start_idx:end_idx], enable=use_cuda_non_blocking)
+            Xst_cpu = _pin_if_needed(static_tensor[start_idx:end_idx], enable=use_cuda_non_blocking)
+            Xsh_b = Xsh_cpu.to(
+                device=device,
+                dtype=torch.float32,
+                non_blocking=use_cuda_non_blocking,
+            )
+            Xl_b = Xl_cpu.to(
+                device=device,
+                dtype=torch.float32,
+                non_blocking=use_cuda_non_blocking,
+            )
+            Xst_b = Xst_cpu.to(
+                device=device,
+                dtype=torch.float32,
+                non_blocking=use_cuda_non_blocking,
+            )
             with torch.autocast(
                 device_type=device.type,
                 dtype=autocast_dtype,
                 enabled=use_cuda_autocast,
             ):
                 output = model(Xsh_b, Xl_b, Xst_b)
-            preds_i_b = np.asarray(output['mu_insitu'].detach().cpu().numpy()).reshape(-1)
-            preds_vv_b = np.asarray(output['mu_vv'].detach().cpu().numpy()).reshape(-1)
-            preds_vh_b = np.asarray(output['mu_vh'].detach().cpu().numpy()).reshape(-1)
+            preds_i_b = np.asarray(output['mu_insitu'].detach().float().cpu().numpy()).reshape(-1)
+            preds_vv_b = np.asarray(output['mu_vv'].detach().float().cpu().numpy()).reshape(-1)
+            preds_vh_b = np.asarray(output['mu_vh'].detach().float().cpu().numpy()).reshape(-1)
             if 'log_var_insitu' in output:
                 preds_i_std_b = np.sqrt(
-                    np.exp(np.asarray(output['log_var_insitu'].detach().cpu().numpy()).reshape(-1))
+                    np.exp(np.asarray(output['log_var_insitu'].detach().float().cpu().numpy()).reshape(-1))
                 )
             else:
                 preds_i_std_b = np.full_like(preds_i_b, np.nan)
             if 'log_var_vv' in output:
                 preds_vv_std_b = np.sqrt(
-                    np.exp(np.asarray(output['log_var_vv'].detach().cpu().numpy()).reshape(-1))
+                    np.exp(np.asarray(output['log_var_vv'].detach().float().cpu().numpy()).reshape(-1))
                 )
             else:
                 preds_vv_std_b = np.full_like(preds_vv_b, np.nan)
             if 'log_var_vh' in output:
                 preds_vh_std_b = np.sqrt(
-                    np.exp(np.asarray(output['log_var_vh'].detach().cpu().numpy()).reshape(-1))
+                    np.exp(np.asarray(output['log_var_vh'].detach().float().cpu().numpy()).reshape(-1))
                 )
             else:
                 preds_vh_std_b = np.full_like(preds_vh_b, np.nan)
-            start_idx = batch_counter * batch_size
-            end_idx = start_idx + Xsh_b.shape[0]
             preds_i[start_idx:end_idx] = preds_i_b
             preds_vv[start_idx:end_idx] = preds_vv_b
             preds_vh[start_idx:end_idx] = preds_vh_b
             preds_i_std[start_idx:end_idx] = preds_i_std_b
             preds_vv_std[start_idx:end_idx] = preds_vv_std_b
             preds_vh_std[start_idx:end_idx] = preds_vh_std_b
-            batch_counter += 1
     lfmc_mean = norm_params.get('lfmc_mean', np.nan)
     lfmc_std = norm_params.get('lfmc_std', np.nan)
     vv_mean = norm_params.get('vv_mean', np.nan)
