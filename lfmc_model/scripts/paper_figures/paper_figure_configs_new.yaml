@@ -1,7 +1,8 @@
 paths:
-  output_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/plots/paper_figures_new
+  output_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/plots/paper_figures_20260414_reordered
   inputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs
   gmba_basic_shapefile: /scratch/users/trobinet/long_lfmc/final_lfmc/gmba_mountins/GMBA_Inventory_v2.0_standard_basic/GMBA_Inventory_v2.0_standard_basic.shp
+  operational_lfmc_map_zarr: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/final_products/lfmc_vh_vv_365_multisource_fusion_clim20_2001_2024.zarr
 
 plotting:
   dpi: 350
@@ -57,75 +58,129 @@ timeseries_selection:
 
 figures:
   figure_1:
-    enabled: false
-    description: Manual conceptual figure assembled outside the repo and copied into the paper figure output directory.
+    enabled: true
+    title: Figure 1 Placeholder
+    description: Placeholder for the conceptual figure.
     source_path:
-    filename: figure_01_conceptual.png
+    figsize: [9.8, 4.8]
+    filename: figure_01_conceptual_placeholder.png
 
   figure_2:
     enabled: true
-    model_key: multitask_16
-    num_sites_per_criterion: 1
-    min_measurements: 10
-    years_to_plot: 3
-    criteria_order:
-      - good
-      - average
-      - poor
-    padding_days: 60
-    plot_vv: false
-    plot_vh: false
-    figsize: [12.0, 10.5]
-    filename: figure_02_multitask_timeseries.png
+    map_variable: lfmc_ens_mean
+    map_dates:
+      - 2020-06-01
+      - 2020-10-01
+      - 2023-06-01
+      - 2023-10-01
+    panel_labels: ["a", "b", "c", "d"]
+    col_labels: ["June 1", "Oct 1"]
+    row_labels: ["2020\ndry year", "2023\nwet year"]
+    state_lines_only: true
+    subplot_wspace: -0.4
+    subplot_hspace: 0.04
+    vmin:
+    vmax:
+    figsize: [12.2, 10.5]
+    filename: figure_02_lfmc_snapshots.png
 
   figure_3:
     enabled: true
-    model_key: multitask_16
-    hexbin_gridsize: 60
-    figsize: [12.2, 11.3]
-    filename: figure_03_performance_scatters.png
+    lfmc_model_key: single_task_16
+    sar_model_key: multitask_16
+    representative_member_index: 0
+    lfmc_cmap: viridis
+    sar_cmap: cividis
+    marker_size: 32.0
+    figsize: [12.4, 6.2]
+    filename: figure_03_training_maps.png
 
   figure_4:
     enabled: true
     model_key: multitask_16
-    metric_colors:
-      - "#cf5c36"
-      - "#f4a259"
-      - "#5b8e7d"
-      - "#3d405b"
-    figsize: [11.5, 5.6]
-    filename: figure_04_landcover_breakdown.png
+    hexbin_gridsize: 60
+    figsize: [12.2, 11.3]
+    filename: figure_04_performance_scatters.png
 
   figure_5:
+    enabled: true
+    model_key: multitask_16
+    num_sites_per_criterion: 1
+    min_measurements: 10
+    years_to_plot: 5
+    require_mountain_polygon: true
+    criteria_order:
+      - good
+      - average
+      - poor
+    plot_vv: false
+    plot_vh: false
+    figsize: [12.0, 10.5]
+    filename: figure_05_multitask_timeseries.png
+
+  figure_6:
+    enabled: true
+    model_key: multitask_16
+    metric_colors:
+      - "#000000"
+      - "#c0392b"
+      - "#e67e22"
+      - "#f0c808"
+    figsize: [11.5, 5.6]
+    filename: figure_06_landcover_breakdown.png
+
+  figure_7:
     enabled: true
     model_keys:
       - multitask_16
       - single_task_16
       - multitask_no_daymet_16
     legend_labels:
-      - Multi-task model
-      - Single-task model
-      - Multi-task model w/o Daymet
-    figsize: [11.8, 13.2]
-    filename: figure_05_landcover_model_comparison.png
+      - Full multitask model
+      - Single-task model (no Sentinel-1 supervision)
+      - Multitask model w/o weather inputs
+    model_colors:
+      - "#000000"
+      - "#8ecae6"
+      - "#1d4e89"
+    figsize: [11.8, 5.8]
+    filename: figure_07_ablation_overall.png
 
-  figure_6:
-    enabled: false
-    description: Manual sample-map figure assembled outside the repo and copied into the paper figure output directory.
-    source_path:
-    filename: figure_06_dataset_sample_maps.png
+  figure_8:
+    enabled: true
+    figsize: [11.2, 5.8]
+    legend_below: true
+    text_scale: 1.25
+    x_label_rotation: 0
+    counts_below_axis: true
+    filename: figure_08_training_sample_landcover_distribution.png
+    datasets:
+      lfmc_only:
+        label: LFMC-only
+        color: "#9ad17b"
+        model_key: single_task_16
+        target_names:
+          - lfmc
+      lfmc_vv_vh:
+        label: LFMC + VV + VH
+        color: "#2d6a4f"
+        model_key: multitask_16
+        target_names:
+          - lfmc
+          - vv
+          - vh
 
   supplementary_figure_1:
     enabled: true
     model_key: multitask_16
     num_sites_per_criterion: 1
     min_measurements: 10
-    years_to_plot: 3
+    years_to_plot: 5
+    require_mountain_polygon: true
     criteria_order:
       - good
       - average
       - poor
-    padding_days: 60
     plot_vv: true
     plot_vh: true
     figsize: [12.0, 10.5]
@@ -148,19 +203,20 @@ figures:
 
   supplementary_figure_4:
     enabled: true
-    count_mode: all_targets
-    figsize: [11.2, 5.8]
-    note: LFMC-only fractions are computed from the current single-task sample index. LFMC/VV/VH fractions are computed from a current multitask sample index using all LFMC, VV, and VH sample rows together.
-    filename: supplementary_figure_04_training_sample_landcover_distribution.png
-    datasets:
-      lfmc_only:
-        label: LFMC-only
-        color: "#2f5d50"
-        sample_index_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/indexes/sample_index_longweather_2000_2024_lfmc_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20.parquet
-      lfmc_vv_vh:
-        label: LFMC/VV/VH
-        color: "#cf5c36"
-        sample_index_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/indexes/ensemble/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20/sample_index_longweather_2000_2024_lfmc_vh_vv_ds1000.parquet
+    model_keys:
+      - multitask_16
+      - single_task_16
+      - multitask_no_daymet_16
+    legend_labels:
+      - Full multitask model
+      - Single-task model (no Sentinel-1 supervision)
+      - Multitask model w/o weather inputs
+    model_colors:
+      - "#000000"
+      - "#8ecae6"
+      - "#1d4e89"
+    figsize: [11.8, 13.2]
+    filename: supplementary_figure_04_ablation_all_metrics.png
 
   supplementary_figure_5:
     enabled: true

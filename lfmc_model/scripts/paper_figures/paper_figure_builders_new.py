@@ -4,6 +4,7 @@ import contextlib
 import glob
 import hashlib
 import io
+import json
 import os
 import shutil
 import sys
@@ -45,12 +46,14 @@ from eval_deep import (  # noqa: E402
     load_fold_predictions,
 )
 from paper_figure_plotting import (  # noqa: E402
+    plot_lfmc_snapshot_quadrants,
     plot_landcover_comparison_panels,
     plot_landcover_metric_grouped,
     plot_placeholder_figure,
     plot_scatter_triptych,
     plot_site_r2_landcover_distribution,
     plot_stacked_timeseries_panels,
+    plot_training_location_maps,
     plot_training_sample_landcover_comparison,
 )
 
@@ -71,6 +74,7 @@ STATE_NAME_LOOKUP = {
 }
 _GMBA_BASIC_GDF = None
 _GMBA_SITE_LABEL_CACHE = {}
+_GMBA_SITE_WITHIN_CACHE = {}
 
 
 def _figure_output_path(runtime: Dict[str, object], filename: str) -> str:
@@ -306,6 +310,21 @@ def _gmba_region_label(site_key: str, state_value: Optional[str], shapefile_path
     return label
 
 
+def _site_within_gmba_polygon(site_key: str, shapefile_path: str) -> bool:
+    cache_key = (site_key, shapefile_path)
+    if cache_key in _GMBA_SITE_WITHIN_CACHE:
+        return _GMBA_SITE_WITHIN_CACHE[cache_key]
+    gdf = _load_gmba_basic_gdf(shapefile_path)
+    lat, lon = _parse_site_lat_lon(site_key)
+    point = Point(lon, lat)
+    matches = gdf[gdf.geometry.contains(point)]
+    if len(matches) == 0:
+        matches = gdf[gdf.geometry.touches(point)]
+    out = len(matches) > 0
+    _GMBA_SITE_WITHIN_CACHE[cache_key] = out
+    return out
+
+
 def _site_panel_title(cfg: Dict[str, object], site_key: str) -> str:
     state_text = get_site_state_annotation(site_key)
     landcover_text = get_site_landcover_annotation(site_key)
@@ -366,6 +385,74 @@ def _top_consecutive_observation_years(dates, n_years: int) -> List[int]:
             best_score = score
             best_start = start_year
     return list(range(best_start, best_start + n_years))
+
+
+def _count_observations_in_years(dates, selected_years: Sequence[int]) -> int:
+    dt = pd.to_datetime(dates, errors="coerce")
+    dt = dt[dt.notna()]
+    if len(dt) == 0 or len(selected_years) == 0:
+        return 0
+    year_mask = dt.year.isin([int(year) for year in selected_years])
+    return int(np.sum(year_mask))
+
+
+def _sar_observation_count_for_years(
+    vv_vh_obs: Optional[Dict[str, object]],
+    selected_years: Sequence[int],
+) -> int:
+    if vv_vh_obs is None or len(selected_years) == 0:
+        return 0
+    return (
+        _count_observations_in_years(vv_vh_obs.get("vv_dates", []), selected_years)
+        + _count_observations_in_years(vv_vh_obs.get("vh_dates", []), selected_years)
+    )
+
+
+def _select_consecutive_timeseries_years(
+    lfmc_dates,
+    n_years: int,
+    vv_vh_obs: Optional[Dict[str, object]] = None,
+    prefer_sar_observation_density: bool = False,
+) -> Dict[str, object]:
+    dt = pd.to_datetime(lfmc_dates, errors="coerce")
+    dt = dt[dt.notna()]
+    if len(dt) == 0:
+        return {
+            "selected_years": [],
+            "lfmc_obs_count": 0,
+            "lfmc_years_present": 0,
+            "sar_obs_count": 0,
+        }
+    n_years = int(max(n_years, 1))
+    year_counts = pd.Series(dt.year).value_counts().to_dict()
+    min_year = int(dt.year.min())
+    max_year = int(dt.year.max())
+    span_years = max_year - min_year + 1
+    if span_years < n_years:
+        start_years = [min_year]
+    else:
+        start_years = list(range(min_year, max_year - n_years + 2))
+
+    best_payload = None
+    best_score = None
+    for start_year in start_years:
+        selected_years = list(range(int(start_year), int(start_year) + int(n_years)))
+        lfmc_obs_count = int(sum(year_counts.get(int(year), 0) for year in selected_years))
+        lfmc_years_present = int(sum(1 for year in selected_years if year_counts.get(int(year), 0) > 0))
+        sar_obs_count = _sar_observation_count_for_years(vv_vh_obs, selected_years)
+        if prefer_sar_observation_density:
+            score = (sar_obs_count, lfmc_obs_count, lfmc_years_present, -int(start_year))
+        else:
+            score = (lfmc_obs_count, sar_obs_count, lfmc_years_present, -int(start_year))
+        if best_score is None or score > best_score:
+            best_score = score
+            best_payload = {
+                "selected_years": selected_years,
+                "lfmc_obs_count": lfmc_obs_count,
+                "lfmc_years_present": lfmc_years_present,
+                "sar_obs_count": sar_obs_count,
+            }
+    return best_payload
 
 
 def _filter_series_to_years(dates, values, selected_years: Sequence[int]):
@@ -437,9 +524,34 @@ def _pick_percentile_sites(
     if len(ranked) == 0:
         return []
     target_value = float(np.percentile(ranked[metric_col].to_numpy(dtype=float), target_percentile))
+    return _pick_sites_closest_to_target_value(
+        ranked=ranked,
+        metric_col=metric_col,
+        target_value=target_value,
+        n_sites=n_sites,
+        used_sites=used_sites,
+    )
+
+
+def _pick_sites_closest_to_target_value(
+    ranked: pd.DataFrame,
+    metric_col: str,
+    target_value: float,
+    n_sites: int,
+    used_sites: set,
+) -> List[str]:
+    if len(ranked) == 0 or not np.isfinite(target_value):
+        return []
     work = ranked.copy()
     work["percentile_dist"] = np.abs(work[metric_col] - target_value)
-    work = work.sort_values(["percentile_dist", metric_col], ascending=[True, False]).reset_index(drop=True)
+    sort_cols = ["percentile_dist"]
+    ascending = [True]
+    if "sar_window_obs_count" in work.columns:
+        sort_cols.append("sar_window_obs_count")
+        ascending.append(False)
+    sort_cols.append(metric_col)
+    ascending.append(False)
+    work = work.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
     picked = []
     for site in work["site"].tolist():
         if site in used_sites:
@@ -512,6 +624,33 @@ def _load_eval_context(runtime: Dict[str, object], model_key: str) -> Dict[str, 
     return context
 
 
+def _select_representative_member_dir(
+    cfg: Dict[str, object],
+    model_key: str,
+    representative_member_index: int = 0,
+) -> str:
+    member_dirs = _select_model_member_dirs(_model_cfg(cfg, model_key))
+    if len(member_dirs) == 0:
+        raise ValueError(f"No ensemble members were found for model '{model_key}'")
+    member_idx = int(representative_member_index)
+    if member_idx < 0 or member_idx >= len(member_dirs):
+        raise IndexError(
+            f"Representative member index {member_idx} is out of range for model '{model_key}' "
+            f"with {len(member_dirs)} members"
+        )
+    return member_dirs[member_idx]
+
+
+def _load_operational_lfmc_map_dataset(runtime: Dict[str, object]) -> xr.Dataset:
+    zarr_path = str(runtime["cfg"]["paths"]["operational_lfmc_map_zarr"])
+    cache = runtime.setdefault("map_dataset_cache", {})
+    if zarr_path in cache:
+        return cache[zarr_path]
+    ds = xr.open_zarr(zarr_path, consolidated=False)
+    cache[zarr_path] = ds
+    return ds
+
+
 def _model_cache_dir(runtime: Dict[str, object], model_key: str) -> str:
     cache_dir = os.path.join(
         runtime["cache_dir"],
@@ -561,7 +700,14 @@ def _compute_landcover_site_level_metrics(
     filtered_df = _filter_site_level_rows(lfmc_lc_df, min_obs=min_obs)
     if len(filtered_df) == 0:
         return pd.DataFrame(
-            columns=["dominant_landcover", "site_mean_r2", "site_anom_r2", "n_sites"]
+            columns=[
+                "dominant_landcover",
+                "site_mean_r2",
+                "site_anom_r2",
+                "n_sites",
+                "site_anom_n",
+                "site_mean_n",
+            ]
         )
     site_mean_df = (
         filtered_df.groupby(["site_key", "dominant_landcover"], dropna=False)
@@ -587,6 +733,8 @@ def _compute_landcover_site_level_metrics(
                     class_obs_df["site_pred_anom"].values,
                 ).get("r2", np.nan),
                 "n_sites": int(class_obs_df["site_key"].nunique()),
+                "site_anom_n": int(len(class_obs_df)),
+                "site_mean_n": int(class_site_mean_df["site_key"].nunique()),
             }
         )
     return pd.DataFrame.from_records(records)
@@ -740,6 +888,15 @@ def _landcover_metric_table(
         metric_df["n_sites"] = metric_df["dominant_landcover"].map(
             lambda lc: site_metric_lookup.get(lc, {}).get("n_sites", 0)
         )
+        metric_df["site_anom_n"] = metric_df["dominant_landcover"].map(
+            lambda lc: site_metric_lookup.get(lc, {}).get("site_anom_n", np.nan)
+        )
+        metric_df["site_mean_n"] = metric_df["dominant_landcover"].map(
+            lambda lc: site_metric_lookup.get(lc, {}).get("site_mean_n", np.nan)
+        )
+    else:
+        metric_df["site_anom_n"] = np.nan
+        metric_df["site_mean_n"] = np.nan
 
     member_metric_frames = []
     member_site_metric_frames = []
@@ -809,6 +966,7 @@ def _landcover_metric_table(
             on="dominant_landcover",
             how="left",
         )
+        metric_df["monthly_dev_n"] = metric_df["total_obs"]
         std_lookup = {}
         for lc in metric_df["dominant_landcover"].tolist():
             vals = []
@@ -842,6 +1000,11 @@ def _landcover_metric_table(
         metric_df["monthly_dev_r2"] = np.nan
         metric_df["monthly_dev_r2_std"] = np.nan
         metric_df["total_obs"] = np.nan
+        metric_df["monthly_dev_n"] = np.nan
+
+    metric_df["overall_n"] = metric_df["n_points"]
+    if "site_mean_n" not in metric_df.columns:
+        metric_df["site_mean_n"] = metric_df["n_sites"]
 
     metric_df = _filtered_landcover_df(metric_df, runtime["cfg"])
     runtime["landcover_metric_tables"][cache_key] = metric_df
@@ -891,6 +1054,10 @@ def _prepend_overall_landcover_metrics(
     overall_row["n_points"] = overall_metric.get("n", np.nan)
     overall_row["n_sites"] = mean_metric.get("n", np.nan)
     overall_row["total_obs"] = monthly_metric.get("n", np.nan)
+    overall_row["overall_n"] = overall_metric.get("n", np.nan)
+    overall_row["site_anom_n"] = anomaly_metric.get("n", np.nan)
+    overall_row["site_mean_n"] = mean_metric.get("n", np.nan)
+    overall_row["monthly_dev_n"] = monthly_metric.get("n", np.nan)
     return pd.concat([pd.DataFrame([overall_row]), metric_df], ignore_index=True)
 
 
@@ -996,76 +1163,125 @@ def _build_site_r2_landcover_df(
     return site_df.copy()
 
 
-def _count_landcover_rows_from_sample_index(
+def _load_train_info_fold(
     runtime: Dict[str, object],
-    sample_index_path: str,
-    count_mode: str,
+    member_dir: str,
+    fold_num: int,
+) -> pd.DataFrame:
+    cache_key = (member_dir, int(fold_num))
+    cache = runtime.setdefault("train_info_fold_cache", {})
+    if cache_key in cache:
+        return cache[cache_key].copy()
+    train_info_path = os.path.join(member_dir, f"fold_{int(fold_num)}", "train_info.csv")
+    if not os.path.exists(train_info_path):
+        raise FileNotFoundError(f"Missing training info: {train_info_path}")
+    df = pd.read_csv(train_info_path, low_memory=False)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    cache[cache_key] = df
+    return df.copy()
+
+
+def _load_train_info_union(
+    runtime: Dict[str, object],
+    member_dir: str,
+) -> pd.DataFrame:
+    cache = runtime.setdefault("train_info_union_cache", {})
+    if member_dir in cache:
+        return cache[member_dir].copy()
+    fold_frames = [
+        _load_train_info_fold(runtime, member_dir, fold_num)
+        for fold_num in range(1, 7)
+    ]
+    df = pd.concat(fold_frames, ignore_index=True, sort=False)
+    df = df.drop_duplicates().reset_index(drop=True)
+    cache[member_dir] = df
+    return df.copy()
+
+
+def _normalize_train_landcover_column(
+    runtime: Dict[str, object],
+    df: pd.DataFrame,
     cache_stem: str,
 ) -> pd.DataFrame:
-    count_mode = str(count_mode).strip().lower()
-    columns = ["landcover", "date", "latitude", "longitude"]
-    if count_mode != "all_targets":
-        columns.append("target_name")
-    df = pd.read_parquet(sample_index_path, columns=columns)
-    if count_mode == "lfmc_only":
-        df = df[df["target_name"] == "lfmc"].copy()
-    elif count_mode != "all_targets":
-        raise ValueError(
-            f"Unsupported training-sample count_mode '{count_mode}'. "
-            "Expected one of: all_targets, lfmc_only."
+    work = df.copy()
+    if "landcover" in work.columns:
+        work["dominant_landcover"] = (
+            work["landcover"]
+            .astype("string")
+            .str.strip()
+            .str.lower()
         )
-    landcover = df["landcover"].astype("string").str.strip().str.lower()
-    df = df.assign(dominant_landcover=landcover)
-    missing_lc_mask = df["dominant_landcover"].isna() | (df["dominant_landcover"] == "")
+    else:
+        work["dominant_landcover"] = pd.NA
+    missing_lc_mask = work["dominant_landcover"].isna() | (work["dominant_landcover"] == "")
     if bool(missing_lc_mask.any()):
-        work = df.loc[missing_lc_mask, ["date", "latitude", "longitude"]].copy()
-        work["date"] = pd.to_datetime(work["date"], errors="coerce")
-        work["year"] = work["date"].dt.year
-        work["latitude"] = pd.to_numeric(work["latitude"], errors="coerce")
-        work["longitude"] = pd.to_numeric(work["longitude"], errors="coerce")
-        work = work.dropna(subset=["year", "latitude", "longitude"]).copy()
-        if len(work) > 0:
-            work["point_key"] = _sample_index_point_key(
-                work["latitude"],
-                work["longitude"],
+        lookup_df = work.loc[missing_lc_mask, ["date", "latitude", "longitude"]].copy()
+        lookup_df["date"] = pd.to_datetime(lookup_df["date"], errors="coerce")
+        lookup_df["year"] = lookup_df["date"].dt.year
+        lookup_df["latitude"] = pd.to_numeric(lookup_df["latitude"], errors="coerce")
+        lookup_df["longitude"] = pd.to_numeric(lookup_df["longitude"], errors="coerce")
+        lookup_df = lookup_df.dropna(subset=["year", "latitude", "longitude"]).copy()
+        if len(lookup_df) > 0:
+            lookup_df["point_key"] = _sample_index_point_key(
+                lookup_df["latitude"],
+                lookup_df["longitude"],
             )
-            lookup_path = os.path.join(
+            save_path = os.path.join(
                 runtime["cache_dir"],
                 f"{cache_stem}_point_landcover_lookup.csv",
             )
             point_lookup_df = _build_point_landcover_lookup_fast(
-                work[["point_key", "latitude", "longitude", "year"]]
+                lookup_df[["point_key", "latitude", "longitude", "year"]]
                 .drop_duplicates()
                 .reset_index(drop=True),
-                lookup_path,
+                save_path,
             )
-            df["date"] = pd.to_datetime(df["date"], errors="coerce")
-            df["year"] = df["date"].dt.year
-            df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
-            df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-            df["point_key"] = _sample_index_point_key(
-                df["latitude"],
-                df["longitude"],
+            work["date"] = pd.to_datetime(work["date"], errors="coerce")
+            work["year"] = work["date"].dt.year
+            work["latitude"] = pd.to_numeric(work["latitude"], errors="coerce")
+            work["longitude"] = pd.to_numeric(work["longitude"], errors="coerce")
+            work["point_key"] = _sample_index_point_key(
+                work["latitude"],
+                work["longitude"],
             )
-            point_lookup_df = point_lookup_df.rename(
-                columns={"dominant_landcover": "lookup_dominant_landcover"}
-            )
-            df = df.merge(
-                point_lookup_df[["point_key", "year", "lookup_dominant_landcover"]],
+            point_lookup_df = point_lookup_df.rename(columns={"dominant_landcover": "lookup_landcover"})
+            work = work.merge(
+                point_lookup_df[["point_key", "year", "lookup_landcover"]],
                 on=["point_key", "year"],
                 how="left",
             )
             lookup_landcover = (
-                df["lookup_dominant_landcover"]
+                work["lookup_landcover"]
                 .astype("string")
                 .str.strip()
                 .str.lower()
             )
-            df["dominant_landcover"] = df["dominant_landcover"].fillna(lookup_landcover)
-            df = df.drop(columns=["lookup_dominant_landcover"])
-    df = df[df["dominant_landcover"].notna() & (df["dominant_landcover"] != "")].copy()
+            work["dominant_landcover"] = work["dominant_landcover"].fillna(lookup_landcover)
+            work = work.drop(columns=["lookup_landcover"])
+    work = work[work["dominant_landcover"].notna() & (work["dominant_landcover"] != "")].copy()
+    return work
+
+
+def _count_landcover_rows_from_train_info(
+    runtime: Dict[str, object],
+    train_info_df: pd.DataFrame,
+    cache_stem: str,
+    target_names: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    work = train_info_df.copy()
+    if target_names is not None:
+        requested_targets = {str(target_name).strip().lower() for target_name in target_names}
+        work = work[
+            work["target_name"].astype(str).str.strip().str.lower().isin(requested_targets)
+        ].copy()
+    work = _normalize_train_landcover_column(
+        runtime=runtime,
+        df=work,
+        cache_stem=cache_stem,
+    )
     counts = (
-        df.groupby("dominant_landcover", as_index=False)
+        work.groupby("dominant_landcover", as_index=False)
         .size()
         .rename(columns={"size": "n_samples"})
     )
@@ -1081,26 +1297,26 @@ def _build_training_sample_landcover_tables(
     if len(dataset_cfgs) == 0:
         raise ValueError("Supplementary Figure 4 requires at least one configured dataset")
     member_records = []
-    count_mode = str(fig_cfg.get("count_mode", "all_targets"))
     for dataset_key in dataset_order:
         dataset_cfg = dataset_cfgs[dataset_key]
         label = str(dataset_cfg["label"])
         color = str(dataset_cfg["color"])
-        member_paths = []
-        if dataset_cfg.get("sample_index_path") not in {None, ""}:
-            member_paths = [str(dataset_cfg["sample_index_path"])]
-        else:
-            sample_index_root = str(dataset_cfg.get("sample_index_root", ""))
-            sample_index_glob = str(dataset_cfg.get("sample_index_glob", "*.parquet"))
-            member_paths = sorted(glob.glob(os.path.join(sample_index_root, sample_index_glob)))
-        if len(member_paths) == 0:
-            raise ValueError(f"No sample-index files were found for dataset '{dataset_key}'")
-        for member_path in member_paths:
-            counts_df = _count_landcover_rows_from_sample_index(
+        model_key = str(dataset_cfg["model_key"])
+        model_cfg = _model_cfg(runtime["cfg"], model_key)
+        member_dirs = _select_model_member_dirs(model_cfg)
+        if len(member_dirs) == 0:
+            raise ValueError(f"No ensemble members were found for dataset '{dataset_key}'")
+        target_names = dataset_cfg.get("target_names")
+        for member_dir in member_dirs:
+            train_info_df = _load_train_info_union(
                 runtime=runtime,
-                sample_index_path=member_path,
-                count_mode=count_mode,
-                cache_stem=f"supplementary_figure_04_{dataset_key}_{os.path.splitext(os.path.basename(member_path))[0]}",
+                member_dir=member_dir,
+            )
+            counts_df = _count_landcover_rows_from_train_info(
+                runtime=runtime,
+                train_info_df=train_info_df,
+                cache_stem=f"figure_08_{dataset_key}_{os.path.basename(member_dir)}",
+                target_names=target_names,
             )
             for row in counts_df.itertuples(index=False):
                 member_records.append(
@@ -1108,7 +1324,7 @@ def _build_training_sample_landcover_tables(
                         "dataset_key": dataset_key,
                         "label": label,
                         "color": color,
-                        "member_id": os.path.splitext(os.path.basename(member_path))[0],
+                        "member_id": os.path.basename(member_dir),
                         "dominant_landcover": str(row.dominant_landcover),
                         "n_samples": int(row.n_samples),
                     }
@@ -1167,6 +1383,173 @@ def _build_training_sample_landcover_tables(
     return summary_df, member_df
 
 
+def _load_test_row_union(
+    runtime: Dict[str, object],
+    member_dir: str,
+) -> pd.DataFrame:
+    cache = runtime.setdefault("test_row_union_cache", {})
+    if member_dir in cache:
+        return cache[member_dir].copy()
+    fold_info_path = os.path.join(member_dir, "fold_info.json")
+    if not os.path.exists(fold_info_path):
+        raise FileNotFoundError(f"Missing fold_info.json in {member_dir}")
+    with open(fold_info_path, "r") as file_obj:
+        fold_info = json.load(file_obj)
+    fold_frames = []
+    for fold in fold_info.keys():
+        fold_dir = os.path.join(member_dir, f"fold_{fold}")
+        test_info_path = os.path.join(fold_dir, "test_info.csv")
+        if not os.path.exists(test_info_path):
+            raise FileNotFoundError(f"Missing test info: {test_info_path}")
+        test_info = pd.read_csv(test_info_path, low_memory=False)
+        source = test_info["source"].astype(str)
+        target_masks = [
+            ("lfmc", source == "nfmd"),
+            ("vv", source.str.startswith("vv")),
+            ("vh", source.str.startswith("vh")),
+        ]
+        for target_name, mask in target_masks:
+            target_df = test_info.loc[mask].reset_index(drop=True).copy()
+            if len(target_df) == 0:
+                continue
+            target_df["target"] = target_name
+            target_df["fold"] = str(fold)
+            fold_frames.append(target_df)
+    if len(fold_frames) == 0:
+        raise ValueError(f"No test rows found in model dir: {member_dir}")
+    df = pd.concat(fold_frames, ignore_index=True, sort=False)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    cache[member_dir] = df
+    return df.copy()
+
+
+def _build_test_obs_row_key(frame: pd.DataFrame) -> pd.Series:
+    key_cols = [
+        col for col in [
+            "target",
+            "date",
+            "sample_id",
+            "site_id",
+            "latitude",
+            "longitude",
+            "source",
+            "source_legible",
+            "site_name",
+            "fuel_type",
+            "target_value",
+        ]
+        if col in frame.columns
+    ]
+    if len(key_cols) == 0:
+        return pd.Series(np.arange(len(frame), dtype=np.int64), index=frame.index)
+    work = frame[key_cols].copy()
+    for col in work.columns:
+        if np.issubdtype(np.asarray(work[col]).dtype, np.datetime64):
+            work[col] = pd.to_datetime(work[col], errors="coerce").astype(str)
+        else:
+            work[col] = work[col].fillna("__nan__").astype(str)
+    return work.agg("|".join, axis=1)
+
+
+def _build_test_location_count_table(
+    runtime: Dict[str, object],
+    model_key: str,
+    target_names: Sequence[str],
+    representative_member_index: int = 0,
+    include_reference_member_flag: bool = False,
+    lfmc_location_keys: Optional[set] = None,
+) -> pd.DataFrame:
+    model_cfg = _model_cfg(runtime["cfg"], model_key)
+    member_dirs = _select_model_member_dirs(model_cfg)
+    if len(member_dirs) == 0:
+        raise ValueError(f"No ensemble members were found for model '{model_key}'")
+    member_idx = int(representative_member_index)
+    if member_idx < 0 or member_idx >= len(member_dirs):
+        raise ValueError(
+            f"Representative member index {member_idx} is out of range for model '{model_key}' "
+            f"with {len(member_dirs)} members"
+        )
+
+    target_name_lookup = {str(target_name).strip().lower() for target_name in target_names}
+    reference_member_dir = member_dirs[member_idx]
+    reference_location_keys = set()
+    union_frames = []
+    for member_dir in member_dirs:
+        member_df = _load_test_row_union(runtime, member_dir)
+        member_df = member_df[
+            member_df["target"].astype(str).str.strip().str.lower().isin(target_name_lookup)
+        ].copy()
+        if len(member_df) == 0:
+            continue
+        member_df["member_dir"] = os.path.basename(member_dir)
+        member_df["_row_key"] = _build_test_obs_row_key(member_df)
+        union_frames.append(member_df)
+        if member_dir == reference_member_dir:
+            reference_location_keys = {
+                (
+                    float(pd.to_numeric(row.latitude, errors="coerce")),
+                    float(pd.to_numeric(row.longitude, errors="coerce")),
+                )
+                for row in member_df[["latitude", "longitude"]].dropna().itertuples(index=False)
+            }
+    if len(union_frames) == 0:
+        raise ValueError(
+            f"No test rows matched targets {list(target_names)} for model '{model_key}'"
+        )
+    union_df = pd.concat(union_frames, ignore_index=True, sort=False)
+    unique_obs_df = union_df.drop_duplicates(subset=["_row_key"]).copy()
+    member_presence_df = union_df[
+        ["latitude", "longitude", "member_dir"]
+    ].drop_duplicates().reset_index(drop=True)
+    grouped = (
+        unique_obs_df.groupby(["latitude", "longitude"], as_index=False, dropna=False)
+        .agg(
+            n_points=("_row_key", "size"),
+        )
+        .merge(
+            member_presence_df.groupby(
+                ["latitude", "longitude"],
+                as_index=False,
+                dropna=False,
+            ).agg(
+                n_members=("member_dir", "nunique"),
+            ),
+            on=["latitude", "longitude"],
+            how="left",
+        )
+    )
+    grouped["n_members"] = pd.to_numeric(grouped["n_members"], errors="coerce").fillna(0).astype(int)
+    grouped["marker_group"] = "all_points"
+    if include_reference_member_flag:
+        if lfmc_location_keys is not None:
+            def _classify_sar_location(row):
+                key = (float(row["latitude"]), float(row["longitude"]))
+                if key in lfmc_location_keys:
+                    return "lfmc_coincident"
+                if key in reference_location_keys:
+                    return "member_1_non_coincident"
+                return "other_members_non_coincident"
+            grouped["marker_group"] = grouped.apply(_classify_sar_location, axis=1)
+        else:
+            grouped["marker_group"] = grouped.apply(
+                lambda row: (
+                    "member_1"
+                    if (float(row["latitude"]), float(row["longitude"])) in reference_location_keys
+                    else "other_members"
+                ),
+                axis=1,
+            )
+    grouped["model_key"] = model_key
+    grouped["reference_member_dir"] = os.path.basename(reference_member_dir)
+    grouped["target_group"] = "+".join(str(target_name) for target_name in target_names)
+    return grouped.sort_values(
+        ["n_points", "n_members", "latitude", "longitude"],
+        ascending=[False, False, True, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+
 def _load_ensemble_site_entry(cfg: Dict[str, object], model_key: str) -> Dict[str, object]:
     model_cfg = _model_cfg(cfg, model_key)
     member_dirs = _select_model_member_dirs(model_cfg)
@@ -1204,65 +1587,83 @@ def _select_timeseries_sites(
     entry: Dict[str, object],
     fig_cfg: Dict[str, object],
     require_sar_overlap_same_year: bool = False,
+    prefer_sar_observation_density: bool = False,
 ) -> Dict[str, List[str]]:
     site_df = build_site_df(entry["site_error"], entry["site_error"].keys())
     site_df["r2"] = site_df["site"].map(
         lambda site: float(entry["site_error"][site].get("r2", np.nan))
     )
-    keep_sites = []
-    for site in site_df["site"].tolist():
-        lfmc_dates = pd.to_datetime(entry["site_error"][site]["dates"], errors="coerce")
-        lfmc_dates = lfmc_dates[lfmc_dates.notna()]
-        selected_years = _top_consecutive_observation_years(lfmc_dates, int(fig_cfg.get("years_to_plot", 3)))
-        observed_years = set(lfmc_dates.year.tolist())
-        n_years_present = sum(1 for year in selected_years if year in observed_years)
-        if n_years_present >= 2:
-            keep_sites.append(site)
-    site_df = site_df[site_df["site"].isin(keep_sites)].reset_index(drop=True)
-    if require_sar_overlap_same_year:
-        keep_sites = [
-            site for site in site_df["site"].tolist()
-            if _site_has_same_year_lfmc_sar_overlap(
-                runtime=runtime,
-                model_entry=entry,
-                site_key=site,
-                years_to_plot=int(fig_cfg.get("years_to_plot", 3)),
+    percentile_cfg = runtime["cfg"].get("timeseries_selection", {}).get("r2_percentiles", {})
+    base_ranked = site_df[np.isfinite(site_df["r2"])].copy().reset_index(drop=True)
+    if len(base_ranked) == 0:
+        raise ValueError("No finite site R2 values were available for timeseries percentile selection")
+    target_lookup = {
+        "good": float(np.percentile(base_ranked["r2"].to_numpy(dtype=float), float(percentile_cfg.get("good", 95)))),
+        "average": float(np.percentile(base_ranked["r2"].to_numpy(dtype=float), float(percentile_cfg.get("average", 50)))),
+        "poor": float(np.percentile(base_ranked["r2"].to_numpy(dtype=float), float(percentile_cfg.get("poor", 5)))),
+    }
+
+    ranked = base_ranked.copy().reset_index(drop=True)
+    if bool(fig_cfg.get("require_mountain_polygon", False)):
+        ranked = ranked[
+            ranked["site"].map(
+                lambda site: _site_within_gmba_polygon(
+                    site,
+                    runtime["cfg"]["paths"]["gmba_basic_shapefile"],
+                )
             )
-        ]
-        site_df = site_df[site_df["site"].isin(keep_sites)].reset_index(drop=True)
-    ranked = site_df.copy()
+        ].reset_index(drop=True)
+    years_to_plot = int(fig_cfg.get("years_to_plot", 3))
+    ranked["year_window_info"] = ranked["site"].map(
+        lambda site: _get_site_year_window_info(
+            runtime=runtime,
+            model_entry=entry,
+            site_key=site,
+            years_to_plot=years_to_plot,
+            prefer_sar_observation_density=prefer_sar_observation_density,
+        )
+    )
+    ranked["lfmc_window_years_present"] = ranked["year_window_info"].map(
+        lambda info: int(info.get("lfmc_years_present", 0))
+    )
+    ranked["sar_window_obs_count"] = ranked["year_window_info"].map(
+        lambda info: int(info.get("sar_obs_count", 0))
+    )
+    ranked = ranked[ranked["lfmc_window_years_present"] >= 2].reset_index(drop=True)
+    if require_sar_overlap_same_year:
+        ranked = ranked[ranked["sar_window_obs_count"] > 0].reset_index(drop=True)
     ranked = ranked[ranked["num_measurements"] >= int(fig_cfg["min_measurements"])]
-    ranked = ranked[np.isfinite(ranked["r2"])]
     if len(ranked) == 0:
         if require_sar_overlap_same_year:
             raise ValueError("No eligible sites with same-year LFMC/SAR overlap were found")
         raise ValueError("No eligible sites were found for timeseries selection")
     ranked = ranked.sort_values("r2", ascending=False).reset_index(drop=True)
-    percentile_cfg = runtime["cfg"].get("timeseries_selection", {}).get("r2_percentiles", {})
     used_sites = set()
     selected = {
-        "good": _pick_percentile_sites(
+        "good": _pick_sites_closest_to_target_value(
             ranked,
             metric_col="r2",
-            target_percentile=float(percentile_cfg.get("good", 95)),
+            target_value=target_lookup["good"],
             n_sites=int(fig_cfg["num_sites_per_criterion"]),
             used_sites=used_sites,
         ),
-        "average": _pick_percentile_sites(
+        "average": _pick_sites_closest_to_target_value(
             ranked,
             metric_col="r2",
-            target_percentile=float(percentile_cfg.get("average", 50)),
-            n_sites=int(fig_cfg["num_sites_per_criterion"]),
+            target_value=target_lookup["average"],
+            n_sites=int(fig_cfg["num_sites_per_criterion"]) + 1,
             used_sites=used_sites,
         ),
-        "poor": _pick_percentile_sites(
+        "poor": _pick_sites_closest_to_target_value(
             ranked,
             metric_col="r2",
-            target_percentile=float(percentile_cfg.get("poor", 5)),
+            target_value=target_lookup["poor"],
             n_sites=int(fig_cfg["num_sites_per_criterion"]),
             used_sites=used_sites,
         ),
     }
+    if len(selected["average"]) > int(fig_cfg["num_sites_per_criterion"]):
+        selected["average"] = selected["average"][1 : 1 + int(fig_cfg["num_sites_per_criterion"])]
     if sum(len(site_list) for site_list in selected.values()) == 0:
         raise ValueError("No sites were selected after applying timeseries filters")
     return selected
@@ -1352,6 +1753,56 @@ def _select_timeseries_sites_by_landcover(
     return anchor_entry, selected
 
 
+def _get_site_vv_vh_obs(
+    runtime: Dict[str, object],
+    model_entry: Dict[str, object],
+    site_key: str,
+) -> Optional[Dict[str, object]]:
+    cache = runtime.setdefault("site_vv_vh_obs_cache", {})
+    model_cache_key = str(
+        model_entry.get("paper_model_key", model_entry.get("outputs_root", model_entry.get("name", "model")))
+    )
+    cache_key = (model_cache_key, site_key)
+    if cache_key not in cache:
+        cache[cache_key] = get_vv_vh_site_series(
+            model_entry,
+            site_key,
+            runtime["vhvv_fold_cache"],
+            start_date=None,
+            end_date=None,
+        )
+    return cache[cache_key]
+
+
+def _get_site_year_window_info(
+    runtime: Dict[str, object],
+    model_entry: Dict[str, object],
+    site_key: str,
+    years_to_plot: int,
+    prefer_sar_observation_density: bool = False,
+) -> Dict[str, object]:
+    cache = runtime.setdefault("timeseries_year_window_cache", {})
+    model_cache_key = str(
+        model_entry.get("paper_model_key", model_entry.get("outputs_root", model_entry.get("name", "model")))
+    )
+    cache_key = (model_cache_key, site_key, int(years_to_plot), bool(prefer_sar_observation_density))
+    if cache_key in cache:
+        return dict(cache[cache_key])
+    anchor_site = model_entry["site_error"][site_key]
+    lfmc_dates = _to_naive_datetime(anchor_site["dates"])
+    vv_vh_obs = None
+    if bool(prefer_sar_observation_density) and int(model_entry.get("model_num_tasks", 0)) >= 3:
+        vv_vh_obs = _get_site_vv_vh_obs(runtime, model_entry, site_key)
+    out = _select_consecutive_timeseries_years(
+        lfmc_dates=lfmc_dates,
+        n_years=int(years_to_plot),
+        vv_vh_obs=vv_vh_obs,
+        prefer_sar_observation_density=bool(prefer_sar_observation_density),
+    )
+    cache[cache_key] = dict(out)
+    return dict(out)
+
+
 def _site_has_same_year_lfmc_sar_overlap(
     runtime: Dict[str, object],
     model_entry: Dict[str, object],
@@ -1360,29 +1811,14 @@ def _site_has_same_year_lfmc_sar_overlap(
 ) -> bool:
     if int(model_entry.get("model_num_tasks", 0)) < 3:
         return False
-    lfmc_dates = pd.to_datetime(model_entry["site_error"][site_key]["dates"], errors="coerce")
-    lfmc_dates = lfmc_dates[lfmc_dates.notna()]
-    selected_years = _top_consecutive_observation_years(lfmc_dates, years_to_plot)
-    if len(selected_years) == 0:
-        return False
-    vv_vh_obs = get_vv_vh_site_series(
-        model_entry,
-        site_key,
-        runtime["vhvv_fold_cache"],
-        start_date=None,
-        end_date=None,
+    year_info = _get_site_year_window_info(
+        runtime=runtime,
+        model_entry=model_entry,
+        site_key=site_key,
+        years_to_plot=int(years_to_plot),
+        prefer_sar_observation_density=True,
     )
-    if vv_vh_obs is None:
-        return False
-    selected_year_set = set(int(year) for year in selected_years)
-    sar_years = set()
-    for key in ["vv_dates", "vh_dates"]:
-        dates = pd.to_datetime(vv_vh_obs.get(key, []), errors="coerce")
-        dates = dates[dates.notna()]
-        if len(dates) == 0:
-            continue
-        sar_years.update(dates.year.tolist())
-    return len(selected_year_set.intersection(sar_years)) > 0
+    return int(year_info.get("sar_obs_count", 0)) > 0
 
 
 def _normalize_inference_output(out: Dict[str, object]) -> Dict[str, np.ndarray]:
@@ -1395,6 +1831,67 @@ def _normalize_inference_output(out: Dict[str, object]) -> Dict[str, np.ndarray]
         "vh_pred": np.asarray(out.get("vh_pred", []), dtype=float),
         "vh_pred_std": np.asarray(out.get("vh_pred_std", []), dtype=float),
     }
+
+
+def _timeseries_inference_cache_path(
+    runtime: Dict[str, object],
+    model_entry: Dict[str, object],
+    site_key: str,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> str:
+    model_key = model_entry.get("paper_model_key")
+    if model_key not in {None, ""}:
+        base_cache_dir = _model_cache_dir(runtime, str(model_key))
+    else:
+        base_cache_dir = runtime["cache_dir"]
+    cache_dir = os.path.join(base_cache_dir, "timeseries_inference")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_meta = {
+        "site_key": str(site_key),
+        "start_date": str(pd.Timestamp(start_date).date()),
+        "end_date": str(pd.Timestamp(end_date).date()),
+        "outputs_root": str(model_entry.get("outputs_root", model_entry.get("model_dir", ""))),
+        "paper_model_key": str(model_entry.get("paper_model_key", "")),
+        "model_num_tasks": int(model_entry.get("model_num_tasks", 0)),
+        "is_ensemble": bool(model_entry.get("is_ensemble", False)),
+    }
+    cache_hash = hashlib.md5(
+        json.dumps(cache_meta, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return os.path.join(cache_dir, f"{cache_hash}.npz")
+
+
+def _load_cached_timeseries_inference(cache_path: str) -> Optional[Dict[str, np.ndarray]]:
+    if not os.path.exists(cache_path):
+        return None
+    with np.load(cache_path, allow_pickle=False) as npz:
+        return {
+            "dates": np.asarray(npz["dates"], dtype="datetime64[ns]"),
+            "lfmc_pred": np.asarray(npz["lfmc_pred"], dtype=float),
+            "lfmc_pred_std": np.asarray(npz["lfmc_pred_std"], dtype=float),
+            "vv_pred": np.asarray(npz["vv_pred"], dtype=float),
+            "vv_pred_std": np.asarray(npz["vv_pred_std"], dtype=float),
+            "vh_pred": np.asarray(npz["vh_pred"], dtype=float),
+            "vh_pred_std": np.asarray(npz["vh_pred_std"], dtype=float),
+        }
+
+
+def _write_cached_timeseries_inference(
+    cache_path: str,
+    normalized_out: Dict[str, np.ndarray],
+) -> None:
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    np.savez_compressed(
+        cache_path,
+        dates=np.asarray(normalized_out["dates"], dtype="datetime64[ns]"),
+        lfmc_pred=np.asarray(normalized_out["lfmc_pred"], dtype=float),
+        lfmc_pred_std=np.asarray(normalized_out["lfmc_pred_std"], dtype=float),
+        vv_pred=np.asarray(normalized_out["vv_pred"], dtype=float),
+        vv_pred_std=np.asarray(normalized_out["vv_pred_std"], dtype=float),
+        vh_pred=np.asarray(normalized_out["vh_pred"], dtype=float),
+        vh_pred_std=np.asarray(normalized_out["vh_pred_std"], dtype=float),
+    )
 
 
 def _concat_inference_parts(parts: Sequence[Dict[str, np.ndarray]], key: str, dtype) -> np.ndarray:
@@ -1416,18 +1913,29 @@ def _collect_year_window_inference(
     for year in selected_years:
         start_date = pd.Timestamp(int(year), 1, 1)
         end_date = pd.Timestamp(int(year), 12, 31)
-        out = get_model_inference_series(
-            model_entry,
-            site_key,
-            start_date,
-            end_date,
-            runtime["inference_cache"],
-            runtime["tensor_cache"],
-            runtime["runtime_cache"],
-            inputs_root,
-            forward_batch_size,
+        cache_path = _timeseries_inference_cache_path(
+            runtime=runtime,
+            model_entry=model_entry,
+            site_key=site_key,
+            start_date=start_date,
+            end_date=end_date,
         )
-        parts.append(_normalize_inference_output(out))
+        normalized_out = _load_cached_timeseries_inference(cache_path)
+        if normalized_out is None:
+            out = get_model_inference_series(
+                model_entry,
+                site_key,
+                start_date,
+                end_date,
+                runtime["inference_cache"],
+                runtime["tensor_cache"],
+                runtime["runtime_cache"],
+                inputs_root,
+                forward_batch_size,
+            )
+            normalized_out = _normalize_inference_output(out)
+            _write_cached_timeseries_inference(cache_path, normalized_out)
+        parts.append(normalized_out)
     if len(parts) == 0:
         return {
             "dates": np.array([], dtype="datetime64[ns]"),
@@ -1457,12 +1965,20 @@ def _build_timeseries_panel(
     years_to_plot: int,
     plot_vv: bool,
     plot_vh: bool,
+    prefer_sar_observation_density: bool = False,
 ) -> Dict[str, object]:
     cfg = runtime["cfg"]
     anchor_site = model_entry["site_error"][site_key]
     lfmc_dates = _to_naive_datetime(anchor_site["dates"])
     lfmc_values = np.asarray(anchor_site["true_values"], dtype=float)
-    selected_years = _top_consecutive_observation_years(lfmc_dates, years_to_plot)
+    year_window_info = _get_site_year_window_info(
+        runtime=runtime,
+        model_entry=model_entry,
+        site_key=site_key,
+        years_to_plot=int(years_to_plot),
+        prefer_sar_observation_density=prefer_sar_observation_density,
+    )
+    selected_years = list(year_window_info.get("selected_years", []))
     lfmc_dates, lfmc_values = _filter_series_to_years(lfmc_dates, lfmc_values, selected_years)
     lfmc_dates = _canonicalize_dates_to_year_slots(lfmc_dates, selected_years)
     lfmc_dates, lfmc_values, _, _ = _reindex_series_to_daily(lfmc_dates, lfmc_values)
@@ -1482,6 +1998,7 @@ def _build_timeseries_panel(
     )
 
     site_r2 = float(anchor_site.get("r2", np.nan))
+    site_lat, site_lon = _parse_site_lat_lon(site_key)
     panel = {
         "title": _timeseries_panel_title(
             cfg=cfg,
@@ -1490,6 +2007,8 @@ def _build_timeseries_panel(
             selected_years=selected_years,
             site_r2=site_r2,
         ),
+        "site_latitude": float(site_lat),
+        "site_longitude": float(site_lon),
         "series": [
             {
                 "label": model_entry["name"],
@@ -1775,9 +2294,14 @@ def init_runtime(cfg: Dict[str, object]) -> Dict[str, object]:
         "tensor_cache": {},
         "runtime_cache": {},
         "vhvv_fold_cache": {},
+        "site_vv_vh_obs_cache": {},
+        "timeseries_year_window_cache": {},
         "eval_contexts": {},
         "landcover_metric_tables": {},
         "site_r2_landcover_tables": {},
+        "train_info_fold_cache": {},
+        "train_info_union_cache": {},
+        "map_dataset_cache": {},
     }
 
 
@@ -1801,16 +2325,309 @@ def _copy_manual_asset_figure(runtime: Dict[str, object], figure_key: str) -> st
 
 
 def build_figure_1(runtime: Dict[str, object]) -> str:
-    return _copy_manual_asset_figure(runtime, "figure_1")
-
-
-def build_figure_6(runtime: Dict[str, object]) -> str:
-    return _copy_manual_asset_figure(runtime, "figure_6")
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["figure_1"]
+    if fig_cfg.get("source_path") not in {None, ""}:
+        return _copy_manual_asset_figure(runtime, "figure_1")
+    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
+    plot_placeholder_figure(
+        title=str(fig_cfg.get("title", "Figure 1 Placeholder")),
+        description=str(fig_cfg.get("description", "")),
+        save_path=save_path,
+        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"].get("dpi", 350)),
+    )
+    return save_path
 
 
 def build_figure_2(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
     fig_cfg = cfg["figures"]["figure_2"]
+    ds = _load_operational_lfmc_map_dataset(runtime)
+    map_var = str(fig_cfg.get("map_variable", "lfmc_ens_mean"))
+    requested_dates = list(fig_cfg["map_dates"])
+    panel_labels = list(fig_cfg.get("panel_labels", ["a", "b", "c", "d"]))
+    panels = []
+    table_rows = []
+    for panel_idx, requested_date in enumerate(requested_dates):
+        requested_ts = pd.Timestamp(requested_date).normalize()
+        da = ds[map_var].sel(time=requested_ts).load()
+        actual_ts = pd.Timestamp(da["time"].values).normalize()
+        values = np.asarray(da.values, dtype=float)
+        panels.append(
+            {
+                "panel_label": panel_labels[panel_idx],
+                "title": (
+                    f"{panel_labels[panel_idx]}) "
+                    f"{actual_ts.strftime('%B %d, %Y').replace(' 0', ' ')}"
+                ),
+                "values": values,
+                "x": np.asarray(da["x"].values, dtype=float),
+                "y": np.asarray(da["y"].values, dtype=float),
+            }
+        )
+        table_rows.append(
+            {
+                "panel": panel_labels[panel_idx],
+                "requested_date": requested_ts.date().isoformat(),
+                "selected_date": actual_ts.date().isoformat(),
+                "n_finite": int(np.isfinite(values).sum()),
+                "min_value": float(np.nanmin(values)),
+                "max_value": float(np.nanmax(values)),
+            }
+        )
+    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
+    table_path = _table_output_path(runtime, "figure_02_lfmc_snapshot_dates")
+    pd.DataFrame.from_records(table_rows).to_csv(table_path, index=False)
+    plot_lfmc_snapshot_quadrants(
+        panels=panels,
+        save_path=save_path,
+        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"].get("dpi", 350)),
+        vmin=fig_cfg.get("vmin"),
+        vmax=fig_cfg.get("vmax"),
+        col_labels=fig_cfg.get("col_labels"),
+        row_labels=fig_cfg.get("row_labels"),
+        state_lines_only=bool(fig_cfg.get("state_lines_only", False)),
+        subplot_wspace=float(fig_cfg.get("subplot_wspace", -0.15)),
+        subplot_hspace=float(fig_cfg.get("subplot_hspace", 0.04)),
+    )
+    return save_path
+
+
+def build_figure_3(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["figure_3"]
+    lfmc_df = _build_test_location_count_table(
+        runtime,
+        model_key=str(fig_cfg["lfmc_model_key"]),
+        target_names=["lfmc"],
+        representative_member_index=int(fig_cfg.get("representative_member_index", 0)),
+    )
+    lfmc_location_keys = {
+        (float(row["latitude"]), float(row["longitude"]))
+        for _, row in lfmc_df[["latitude", "longitude"]].iterrows()
+    }
+    print(f"  LFMC location keys for cross-reference: {len(lfmc_location_keys)}")
+    sar_df = _build_test_location_count_table(
+        runtime,
+        model_key=str(fig_cfg["sar_model_key"]),
+        target_names=["vv", "vh"],
+        representative_member_index=int(fig_cfg.get("representative_member_index", 0)),
+        include_reference_member_flag=True,
+        lfmc_location_keys=lfmc_location_keys,
+    )
+    for grp, cnt in sar_df["marker_group"].value_counts().items():
+        print(f"  SAR marker group '{grp}': {cnt} locations")
+    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
+    lfmc_table_path = _table_output_path(runtime, "figure_03_lfmc_training_locations")
+    sar_table_path = _table_output_path(runtime, "figure_03_vv_vh_training_locations")
+    lfmc_df.to_csv(lfmc_table_path, index=False)
+    sar_df.to_csv(sar_table_path, index=False)
+    plot_training_location_maps(
+        panels=[
+            {
+                "title": "a",
+                "title_fontweight": "bold",
+                "map_df": lfmc_df,
+                "marker_defs": {
+                    "all_points": {"marker": "o", "label": "LFMC training locations"},
+                },
+                "cmap": str(fig_cfg.get("lfmc_cmap", "viridis")),
+                "cbar_label": "LFMC measurements at site",
+                "cbar_pad": 0.06,
+                "stats_total_label": "Total measurements",
+                "stats_median_label": "Median measurements/site",
+                "marker_size": float(fig_cfg.get("marker_size", 34.0)),
+            },
+            {
+                "title": "b",
+                "title_fontweight": "bold",
+                "map_df": sar_df,
+                "marker_defs": {
+                    "lfmc_coincident": {"marker": "^", "label": "at LFMC sites"},
+                    "member_1_non_coincident": {"marker": "s", "label": "ensemble member 1 sites"},
+                    "other_members_non_coincident": {
+                        "marker": "o",
+                        "label": "all other ensemble member sites",
+                        "size": 10.0,
+                        "alpha": 0.18,
+                        "edgecolor": "none",
+                        "linewidth": 0.0,
+                        "zorder_offset": -0.4,
+                    },
+                },
+                "cmap": str(fig_cfg.get("sar_cmap", "cividis")),
+                "cbar_label": "SAR observations at site",
+                "cbar_pad": 0.06,
+                "stats_total_label": "Total observations",
+                "stats_median_label": "Median observations/site",
+                "marker_size": float(fig_cfg.get("marker_size", 34.0)),
+            },
+        ],
+        save_path=save_path,
+        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"].get("dpi", 350)),
+        state_lines_only=True,
+    )
+    return save_path
+
+
+def build_figure_4(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["figure_4"]
+    site_min_obs = int(cfg["variability"]["site_min_obs"])
+    monthly_min_obs = int(cfg["variability"]["monthly_min_obs"])
+    monthly_min_years = int(cfg["variability"]["monthly_min_years"])
+    context = _load_eval_context(runtime, str(fig_cfg["model_key"]))
+    lfmc_df = context["eval_df"][context["eval_df"]["target"] == "lfmc"].reset_index(drop=True)
+    _, site_summary_df, anomaly_df = _build_filtered_site_space_time_tables(
+        lfmc_df,
+        min_obs=site_min_obs,
+    )
+    _, month_anom_df, valid_month_groups = _build_filtered_site_month_anomaly_tables(
+        lfmc_df=build_lfmc_y2y_df(context["eval_df"]),
+        min_obs=monthly_min_obs,
+        min_years=monthly_min_years,
+    )
+    if len(month_anom_df) == 0 or len(valid_month_groups) == 0:
+        raise ValueError("No source-centered monthly anomaly rows available for Figure 4")
+    overall_metrics = compute_basic_metrics(lfmc_df["obs"].values, lfmc_df["pred"].values)
+    site_mean_metrics = compute_basic_metrics(
+        site_summary_df["obs_mean"].values,
+        site_summary_df["pred_mean"].values,
+    )
+    anomaly_metrics = compute_basic_metrics(
+        anomaly_df["obs_anom"].values,
+        anomaly_df["pred_anom"].values,
+    )
+    month_anom_metrics = compute_basic_metrics(
+        month_anom_df["obs_dev"].values,
+        month_anom_df["pred_dev"].values,
+    )
+    overall_std = _overall_metric_std(context)
+    space_std, time_std = _space_time_metric_stds(context, min_obs=site_min_obs)
+    month_anom_std = _monthly_source_centered_metric_std(
+        context,
+        min_obs=monthly_min_obs,
+        min_years=monthly_min_years,
+    )
+    panels = [
+        {
+            "title": "Overall",
+            "panel_label": "a",
+            "kind": "hexbin",
+            "x": lfmc_df["obs"].values,
+            "y": lfmc_df["pred"].values,
+            "xlabel": "Observed LFMC (%)",
+            "ylabel": "Predicted LFMC (%)",
+            "metrics": {
+                "n": overall_metrics["n"],
+                "rmse": overall_metrics["rmse"],
+                "r2": overall_metrics["r2"],
+                "rmse_std": overall_std["rmse"],
+                "r2_std": overall_std["r2"],
+            },
+            "cbar_label": "Count",
+            "gridsize": int(fig_cfg.get("hexbin_gridsize", 60)),
+        },
+        {
+            "title": "Site Anomalies",
+            "panel_label": "b",
+            "kind": "hexbin",
+            "x": anomaly_df["obs_anom"].values,
+            "y": anomaly_df["pred_anom"].values,
+            "xlabel": "Observed anomaly (%)",
+            "ylabel": "Predicted anomaly (%)",
+            "metrics": {
+                "n": anomaly_metrics["n"],
+                "rmse": anomaly_metrics["rmse"],
+                "r2": anomaly_metrics["r2"],
+                "rmse_std": time_std["rmse"],
+                "r2_std": time_std["r2"],
+            },
+            "cbar_label": "Count",
+            "gridsize": int(fig_cfg.get("hexbin_gridsize", 60)),
+        },
+        {
+            "title": "Site Means",
+            "panel_label": "c",
+            "kind": "scatter",
+            "x": site_summary_df["obs_mean"].values,
+            "y": site_summary_df["pred_mean"].values,
+            "xlabel": "Observed site mean (%)",
+            "ylabel": "Predicted site mean (%)",
+            "metrics": {
+                "n": site_mean_metrics["n"],
+                "rmse": site_mean_metrics["rmse"],
+                "r2": site_mean_metrics["r2"],
+                "rmse_std": space_std["rmse"],
+                "r2_std": space_std["r2"],
+            },
+            "color_array": site_summary_df["n_obs"].values,
+            "cbar_label": "Observations at site",
+            "cmap": "viridis",
+            "cbar_vmax": 200,
+            "cbar_extend": "max",
+        },
+        {
+            "title": "Deviation from monthly average",
+            "panel_label": "d",
+            "kind": "hexbin",
+            "x": month_anom_df["obs_dev"].values,
+            "y": month_anom_df["pred_dev"].values,
+            "xlabel": "Observed deviation from monthly mean (%)",
+            "ylabel": "Predicted deviation from monthly mean (%)",
+            "metrics": {
+                "n": month_anom_metrics["n"],
+                "rmse": month_anom_metrics["rmse"],
+                "r2": month_anom_metrics["r2"],
+                "rmse_std": month_anom_std["rmse"],
+                "r2_std": month_anom_std["r2"],
+            },
+            "cbar_label": "Count",
+            "gridsize": int(fig_cfg.get("hexbin_gridsize", 60)),
+            "cbar_vmax": 600,
+            "cbar_extend": "max",
+            "xlim": (-100, 100),
+            "ylim": (-100, 100),
+        },
+    ]
+    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
+    table_path = _table_output_path(runtime, "figure_04_site_tables")
+    combined_table = site_summary_df.merge(
+        anomaly_df.groupby(["latitude", "longitude"], as_index=False).agg(
+            n_anomaly_rows=("obs_anom", "size")
+        ),
+        on=["latitude", "longitude"],
+        how="left",
+    )
+    month_summary = (
+        month_anom_df.groupby(["latitude", "longitude"], as_index=False)
+        .agg(n_month_dev_rows=("obs_dev", "size"))
+    )
+    combined_table = combined_table.merge(
+        month_summary,
+        on=["latitude", "longitude"],
+        how="left",
+    )
+    combined_table.to_csv(table_path, index=False)
+    plot_scatter_triptych(
+        panels=panels,
+        save_path=save_path,
+        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"].get("dpi", 350)),
+    )
+    return save_path
+
+
+def build_figure_5(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["figure_5"]
     model_entry = _load_ensemble_site_entry(cfg, str(fig_cfg["model_key"]))
     selected = _select_timeseries_sites(runtime, model_entry, fig_cfg)
     panels = []
@@ -1830,7 +2647,7 @@ def build_figure_2(runtime: Dict[str, object]) -> str:
             )
         )
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
-    table_path = _table_output_path(runtime, "figure_02_sites")
+    table_path = _table_output_path(runtime, "figure_05_sites")
     site_rows = []
     for criterion, site_list in selected.items():
         for rank_idx, site_key in enumerate(site_list, start=1):
@@ -1852,15 +2669,267 @@ def build_figure_2(runtime: Dict[str, object]) -> str:
     return save_path
 
 
+def build_figure_6(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["figure_6"]
+    site_min_obs = int(cfg["variability"]["site_min_obs"])
+    monthly_min_obs = int(cfg["variability"]["monthly_min_obs"])
+    monthly_min_years = int(cfg["variability"]["monthly_min_years"])
+    metric_df = _landcover_metric_table(
+        runtime=runtime,
+        model_key=str(fig_cfg["model_key"]),
+        site_min_obs=site_min_obs,
+        monthly_min_obs=monthly_min_obs,
+        monthly_min_years=monthly_min_years,
+    )
+    metric_df = _prepend_overall_landcover_metrics(
+        runtime=runtime,
+        model_key=str(fig_cfg["model_key"]),
+        metric_df=metric_df,
+        site_min_obs=site_min_obs,
+        monthly_min_obs=monthly_min_obs,
+        monthly_min_years=monthly_min_years,
+    )
+    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
+    table_path = _table_output_path(runtime, "figure_06_landcover_metrics")
+    metric_df.to_csv(table_path, index=False)
+    categories = metric_df["dominant_landcover"].astype(str).tolist()
+    values = np.column_stack(
+        [
+            metric_df["overall_r2"].to_numpy(dtype=float),
+            metric_df["site_anom_r2"].to_numpy(dtype=float),
+            metric_df["site_mean_r2"].to_numpy(dtype=float),
+            metric_df["monthly_dev_r2"].to_numpy(dtype=float),
+        ]
+    )
+    counts = np.column_stack(
+        [
+            metric_df["overall_n"].to_numpy(dtype=float),
+            metric_df["site_anom_n"].to_numpy(dtype=float),
+            metric_df["site_mean_n"].to_numpy(dtype=float),
+            metric_df["monthly_dev_n"].to_numpy(dtype=float),
+        ]
+    )
+    errors = np.column_stack(
+        [
+            metric_df["overall_r2_std"].to_numpy(dtype=float),
+            metric_df["site_anom_r2_std"].to_numpy(dtype=float),
+            metric_df["site_mean_r2_std"].to_numpy(dtype=float),
+            metric_df["monthly_dev_r2_std"].to_numpy(dtype=float),
+        ]
+    )
+    plot_landcover_metric_grouped(
+        categories=categories,
+        metric_labels=["Overall", "Anomaly", "Site Mean", "Deviation from monthly mean"],
+        values=values,
+        counts=counts,
+        errors=errors,
+        save_path=save_path,
+        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"].get("dpi", 350)),
+        colors=[
+            fig_cfg["metric_colors"][0],
+            fig_cfg["metric_colors"][1],
+            fig_cfg["metric_colors"][2],
+            fig_cfg["metric_colors"][3],
+        ],
+        legend_below=True,
+    )
+    return save_path
+
+
+def build_figure_7(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["figure_7"]
+    site_min_obs = int(cfg["variability"]["site_min_obs"])
+    monthly_min_obs = int(cfg["variability"]["monthly_min_obs"])
+    monthly_min_years = int(cfg["variability"]["monthly_min_years"])
+    categories = ["overall"] + list(cfg["filters"]["landcover_order"])
+    model_labels = []
+    colors = []
+    overall_values = []
+    overall_errors = []
+    overall_counts = []
+    merged_rows = []
+    for model_key in fig_cfg["model_keys"]:
+        model_cfg = _model_cfg(cfg, str(model_key))
+        model_labels.append(str(model_cfg["display_name"]))
+        configured_colors = fig_cfg.get("model_colors")
+        if configured_colors is not None:
+            colors.append(str(configured_colors[len(colors)]))
+        else:
+            colors.append(str(model_cfg["color"]))
+        metric_df = _landcover_metric_table(
+            runtime=runtime,
+            model_key=str(model_key),
+            site_min_obs=site_min_obs,
+            monthly_min_obs=monthly_min_obs,
+            monthly_min_years=monthly_min_years,
+        )
+        metric_df = _prepend_overall_landcover_metrics(
+            runtime=runtime,
+            model_key=str(model_key),
+            metric_df=metric_df,
+            site_min_obs=site_min_obs,
+            monthly_min_obs=monthly_min_obs,
+            monthly_min_years=monthly_min_years,
+        )
+        metric_lookup = metric_df.set_index("dominant_landcover").to_dict("index")
+        overall_row = []
+        overall_err_row = []
+        overall_count_row = []
+        for category in categories:
+            row = metric_lookup.get(category, {})
+            overall_row.append(float(row.get("overall_r2", np.nan)))
+            overall_err_row.append(float(row.get("overall_r2_std", np.nan)))
+            overall_count_row.append(float(row.get("n_points", np.nan)))
+            merged_rows.append(
+                {
+                    "model_key": model_key,
+                    "display_name": model_cfg["display_name"],
+                    "dominant_landcover": category,
+                    "overall_r2": row.get("overall_r2", np.nan),
+                    "overall_r2_std": row.get("overall_r2_std", np.nan),
+                    "overall_n": row.get("n_points", np.nan),
+                }
+            )
+        overall_values.append(overall_row)
+        overall_errors.append(overall_err_row)
+        overall_counts.append(overall_count_row)
+    legend_labels = list(fig_cfg.get("legend_labels", model_labels))
+    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
+    table_path = _table_output_path(runtime, "figure_07_ablation_overall")
+    pd.DataFrame.from_records(merged_rows).to_csv(table_path, index=False)
+    plot_landcover_comparison_panels(
+        categories=categories,
+        model_labels=legend_labels,
+        colors=colors,
+        panels=[
+            {
+                "title": "Overall",
+                "ylabel": "R²",
+                "values": np.asarray(overall_values, dtype=float).T,
+                "errors": np.asarray(overall_errors, dtype=float).T,
+                "counts": np.asarray(overall_counts, dtype=float).T,
+            }
+        ],
+        save_path=save_path,
+        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"].get("dpi", 350)),
+    )
+    return save_path
+
+
+def build_figure_8(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["figure_8"]
+    summary_df, member_df = _build_training_sample_landcover_tables(runtime, fig_cfg)
+    if len(summary_df) == 0:
+        raise ValueError("No training-sample landcover rows were available for Figure 8")
+    summary_table_path = _table_output_path(runtime, "figure_08_training_sample_landcover_counts")
+    member_table_path = _table_output_path(runtime, "figure_08_training_sample_landcover_member_counts")
+    summary_df.to_csv(summary_table_path, index=False)
+    member_df.to_csv(member_table_path, index=False)
+    categories = [
+        category for category in cfg["filters"]["landcover_order"]
+        if category in summary_df["dominant_landcover"].astype(str).tolist()
+    ]
+    dataset_order = list(fig_cfg.get("dataset_order", fig_cfg["datasets"].keys()))
+    dataset_lookup = {
+        row["dataset_key"]: row
+        for _, row in summary_df[["dataset_key", "label", "color"]].drop_duplicates().iterrows()
+    }
+    dataset_labels = [
+        str(dataset_lookup[key]["label"])
+        for key in dataset_order
+    ]
+    colors = [str(dataset_lookup[key]["color"]) for key in dataset_order]
+    values = []
+    count_values = []
+    for category in categories:
+        value_row = []
+        count_row = []
+        for dataset_key in dataset_order:
+            row = summary_df[
+                (summary_df["dataset_key"] == dataset_key)
+                & (summary_df["dominant_landcover"] == category)
+            ]
+            if len(row) == 0:
+                value_row.append(np.nan)
+                count_row.append(np.nan)
+                continue
+            value_row.append(float(row.iloc[0]["fraction"]))
+            count_row.append(float(row.iloc[0]["mean_n_samples"]))
+        values.append(value_row)
+        count_values.append(count_row)
+    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
+    plot_training_sample_landcover_comparison(
+        categories=categories,
+        dataset_labels=dataset_labels,
+        colors=colors,
+        values=np.asarray(values, dtype=float),
+        errors=None,
+        count_values=np.asarray(count_values, dtype=float),
+        save_path=save_path,
+        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"].get("dpi", 350)),
+        note_text=None,
+        legend_below=bool(fig_cfg.get("legend_below", True)),
+        text_scale=float(fig_cfg.get("text_scale", 1.0)),
+        x_label_rotation=float(fig_cfg.get("x_label_rotation", 25.0)),
+        counts_below_axis=bool(fig_cfg.get("counts_below_axis", False)),
+    )
+    return save_path
+
+
 def build_supplementary_figure_1(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
     fig_cfg = cfg["figures"]["supplementary_figure_1"]
-    model_entry = _load_ensemble_site_entry(cfg, str(fig_cfg["model_key"]))
+    model_key = str(fig_cfg["model_key"])
+    model_entry = _load_ensemble_site_entry(cfg, model_key)
+    eval_context = _load_eval_context(runtime, model_key)
+    print(
+        "Supplementary Figure 1 SAR test R2 across members "
+        "(each member uses all held-out test rows across folds):"
+    )
+    for target_name, display_name in [("vv", "VV"), ("vh", "VH")]:
+        member_r2_vals = []
+        member_n_vals = []
+        for member_eval_df in eval_context["member_eval_dfs"]:
+            target_df = member_eval_df[
+                member_eval_df["target"].astype(str).str.strip().str.lower() == target_name
+            ].reset_index(drop=True)
+            member_metrics = compute_basic_metrics(
+                target_df["obs"].values,
+                target_df["pred"].values,
+            )
+            member_r2_vals.append(member_metrics.get("r2", np.nan))
+            member_n_vals.append(member_metrics.get("n", 0))
+        finite_r2 = np.asarray(member_r2_vals, dtype=float)
+        finite_r2 = finite_r2[np.isfinite(finite_r2)]
+        mean_r2 = float(finite_r2.mean()) if finite_r2.size > 0 else np.nan
+        std_r2 = _metric_std(member_r2_vals)
+        total_n = int(np.sum(np.asarray(member_n_vals, dtype=int)))
+        if np.isfinite(mean_r2):
+            r2_summary = f"{mean_r2:.2f}"
+            if np.isfinite(std_r2):
+                r2_summary = f"{r2_summary} +/- {std_r2:.2f}"
+        else:
+            r2_summary = "nan"
+        print(
+            f"  {display_name}: R2 = {r2_summary} "
+            f"across {finite_r2.size}/{len(member_r2_vals)} members; "
+            f"total held-out rows across members = {total_n}"
+        )
     selected = _select_timeseries_sites(
         runtime,
         model_entry,
         fig_cfg,
         require_sar_overlap_same_year=True,
+        prefer_sar_observation_density=True,
     )
     panels = []
     for criterion in fig_cfg["criteria_order"]:
@@ -1876,6 +2945,7 @@ def build_supplementary_figure_1(runtime: Dict[str, object]) -> str:
                 years_to_plot=int(fig_cfg.get("years_to_plot", 3)),
                 plot_vv=bool(fig_cfg.get("plot_vv", False)),
                 plot_vh=bool(fig_cfg.get("plot_vh", False)),
+                prefer_sar_observation_density=True,
             )
         )
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
@@ -1927,6 +2997,7 @@ def build_supplementary_figure_2(runtime: Dict[str, object]) -> str:
         figsize=fig_cfg["figsize"],
         dpi=int(cfg["plotting"].get("dpi", 350)),
         x_limits=fig_cfg.get("x_limits", [-1.0, 1.0]),
+        show_summary_text=False,
     )
     return save_path
 
@@ -1949,299 +3020,10 @@ def build_supplementary_figure_3(runtime: Dict[str, object]) -> str:
 def build_supplementary_figure_4(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
     fig_cfg = cfg["figures"]["supplementary_figure_4"]
-    summary_df, member_df = _build_training_sample_landcover_tables(runtime, fig_cfg)
-    if len(summary_df) == 0:
-        raise ValueError("No training-sample landcover rows were available for Supplementary Figure 4")
-    summary_table_path = _table_output_path(runtime, "supplementary_figure_04_training_sample_landcover_counts")
-    member_table_path = _table_output_path(runtime, "supplementary_figure_04_training_sample_landcover_member_counts")
-    summary_df.to_csv(summary_table_path, index=False)
-    member_df.to_csv(member_table_path, index=False)
-    categories = [
-        category for category in cfg["filters"]["landcover_order"]
-        if category in summary_df["dominant_landcover"].astype(str).tolist()
-    ]
-    dataset_order = list(fig_cfg.get("dataset_order", fig_cfg["datasets"].keys()))
-    dataset_lookup = {
-        row["dataset_key"]: row
-        for _, row in summary_df[["dataset_key", "label", "color"]].drop_duplicates().iterrows()
-    }
-    dataset_labels = [
-        str(dataset_lookup[key]["label"])
-        for key in dataset_order
-    ]
-    colors = [str(dataset_lookup[key]["color"]) for key in dataset_order]
-    values = []
-    count_values = []
-    for category in categories:
-        value_row = []
-        count_row = []
-        for dataset_key in dataset_order:
-            row = summary_df[
-                (summary_df["dataset_key"] == dataset_key)
-                & (summary_df["dominant_landcover"] == category)
-            ]
-            if len(row) == 0:
-                value_row.append(np.nan)
-                count_row.append(np.nan)
-                continue
-            value_row.append(float(row.iloc[0]["fraction"]))
-            count_row.append(float(row.iloc[0]["mean_n_samples"]))
-        values.append(value_row)
-        count_values.append(count_row)
-    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
-    plot_training_sample_landcover_comparison(
-        categories=categories,
-        dataset_labels=dataset_labels,
-        colors=colors,
-        values=np.asarray(values, dtype=float),
-        errors=None,
-        count_values=np.asarray(count_values, dtype=float),
-        save_path=save_path,
-        fontsize=int(cfg["plotting"].get("fontsize", 14)),
-        figsize=fig_cfg["figsize"],
-        dpi=int(cfg["plotting"].get("dpi", 350)),
-        note_text=None,
-    )
-    return save_path
-
-
-def build_supplementary_figure_5(runtime: Dict[str, object]) -> str:
-    cfg = runtime["cfg"]
-    fig_cfg = cfg["figures"]["supplementary_figure_5"]
-    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
-    plot_placeholder_figure(
-        title=str(fig_cfg.get("title", "Supplementary Figure Placeholder")),
-        description=str(fig_cfg.get("description", "")),
-        save_path=save_path,
-        fontsize=int(cfg["plotting"].get("fontsize", 14)),
-        figsize=fig_cfg["figsize"],
-        dpi=int(cfg["plotting"].get("dpi", 350)),
-    )
-    return save_path
-
-
-def build_figure_3(runtime: Dict[str, object]) -> str:
-    cfg = runtime["cfg"]
-    fig_cfg = cfg["figures"]["figure_3"]
     site_min_obs = int(cfg["variability"]["site_min_obs"])
     monthly_min_obs = int(cfg["variability"]["monthly_min_obs"])
     monthly_min_years = int(cfg["variability"]["monthly_min_years"])
-    context = _load_eval_context(runtime, str(fig_cfg["model_key"]))
-    lfmc_df = context["eval_df"][context["eval_df"]["target"] == "lfmc"].reset_index(drop=True)
-    _, site_summary_df, anomaly_df = _build_filtered_site_space_time_tables(
-        lfmc_df,
-        min_obs=site_min_obs,
-    )
-    _, month_anom_df, valid_month_groups = _build_filtered_site_month_anomaly_tables(
-        lfmc_df=build_lfmc_y2y_df(context["eval_df"]),
-        min_obs=monthly_min_obs,
-        min_years=monthly_min_years,
-    )
-    if len(month_anom_df) == 0 or len(valid_month_groups) == 0:
-        raise ValueError("No source-centered monthly anomaly rows available for Figure 3")
-    overall_metrics = compute_basic_metrics(lfmc_df["obs"].values, lfmc_df["pred"].values)
-    site_mean_metrics = compute_basic_metrics(
-        site_summary_df["obs_mean"].values,
-        site_summary_df["pred_mean"].values,
-    )
-    anomaly_metrics = compute_basic_metrics(
-        anomaly_df["obs_anom"].values,
-        anomaly_df["pred_anom"].values,
-    )
-    month_anom_metrics = compute_basic_metrics(
-        month_anom_df["obs_dev"].values,
-        month_anom_df["pred_dev"].values,
-    )
-    overall_std = _overall_metric_std(context)
-    space_std, time_std = _space_time_metric_stds(context, min_obs=site_min_obs)
-    month_anom_std = _monthly_source_centered_metric_std(
-        context,
-        min_obs=monthly_min_obs,
-        min_years=monthly_min_years,
-    )
-    panels = [
-        {
-            "title": "Overall",
-            "kind": "hexbin",
-            "x": lfmc_df["obs"].values,
-            "y": lfmc_df["pred"].values,
-            "xlabel": "Observed LFMC (%)",
-            "ylabel": "Predicted LFMC (%)",
-            "metrics": {
-                "n": overall_metrics["n"],
-                "rmse": overall_metrics["rmse"],
-                "r2": overall_metrics["r2"],
-                "rmse_std": overall_std["rmse"],
-                "r2_std": overall_std["r2"],
-            },
-            "cbar_label": "Count",
-            "gridsize": int(fig_cfg.get("hexbin_gridsize", 60)),
-        },
-        {
-            "title": "Site Anomalies",
-            "kind": "hexbin",
-            "x": anomaly_df["obs_anom"].values,
-            "y": anomaly_df["pred_anom"].values,
-            "xlabel": "Observed anomaly (%)",
-            "ylabel": "Predicted anomaly (%)",
-            "metrics": {
-                "n": anomaly_metrics["n"],
-                "rmse": anomaly_metrics["rmse"],
-                "r2": anomaly_metrics["r2"],
-                "rmse_std": time_std["rmse"],
-                "r2_std": time_std["r2"],
-            },
-            "cbar_label": "Count",
-            "gridsize": int(fig_cfg.get("hexbin_gridsize", 60)),
-        },
-        {
-            "title": "Site Means",
-            "kind": "scatter",
-            "x": site_summary_df["obs_mean"].values,
-            "y": site_summary_df["pred_mean"].values,
-            "xlabel": "Observed site mean (%)",
-            "ylabel": "Predicted site mean (%)",
-            "metrics": {
-                "n": site_mean_metrics["n"],
-                "rmse": site_mean_metrics["rmse"],
-                "r2": site_mean_metrics["r2"],
-                "rmse_std": space_std["rmse"],
-                "r2_std": space_std["r2"],
-            },
-            "color_array": site_summary_df["n_obs"].values,
-            "cbar_label": "Total observations",
-            "cmap": "viridis",
-            "cbar_vmax": 200,
-            "cbar_extend": "max",
-        },
-        {
-            "title": "Deviation from monthly average",
-            "kind": "hexbin",
-            "x": month_anom_df["obs_dev"].values,
-            "y": month_anom_df["pred_dev"].values,
-            "xlabel": "Observed deviation from monthly mean (%)",
-            "ylabel": "Predicted deviation from monthly mean (%)",
-            "metrics": {
-                "n": month_anom_metrics["n"],
-                "rmse": month_anom_metrics["rmse"],
-                "r2": month_anom_metrics["r2"],
-                "rmse_std": month_anom_std["rmse"],
-                "r2_std": month_anom_std["r2"],
-            },
-            "cbar_label": "Count",
-            "gridsize": int(fig_cfg.get("hexbin_gridsize", 60)),
-            "cbar_vmax": 600,
-            "cbar_extend": "max",
-            "xlim": (-100, 100),
-            "ylim": (-100, 100),
-        },
-    ]
-    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
-    table_path = _table_output_path(runtime, "figure_03_site_tables")
-    combined_table = site_summary_df.merge(
-        anomaly_df.groupby(["latitude", "longitude"], as_index=False).agg(
-            n_anomaly_rows=("obs_anom", "size")
-        ),
-        on=["latitude", "longitude"],
-        how="left",
-    )
-    month_summary = (
-        month_anom_df.groupby(["latitude", "longitude"], as_index=False)
-        .agg(n_month_dev_rows=("obs_dev", "size"))
-    )
-    combined_table = combined_table.merge(
-        month_summary,
-        on=["latitude", "longitude"],
-        how="left",
-    )
-    combined_table.to_csv(table_path, index=False)
-    plot_scatter_triptych(
-        panels=panels,
-        save_path=save_path,
-        fontsize=int(cfg["plotting"].get("fontsize", 14)),
-        figsize=fig_cfg["figsize"],
-        dpi=int(cfg["plotting"].get("dpi", 350)),
-    )
-    return save_path
-
-
-def build_figure_4(runtime: Dict[str, object]) -> str:
-    cfg = runtime["cfg"]
-    fig_cfg = cfg["figures"]["figure_4"]
-    site_min_obs = int(cfg["variability"]["site_min_obs"])
-    monthly_min_obs = int(cfg["variability"]["monthly_min_obs"])
-    monthly_min_years = int(cfg["variability"]["monthly_min_years"])
-    metric_df = _landcover_metric_table(
-        runtime=runtime,
-        model_key=str(fig_cfg["model_key"]),
-        site_min_obs=site_min_obs,
-        monthly_min_obs=monthly_min_obs,
-        monthly_min_years=monthly_min_years,
-    )
-    metric_df = _prepend_overall_landcover_metrics(
-        runtime=runtime,
-        model_key=str(fig_cfg["model_key"]),
-        metric_df=metric_df,
-        site_min_obs=site_min_obs,
-        monthly_min_obs=monthly_min_obs,
-        monthly_min_years=monthly_min_years,
-    )
-    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
-    table_path = _table_output_path(runtime, "figure_04_landcover_metrics")
-    metric_df.to_csv(table_path, index=False)
-    categories = metric_df["dominant_landcover"].astype(str).tolist()
-    values = np.column_stack(
-        [
-            metric_df["overall_r2"].to_numpy(dtype=float),
-            metric_df["site_anom_r2"].to_numpy(dtype=float),
-            metric_df["site_mean_r2"].to_numpy(dtype=float),
-            metric_df["monthly_dev_r2"].to_numpy(dtype=float),
-        ]
-    )
-    counts = np.column_stack(
-        [
-            metric_df["n_points"].to_numpy(dtype=float),
-            metric_df["n_points"].to_numpy(dtype=float),
-            metric_df["n_sites"].to_numpy(dtype=float),
-            metric_df["total_obs"].to_numpy(dtype=float),
-        ]
-    )
-    errors = np.column_stack(
-        [
-            metric_df["overall_r2_std"].to_numpy(dtype=float),
-            metric_df["site_anom_r2_std"].to_numpy(dtype=float),
-            metric_df["site_mean_r2_std"].to_numpy(dtype=float),
-            metric_df["monthly_dev_r2_std"].to_numpy(dtype=float),
-        ]
-    )
-    plot_landcover_metric_grouped(
-        categories=categories,
-        metric_labels=["Overall", "Anomaly", "Site Mean", "Deviation from monthly mean"],
-        values=values,
-        counts=counts,
-        errors=errors,
-        save_path=save_path,
-        fontsize=int(cfg["plotting"].get("fontsize", 14)),
-        figsize=fig_cfg["figsize"],
-        dpi=int(cfg["plotting"].get("dpi", 350)),
-        colors=[
-            fig_cfg["metric_colors"][0],
-            fig_cfg["metric_colors"][1],
-            fig_cfg["metric_colors"][2],
-            fig_cfg["metric_colors"][3],
-        ],
-    )
-    return save_path
-
-
-def build_figure_5(runtime: Dict[str, object]) -> str:
-    cfg = runtime["cfg"]
-    fig_cfg = cfg["figures"]["figure_5"]
-    site_min_obs = int(cfg["variability"]["site_min_obs"])
-    monthly_min_obs = int(cfg["variability"]["monthly_min_obs"])
-    monthly_min_years = int(cfg["variability"]["monthly_min_years"])
-    landcover_categories = list(cfg["filters"]["landcover_order"])
-    categories = ["overall"] + landcover_categories
+    categories = ["overall"] + list(cfg["filters"]["landcover_order"])
     model_labels = []
     colors = []
     overall_values = []
@@ -2260,7 +3042,11 @@ def build_figure_5(runtime: Dict[str, object]) -> str:
     for model_key in fig_cfg["model_keys"]:
         model_cfg = _model_cfg(cfg, str(model_key))
         model_labels.append(str(model_cfg["display_name"]))
-        colors.append(str(model_cfg["color"]))
+        configured_colors = fig_cfg.get("model_colors")
+        if configured_colors is not None:
+            colors.append(str(configured_colors[len(colors)]))
+        else:
+            colors.append(str(model_cfg["color"]))
         metric_df = _landcover_metric_table(
             runtime=runtime,
             model_key=str(model_key),
@@ -2299,10 +3085,10 @@ def build_figure_5(runtime: Dict[str, object]) -> str:
             anomaly_err_row.append(float(row.get("site_anom_r2_std", np.nan)))
             mean_err_row.append(float(row.get("site_mean_r2_std", np.nan)))
             monthly_err_row.append(float(row.get("monthly_dev_r2_std", np.nan)))
-            overall_count_row.append(float(row.get("n_points", np.nan)))
-            anomaly_count_row.append(float(row.get("n_points", np.nan)))
-            mean_count_row.append(float(row.get("n_sites", np.nan)))
-            monthly_count_row.append(float(row.get("total_obs", np.nan)))
+            overall_count_row.append(float(row.get("overall_n", np.nan)))
+            anomaly_count_row.append(float(row.get("site_anom_n", np.nan)))
+            mean_count_row.append(float(row.get("site_mean_n", np.nan)))
+            monthly_count_row.append(float(row.get("monthly_dev_n", np.nan)))
             merged_rows.append(
                 {
                     "model_key": model_key,
@@ -2316,10 +3102,10 @@ def build_figure_5(runtime: Dict[str, object]) -> str:
                     "site_anom_r2_std": row.get("site_anom_r2_std", np.nan),
                     "site_mean_r2_std": row.get("site_mean_r2_std", np.nan),
                     "monthly_dev_r2_std": row.get("monthly_dev_r2_std", np.nan),
-                    "overall_n": row.get("n_points", np.nan),
-                    "site_anom_n": row.get("n_points", np.nan),
-                    "site_mean_n": row.get("n_sites", np.nan),
-                    "monthly_dev_n": row.get("total_obs", np.nan),
+                    "overall_n": row.get("overall_n", np.nan),
+                    "site_anom_n": row.get("site_anom_n", np.nan),
+                    "site_mean_n": row.get("site_mean_n", np.nan),
+                    "monthly_dev_n": row.get("monthly_dev_n", np.nan),
                 }
             )
         overall_values.append(overall_row)
@@ -2334,14 +3120,10 @@ def build_figure_5(runtime: Dict[str, object]) -> str:
         anomaly_counts.append(anomaly_count_row)
         mean_counts.append(mean_count_row)
         monthly_counts.append(monthly_count_row)
-    legend_labels = list(fig_cfg.get("legend_labels", model_labels))
-    if len(legend_labels) != len(model_labels):
-        raise ValueError(
-            "Figure 5 legend_labels length must match the number of configured model_keys"
-        )
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
-    table_path = _table_output_path(runtime, "figure_05_landcover_model_comparison")
+    table_path = _table_output_path(runtime, "supplementary_figure_04_ablation_all_metrics")
     pd.DataFrame.from_records(merged_rows).to_csv(table_path, index=False)
+    legend_labels = list(fig_cfg.get("legend_labels", model_labels))
     plot_landcover_comparison_panels(
         categories=categories,
         model_labels=legend_labels,
@@ -2355,7 +3137,7 @@ def build_figure_5(runtime: Dict[str, object]) -> str:
                 "counts": np.asarray(overall_counts, dtype=float).T,
             },
             {
-                "title": "Site Anomalies",
+                "title": "Anomalies",
                 "ylabel": "R²",
                 "values": np.asarray(anomaly_values, dtype=float).T,
                 "errors": np.asarray(anomaly_errors, dtype=float).T,
@@ -2369,13 +3151,28 @@ def build_figure_5(runtime: Dict[str, object]) -> str:
                 "counts": np.asarray(mean_counts, dtype=float).T,
             },
             {
-                "title": "Deviation from monthly mean",
+                "title": "Monthly variability",
                 "ylabel": "R²",
                 "values": np.asarray(monthly_values, dtype=float).T,
                 "errors": np.asarray(monthly_errors, dtype=float).T,
                 "counts": np.asarray(monthly_counts, dtype=float).T,
             },
         ],
+        save_path=save_path,
+        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        figsize=fig_cfg["figsize"],
+        dpi=int(cfg["plotting"].get("dpi", 350)),
+    )
+    return save_path
+
+
+def build_supplementary_figure_5(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    fig_cfg = cfg["figures"]["supplementary_figure_5"]
+    save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
+    plot_placeholder_figure(
+        title=str(fig_cfg.get("title", "Supplementary Figure Placeholder")),
+        description=str(fig_cfg.get("description", "")),
         save_path=save_path,
         fontsize=int(cfg["plotting"].get("fontsize", 14)),
         figsize=fig_cfg["figsize"],
@@ -2396,6 +3193,8 @@ def build_enabled_figures(
         "figure_4": build_figure_4,
         "figure_5": build_figure_5,
         "figure_6": build_figure_6,
+        "figure_7": build_figure_7,
+        "figure_8": build_figure_8,
         "supplementary_figure_1": build_supplementary_figure_1,
         "supplementary_figure_2": build_supplementary_figure_2,
         "supplementary_figure_3": build_supplementary_figure_3,

@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Sequence
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import cartopy.io.shapereader as shpreader
+from cartopy.feature import ShapelyFeature
 import geopandas as gpd
 import matplotlib as mpl
 import matplotlib.dates as mdates
@@ -12,8 +14,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from matplotlib.colors import LogNorm, Normalize
+from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
 from matplotlib.patches import Patch
+from shapely.ops import unary_union
 
 
 LANDCOVER_DISPLAY = {
@@ -26,10 +29,16 @@ LANDCOVER_DISPLAY = {
     "unknown": "Unknown",
 }
 
+LFMC_BROWN_GREEN_CMAP = LinearSegmentedColormap.from_list(
+    "lfmc_brown_green",
+    ["#8c510a", "#d8b365", "#f6e8c3", "#c7eae5", "#5ab4ac", "#01665e"],
+)
+
 
 def _paper_rc_params(fontsize: int) -> Dict[str, object]:
     return {
-        "font.family": "DejaVu Serif",
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Futura", "Helvetica Neue", "Helvetica", "Arial", "DejaVu Sans"],
         "font.size": fontsize,
         "axes.titlesize": fontsize + 1,
         "axes.labelsize": fontsize,
@@ -46,6 +55,136 @@ def _paper_rc_params(fontsize: int) -> Dict[str, object]:
 
 def _ensure_parent_dir(save_path: str) -> None:
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+
+def _save_figure_outputs(fig, save_path: str, dpi: int, bbox_inches: str = "tight") -> None:
+    _ensure_parent_dir(save_path)
+    fig.savefig(save_path, dpi=dpi, bbox_inches=bbox_inches)
+    stem, _ = os.path.splitext(save_path)
+    svg_path = f"{stem}.svg"
+    fig.savefig(svg_path, bbox_inches=bbox_inches)
+
+
+def _albers_equal_area_5070():
+    return ccrs.AlbersEqualArea(
+        central_longitude=-96,
+        central_latitude=23,
+        false_easting=0,
+        false_northing=0,
+        standard_parallels=(29.5, 45.5),
+        globe=ccrs.Globe(datum="NAD83"),
+    )
+
+
+def _projected_extent(xs: np.ndarray, ys: np.ndarray, pad_fraction: float = 0.06) -> List[float]:
+    x_pad = max(1.5e5, pad_fraction * float(np.ptp(xs)) if len(xs) > 1 else 1.5e5)
+    y_pad = max(1.5e5, pad_fraction * float(np.ptp(ys)) if len(ys) > 1 else 1.5e5)
+    return [
+        float(np.min(xs) - x_pad),
+        float(np.max(xs) + x_pad),
+        float(np.min(ys) - y_pad),
+        float(np.max(ys) + y_pad),
+    ]
+
+
+def _add_paper_map_background(ax) -> None:
+    ax.add_feature(
+        cfeature.LAND.with_scale("50m"),
+        facecolor="#f4f1ea",
+        edgecolor="none",
+    )
+    ax.add_feature(
+        cfeature.OCEAN.with_scale("50m"),
+        facecolor="#e6eef5",
+        edgecolor="none",
+    )
+    ax.coastlines(resolution="50m", linewidth=0.6, color="#4c5c68")
+    ax.add_feature(
+        cfeature.BORDERS.with_scale("50m"),
+        linewidth=0.45,
+        edgecolor="#5f6c72",
+    )
+    try:
+        ax.add_feature(
+            cfeature.NaturalEarthFeature(
+                "cultural",
+                "admin_1_states_provinces_lines",
+                "50m",
+            ),
+            linewidth=0.35,
+            edgecolor="#8f9398",
+            facecolor="none",
+        )
+    except Exception:
+        pass
+
+
+def _prediction_region_linework():
+    prediction_states = {
+        "Arizona", "California", "Colorado", "Idaho", "Montana",
+        "New Mexico", "Nevada", "Oregon", "Texas", "Utah", "Washington", "Wyoming",
+    }
+    states_shp = shpreader.natural_earth(
+        resolution="50m", category="cultural", name="admin_1_states_provinces",
+    )
+    state_geoms = [
+        rec.geometry for rec in shpreader.Reader(states_shp).records()
+        if rec.attributes.get("admin") == "United States of America"
+        and rec.attributes.get("name") in prediction_states
+    ]
+    prediction_union = unary_union(state_geoms)
+    coast_shp = shpreader.natural_earth(
+        resolution="50m", category="physical", name="coastline",
+    )
+    clipped_coasts = [
+        geom.intersection(prediction_union)
+        for geom in shpreader.Reader(coast_shp).geometries()
+        if geom.intersects(prediction_union)
+    ]
+    clipped_coasts = [geom for geom in clipped_coasts if not geom.is_empty]
+    border_shp = shpreader.natural_earth(
+        resolution="50m", category="cultural", name="admin_0_boundary_lines_land",
+    )
+    clipped_borders = [
+        geom.intersection(prediction_union)
+        for geom in shpreader.Reader(border_shp).geometries()
+        if geom.intersects(prediction_union)
+    ]
+    clipped_borders = [geom for geom in clipped_borders if not geom.is_empty]
+    return state_geoms, clipped_coasts, clipped_borders
+
+
+def _add_prediction_region_lines(
+    ax,
+    state_geoms,
+    clipped_coasts,
+    clipped_borders,
+    border_color: str = "#888888",
+    border_lw: float = 0.8,
+) -> None:
+    ax.add_feature(
+        ShapelyFeature(state_geoms, ccrs.PlateCarree()),
+        facecolor="none",
+        edgecolor=border_color,
+        linewidth=border_lw,
+        zorder=2,
+    )
+    if clipped_coasts:
+        ax.add_feature(
+            ShapelyFeature(clipped_coasts, ccrs.PlateCarree()),
+            facecolor="none",
+            edgecolor=border_color,
+            linewidth=border_lw,
+            zorder=2,
+        )
+    if clipped_borders:
+        ax.add_feature(
+            ShapelyFeature(clipped_borders, ccrs.PlateCarree()),
+            facecolor="none",
+            edgecolor=border_color,
+            linewidth=border_lw,
+            zorder=2,
+        )
 
 
 def _format_landcover_labels(categories: Sequence[str]) -> List[str]:
@@ -177,6 +316,45 @@ def _format_bar_metric_label(
     return "\n".join(parts)
 
 
+def _annotate_metric_bars(
+    ax,
+    bars,
+    values: Sequence[float],
+    counts: Sequence[float],
+    fontsize: int,
+    tops: Optional[Sequence[float]] = None,
+    count_y: Optional[float] = None,
+) -> None:
+    top_values = None if tops is None else np.asarray(tops, dtype=float)
+    value_arr = np.asarray(values, dtype=float)
+    count_arr = np.asarray(counts, dtype=float)
+    for idx, bar in enumerate(bars):
+        if idx >= len(value_arr) or not np.isfinite(value_arr[idx]):
+            continue
+        top = bar.get_height()
+        if top_values is not None and idx < len(top_values) and np.isfinite(top_values[idx]):
+            top = float(top_values[idx])
+        offset = 0.01 * max(abs(top), abs(bar.get_height()), 1.0)
+        x_loc = bar.get_x() + (bar.get_width() / 2.0)
+        ax.text(
+            x_loc,
+            top + offset,
+            f"{float(value_arr[idx]):.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=fontsize,
+        )
+        if idx < len(count_arr) and np.isfinite(count_arr[idx]) and count_y is not None:
+            ax.text(
+                x_loc,
+                count_y,
+                f"N={int(round(float(count_arr[idx])))}",
+                ha="center",
+                va="bottom",
+                fontsize=fontsize,
+            )
+
+
 def plot_stacked_timeseries_panels(
     panels: Sequence[Dict[str, object]],
     save_path: str,
@@ -202,6 +380,11 @@ def plot_stacked_timeseries_panels(
         use_month_aligned_axis = any(
             bool(panel.get("use_month_aligned_axis", False)) for panel in panels
         )
+        has_locator_insets = any(
+            panel.get("site_latitude") is not None and panel.get("site_longitude") is not None
+            for panel in panels
+        )
+        state_geoms, clipped_coasts, clipped_borders = _prediction_region_linework()
         for idx, (ax, panel) in enumerate(zip(axes, panels)):
             right_series = panel.get("right_series", []) or []
             series_list = panel.get("series", [])
@@ -223,6 +406,17 @@ def plot_stacked_timeseries_panels(
                     target.append((line, series.get("label")))
             ax.set_ylabel(panel.get("ylabel", "LFMC (%)"))
             ax.set_title(panel.get("title", ""), loc="left", pad=4)
+            ax.text(
+                -0.06,
+                1.03,
+                chr(ord("a") + idx),
+                transform=ax.transAxes,
+                va="bottom",
+                ha="left",
+                fontweight="bold",
+                fontsize=fontsize + 6,
+                clip_on=False,
+            )
             ax.grid(False)
             y_limits = _panel_limits_from_series(series_list)
             if panel.get("timeseries_mode") == "banded_sar":
@@ -252,6 +446,36 @@ def plot_stacked_timeseries_panels(
                 if right_limits is not None:
                     ax_r.set_ylim(*right_limits)
                 ax_r.grid(False)
+            site_lat = panel.get("site_latitude")
+            site_lon = panel.get("site_longitude")
+            if site_lat is not None and site_lon is not None:
+                inset_bounds = [1.01, 0.56, 0.18, 0.47]
+                inset_ax = ax.inset_axes(
+                    inset_bounds,
+                    projection=_albers_equal_area_5070(),
+                )
+                inset_ax.set_extent([-125, -101, 30, 50], crs=ccrs.PlateCarree())
+                try:
+                    inset_ax.outline_patch.set_visible(False)
+                except AttributeError:
+                    for spine in inset_ax.spines.values():
+                        spine.set_visible(False)
+                _add_prediction_region_lines(
+                    inset_ax,
+                    state_geoms,
+                    clipped_coasts,
+                    clipped_borders,
+                )
+                inset_ax.scatter(
+                    [float(site_lon)],
+                    [float(site_lat)],
+                    transform=ccrs.PlateCarree(),
+                    s=24,
+                    color="#cf5c36",
+                    edgecolor="white",
+                    linewidth=0.7,
+                    zorder=4,
+                )
         if use_month_aligned_axis:
             locator = mdates.MonthLocator(bymonth=[1, 4, 7, 10])
             formatter = mdates.DateFormatter("%b")
@@ -320,14 +544,13 @@ def plot_stacked_timeseries_panels(
                 )
             bottom = 0.165
         fig.subplots_adjust(
-            left=0.09,
-            right=0.91,
+            left=0.12,
+            right=0.84 if has_locator_insets else 0.91,
             top=0.95,
             bottom=bottom,
-            hspace=0.26,
+            hspace=0.34,
         )
-        _ensure_parent_dir(save_path)
-        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -372,45 +595,10 @@ def plot_site_observation_map(
 
     with plt.rc_context(_paper_rc_params(fontsize)):
         fig = plt.figure(figsize=tuple(figsize))
-        proj = ccrs.AlbersEqualArea(
-            central_longitude=-96,
-            central_latitude=23,
-            false_easting=0,
-            false_northing=0,
-            standard_parallels=(29.5, 45.5),
-            globe=ccrs.Globe(datum="NAD83"),
-        )
+        proj = _albers_equal_area_5070()
         ax = plt.axes(projection=proj)
         ax.set_extent(extent, crs=proj)
-        ax.add_feature(
-            cfeature.LAND.with_scale("50m"),
-            facecolor="#f4f1ea",
-            edgecolor="none",
-        )
-        ax.add_feature(
-            cfeature.OCEAN.with_scale("50m"),
-            facecolor="#e6eef5",
-            edgecolor="none",
-        )
-        ax.coastlines(resolution="50m", linewidth=0.6, color="#4c5c68")
-        ax.add_feature(
-            cfeature.BORDERS.with_scale("50m"),
-            linewidth=0.45,
-            edgecolor="#5f6c72",
-        )
-        try:
-            ax.add_feature(
-                cfeature.NaturalEarthFeature(
-                    "cultural",
-                    "admin_1_states_provinces_lines",
-                    "50m",
-                ),
-                linewidth=0.35,
-                edgecolor="#8f9398",
-                facecolor="none",
-            )
-        except Exception:
-            pass
+        _add_paper_map_background(ax)
 
         positive_counts = counts[counts > 0]
         norm = None
@@ -472,8 +660,339 @@ def plot_site_observation_map(
             fontsize=max(fontsize - 2, 8),
         )
 
-        _ensure_parent_dir(save_path)
-        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_lfmc_snapshot_quadrants(
+    panels: Sequence[Dict[str, object]],
+    save_path: str,
+    fontsize: int,
+    figsize: Sequence[float],
+    dpi: int,
+    cmap=LFMC_BROWN_GREEN_CMAP,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    col_labels: Optional[Sequence[str]] = None,
+    row_labels: Optional[Sequence[str]] = None,
+    state_lines_only: bool = False,
+    subplot_wspace: float = -0.15,
+    subplot_hspace: float = 0.04,
+) -> None:
+    finite_values = []
+    for panel in panels:
+        values = np.asarray(panel["values"], dtype=float)
+        finite = values[np.isfinite(values)]
+        if finite.size > 0:
+            finite_values.append(finite)
+    if len(finite_values) == 0:
+        raise ValueError("No finite LFMC map values available for snapshot figure")
+    if col_labels is not None and row_labels is not None:
+        ncols = len(col_labels)
+        nrows = len(row_labels)
+        expected_panels = nrows * ncols
+        if len(panels) != expected_panels:
+            raise ValueError(
+                f"LFMC snapshot figure expected {expected_panels} panels for a "
+                f"{nrows}x{ncols} layout, got {len(panels)}"
+            )
+    else:
+        ncols = min(len(panels), 3)
+        nrows = int(np.ceil(len(panels) / max(ncols, 1)))
+    combined = np.concatenate(finite_values)
+    if vmin is None:
+        vmin = float(np.percentile(combined, 2))
+    if vmax is None:
+        vmax = float(np.percentile(combined, 98))
+    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+        raise ValueError(f"Invalid LFMC color limits: vmin={vmin}, vmax={vmax}")
+
+    x_vals = np.asarray(panels[0]["x"], dtype=float)
+    y_vals = np.asarray(panels[0]["y"], dtype=float)
+    extent = [
+        float(np.min(x_vals)),
+        float(np.max(x_vals)),
+        float(np.min(y_vals)),
+        float(np.max(y_vals)),
+    ]
+    proj = _albers_equal_area_5070()
+    if state_lines_only:
+        state_geoms, clipped_coasts, clipped_borders = _prediction_region_linework()
+    with plt.rc_context(_paper_rc_params(fontsize)):
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            figsize=tuple(figsize),
+            subplot_kw={"projection": proj},
+            constrained_layout=False,
+            squeeze=False,
+        )
+        axes = np.asarray(axes).reshape(-1)
+        label_fontsize = fontsize + 12
+        mappable = None
+        for idx, (ax, panel) in enumerate(zip(axes, panels)):
+            row_idx = idx // ncols
+            col_idx = idx % ncols
+            ax.set_extent(extent, crs=proj)
+            ax.patch.set_facecolor("none")
+            ax.patch.set_alpha(0.0)
+            try:
+                ax.outline_patch.set_visible(False)
+            except AttributeError:
+                for spine in ax.spines.values():
+                    spine.set_visible(False)
+            if not state_lines_only:
+                _add_paper_map_background(ax)
+            values = np.asarray(panel["values"], dtype=float)
+            x_panel = np.asarray(panel["x"], dtype=float)
+            y_panel = np.asarray(panel["y"], dtype=float)
+            mappable = ax.imshow(
+                values,
+                origin="upper",
+                extent=[
+                    float(np.min(x_panel)),
+                    float(np.max(x_panel)),
+                    float(np.min(y_panel)),
+                    float(np.max(y_panel)),
+                ],
+                transform=proj,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                interpolation="nearest",
+                zorder=2,
+            )
+            if state_lines_only:
+                _add_prediction_region_lines(ax, state_geoms, clipped_coasts, clipped_borders)
+            panel_label = panel.get("panel_label")
+            if panel_label in {None, ""}:
+                raw_title = panel.get("title")
+                if raw_title not in {None, ""}:
+                    panel_label = str(raw_title).split(")", 1)[0].strip()
+            if panel_label not in {None, ""}:
+                ax.text(
+                    -0.01,
+                    1.015,
+                    str(panel_label),
+                    transform=ax.transAxes,
+                    va="bottom",
+                    ha="left",
+                    fontweight="bold",
+                    fontsize=label_fontsize,
+                    clip_on=False,
+                )
+            if col_labels is not None and row_labels is not None:
+                if row_idx == 0:
+                    ax.set_title(
+                        col_labels[col_idx], loc="center", pad=22,
+                        fontsize=label_fontsize + 2,
+                    )
+                if col_idx == 0:
+                    ax.text(
+                        -0.14, 0.5, row_labels[row_idx],
+                        transform=ax.transAxes,
+                        rotation=0,
+                        va="center", ha="right",
+                        fontsize=label_fontsize + 2,
+                        linespacing=1.4,
+                    )
+            else:
+                ax.set_title(str(panel["title"]), loc="left", pad=4)
+        for ax in axes[len(panels):]:
+            ax.set_visible(False)
+        left_margin = 0.16 if row_labels is not None else 0.03
+        cbar_left = 0.20 if row_labels is not None else 0.14
+        cbar_width = 0.60 if ncols <= 2 else 0.64
+        fig.subplots_adjust(
+            left=left_margin,
+            right=0.995,
+            top=0.90,
+            bottom=0.10,
+            wspace=float(subplot_wspace),
+            hspace=float(subplot_hspace),
+        )
+        cax = fig.add_axes([cbar_left, 0.03, cbar_width, 0.025])
+        cbar = fig.colorbar(mappable, cax=cax, orientation="horizontal")
+        cbar.set_label("Live Fuel Moisture Content (%)", fontsize=label_fontsize, labelpad=12)
+        cbar.ax.tick_params(labelsize=label_fontsize - 2)
+        _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+
+
+def plot_training_location_maps(
+    panels: Sequence[Dict[str, object]],
+    save_path: str,
+    fontsize: int,
+    figsize: Sequence[float],
+    dpi: int,
+    state_lines_only: bool = False,
+) -> None:
+    if len(panels) != 2:
+        raise ValueError("Training location map figure expects exactly 2 panels")
+    proj = _albers_equal_area_5070()
+    all_xs = []
+    all_ys = []
+    gdfs = []
+    for panel in panels:
+        map_df = panel["map_df"].copy()
+        map_df["longitude"] = pd.to_numeric(map_df["longitude"], errors="coerce")
+        map_df["latitude"] = pd.to_numeric(map_df["latitude"], errors="coerce")
+        map_df["n_points"] = pd.to_numeric(map_df["n_points"], errors="coerce")
+        map_df = map_df.dropna(subset=["longitude", "latitude", "n_points"]).reset_index(drop=True)
+        if len(map_df) == 0:
+            raise ValueError(f"No finite rows remain for panel '{panel['title']}'")
+        gdf = gpd.GeoDataFrame(
+            map_df,
+            geometry=gpd.points_from_xy(map_df["longitude"], map_df["latitude"]),
+            crs="EPSG:4326",
+        ).to_crs("EPSG:5070")
+        gdf["x_proj"] = gdf.geometry.x.to_numpy(dtype=float)
+        gdf["y_proj"] = gdf.geometry.y.to_numpy(dtype=float)
+        all_xs.append(gdf["x_proj"].to_numpy(dtype=float))
+        all_ys.append(gdf["y_proj"].to_numpy(dtype=float))
+        gdfs.append(gdf)
+    extent = _projected_extent(np.concatenate(all_xs), np.concatenate(all_ys))
+    with plt.rc_context(_paper_rc_params(fontsize)):
+        fig, axes = plt.subplots(
+            1,
+            2,
+            figsize=tuple(figsize),
+            subplot_kw={"projection": proj},
+            constrained_layout=False,
+        )
+        axes = np.asarray(axes).reshape(-1)
+        if state_lines_only:
+            state_geoms, clipped_coasts, clipped_borders = _prediction_region_linework()
+        for ax, panel, gdf in zip(axes, panels, gdfs):
+            ax.set_extent(extent, crs=proj)
+            try:
+                ax.outline_patch.set_visible(False)
+            except AttributeError:
+                for spine in ax.spines.values():
+                    spine.set_visible(False)
+            if state_lines_only:
+                _add_prediction_region_lines(ax, state_geoms, clipped_coasts, clipped_borders)
+            else:
+                _add_paper_map_background(ax)
+            counts = gdf["n_points"].to_numpy(dtype=float)
+            cmap = panel.get("cmap", "viridis")
+            vmax = panel.get("cbar_vmax")
+            color_vmax = float(np.nanmax(counts)) if vmax is None else float(vmax)
+            if not np.isfinite(color_vmax) or color_vmax <= 0:
+                color_vmax = 1.0
+            norm = Normalize(vmin=0.0, vmax=color_vmax)
+            extend = "neither"
+            if np.any(counts > color_vmax):
+                extend = "max"
+            marker_defs = dict(panel.get("marker_defs", {}))
+            scatter = mpl.cm.ScalarMappable(norm=norm, cmap=cmap)
+            scatter.set_array([])
+            ordered_gdf = gdf[gdf["marker_group"].isin(marker_defs)].copy()
+            ordered_gdf = ordered_gdf.sort_values(
+                ["n_points", "x_proj", "y_proj"],
+                ascending=[True, True, True],
+                kind="mergesort",
+            ).reset_index(drop=True)
+            legend_handle_by_group = {}
+            unique_counts = [
+                float(count_val)
+                for count_val in ordered_gdf["n_points"].drop_duplicates().sort_values().tolist()
+            ]
+            for z_idx, count_val in enumerate(unique_counts, start=3):
+                count_subset = ordered_gdf[ordered_gdf["n_points"] == count_val]
+                for marker_group, marker_style in marker_defs.items():
+                    subset = count_subset[count_subset["marker_group"] == marker_group]
+                    if len(subset) == 0:
+                        continue
+                    marker_size = float(marker_style.get("size", panel.get("marker_size", 34.0)))
+                    marker_alpha = float(marker_style.get("alpha", 0.92))
+                    marker_edgecolor = marker_style.get("edgecolor", "#1f1f1f")
+                    marker_linewidth = float(marker_style.get("linewidth", 0.18))
+                    handle = ax.scatter(
+                        subset["x_proj"].to_numpy(dtype=float),
+                        subset["y_proj"].to_numpy(dtype=float),
+                        c=subset["n_points"].to_numpy(dtype=float),
+                        cmap=cmap,
+                        norm=norm,
+                        s=marker_size,
+                        marker=str(marker_style["marker"]),
+                        alpha=marker_alpha,
+                        edgecolor=marker_edgecolor,
+                        linewidth=marker_linewidth,
+                        transform=proj,
+                        zorder=float(z_idx) + float(marker_style.get("zorder_offset", 0.0)),
+                        label=str(marker_style["label"]) if marker_group not in legend_handle_by_group else None,
+                    )
+                    legend_handle_by_group.setdefault(marker_group, handle)
+            legend_handles = [
+                legend_handle_by_group[marker_group]
+                for marker_group in marker_defs
+                if marker_group in legend_handle_by_group
+            ]
+            if len(legend_handles) == 0:
+                raise ValueError(f"No scatter points were drawn for panel '{panel['title']}'")
+            cbar = fig.colorbar(
+                scatter,
+                ax=ax,
+                shrink=0.82,
+                pad=float(panel.get("cbar_pad", 0.02)),
+                extend=extend,
+            )
+            cbar.set_label(str(panel["cbar_label"]))
+            if len(legend_handles) > 1:
+                legend = ax.legend(
+                    handles=legend_handles,
+                    frameon=True,
+                    loc="lower left",
+                )
+                legend_zorder = 10000
+                legend.set_zorder(legend_zorder)
+                legend_frame = legend.get_frame()
+                legend_frame.set_zorder(legend_zorder)
+                legend_frame.set_facecolor("white")
+                legend_frame.set_alpha(1.0)
+                legend_frame.set_edgecolor("0.55")
+                for text in legend.get_texts():
+                    text.set_zorder(legend_zorder + 1)
+                for handle in legend.legend_handles:
+                    try:
+                        handle.set_zorder(legend_zorder + 1)
+                    except Exception:
+                        pass
+            stats_lines = [
+                f"Sites: {int(gdf[['longitude', 'latitude']].drop_duplicates().shape[0]):,}",
+                f"{str(panel.get('stats_total_label', 'Total points'))}: {int(np.nansum(counts)):,}",
+                f"{str(panel.get('stats_median_label', 'Median points/site'))}: {int(np.nanmedian(counts)):,}",
+            ]
+            stats_text_zorder = 10000
+            stats_text = ax.text(
+                0.985,
+                0.98,
+                "\n".join(stats_lines),
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                bbox={
+                    "boxstyle": "round",
+                    "facecolor": "white",
+                    "alpha": 0.8,
+                    "edgecolor": "0.55",
+                },
+                fontsize=max(fontsize - 2, 8),
+                zorder=stats_text_zorder,
+                clip_on=False,
+            )
+            stats_bbox = stats_text.get_bbox_patch()
+            if stats_bbox is not None:
+                stats_bbox.set_zorder(stats_text_zorder)
+            ax.set_title(
+                str(panel["title"]),
+                loc="left",
+                pad=4,
+                fontweight=str(panel.get("title_fontweight", "normal")),
+            )
+        fig.subplots_adjust(left=0.03, right=0.98, bottom=0.06, top=0.94, wspace=0.16)
+        _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -658,8 +1177,7 @@ def plot_sar_sampling_summary(
         legend.get_frame().set_edgecolor("0.4")
 
         fig.subplots_adjust(left=0.05, right=0.985, bottom=0.2, top=0.93, wspace=0.12)
-        _ensure_parent_dir(save_path)
-        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -671,6 +1189,7 @@ def plot_site_r2_landcover_distribution(
     figsize: Sequence[float],
     dpi: int,
     x_limits: Sequence[float],
+    show_summary_text: bool = True,
 ) -> None:
     if len(site_r2_df) == 0:
         raise ValueError("No site-level R2 rows provided for landcover distribution plot")
@@ -731,27 +1250,27 @@ def plot_site_r2_landcover_distribution(
         ax.set_xlabel("Site-level LFMC R²", fontsize=fontsize)
         ax.set_ylabel("Density", fontsize=fontsize)
         ax.tick_params(axis="both", labelsize=max(fontsize - 2, 8))
-        ax.text(
-            0.98,
-            0.98,
-            (
-                f"Sites = {len(work):,}\n"
-                f"Land covers = {work['dominant_landcover'].nunique()}"
-            ),
-            transform=ax.transAxes,
-            va="top",
-            ha="right",
-            bbox={
-                "boxstyle": "round",
-                "facecolor": "white",
-                "alpha": 0.9,
-                "edgecolor": "0.45",
-            },
-            fontsize=max(fontsize - 3, 8),
-        )
+        if show_summary_text:
+            ax.text(
+                0.98,
+                0.98,
+                (
+                    f"Sites = {len(work):,}\n"
+                    f"Land covers = {work['dominant_landcover'].nunique()}"
+                ),
+                transform=ax.transAxes,
+                va="top",
+                ha="right",
+                bbox={
+                    "boxstyle": "round",
+                    "facecolor": "white",
+                    "alpha": 0.9,
+                    "edgecolor": "0.45",
+                },
+                fontsize=max(fontsize - 3, 8),
+            )
         fig.tight_layout()
-        _ensure_parent_dir(save_path)
-        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -767,6 +1286,10 @@ def plot_training_sample_landcover_comparison(
     figsize: Sequence[float],
     dpi: int,
     note_text: Optional[str] = None,
+    legend_below: bool = False,
+    text_scale: float = 1.0,
+    x_label_rotation: float = 25.0,
+    counts_below_axis: bool = False,
 ) -> None:
     if len(categories) == 0:
         raise ValueError("No landcover categories provided for training-sample comparison plot")
@@ -782,6 +1305,7 @@ def plot_training_sample_landcover_comparison(
         x = np.arange(len(categories))
         width = 0.82 / float(len(dataset_labels))
         ymax = 0.0
+        label_fontsize = max(int(round((fontsize - 5) * float(text_scale))), 7)
         for dataset_idx, dataset_label in enumerate(dataset_labels):
             offset = (dataset_idx - ((len(dataset_labels) - 1) / 2.0)) * width
             yerr = None if err_arr is None else err_arr[:, dataset_idx]
@@ -807,41 +1331,70 @@ def plot_training_sample_landcover_comparison(
                 if finite_tops.size > 0:
                     ymax = max(ymax, float(np.max(finite_tops)))
             if count_arr is not None:
-                labels = []
                 top_positions = []
+                count_col = np.asarray(count_arr[:, dataset_idx], dtype=float)
                 for row_idx, value in enumerate(val_arr[:, dataset_idx]):
                     if not np.isfinite(value):
-                        labels.append("")
                         top_positions.append(np.nan)
                         continue
                     err_val = 0.0
                     if err_arr is not None:
                         err_candidate = err_arr[row_idx, dataset_idx]
                         err_val = 0.0 if not np.isfinite(err_candidate) else float(err_candidate)
-                    count_value = count_arr[row_idx, dataset_idx]
-                    count_text = "" if not np.isfinite(count_value) else f"\nN={int(round(float(count_value))):,}"
-                    labels.append(
-                        f"{float(value):.2f}{count_text}"
-                    )
                     top_positions.append(float(value) + err_val)
-                _annotate_bars(
-                    ax,
-                    bars,
-                    labels,
-                    fontsize=max(fontsize - 5, 7),
-                    zero_floor_for_negative=False,
-                    tops=top_positions,
-                )
+                if counts_below_axis:
+                    _annotate_metric_bars(
+                        ax,
+                        bars,
+                        values=val_arr[:, dataset_idx],
+                        counts=count_col,
+                        fontsize=label_fontsize,
+                        tops=top_positions,
+                        count_y=-0.12,
+                    )
+                else:
+                    labels = []
+                    for row_idx, value in enumerate(val_arr[:, dataset_idx]):
+                        if not np.isfinite(value):
+                            labels.append("")
+                            continue
+                        count_value = count_arr[row_idx, dataset_idx]
+                        count_text = "" if not np.isfinite(count_value) else f"\nN={int(round(float(count_value))):,}"
+                        labels.append(
+                            f"{float(value):.2f}{count_text}"
+                        )
+                    _annotate_bars(
+                        ax,
+                        bars,
+                        labels,
+                        fontsize=label_fontsize,
+                        zero_floor_for_negative=False,
+                        tops=top_positions,
+                    )
         ax.set_xticks(x, _format_landcover_labels(categories))
-        ax.tick_params(axis="x", rotation=25)
+        ax.tick_params(axis="x", rotation=float(x_label_rotation), labelsize=max(int(round((fontsize - 1) * float(text_scale))), 8))
         for tick in ax.get_xticklabels():
-            tick.set_horizontalalignment("right")
-        ax.set_xlabel("Land cover")
-        ax.set_ylabel("Fraction of training samples")
+            tick.set_horizontalalignment("right" if float(x_label_rotation) != 0.0 else "center")
+        ax.set_xlabel("Land cover", fontsize=int(round(fontsize * float(text_scale))))
+        ax.set_ylabel("Fraction of training samples", fontsize=int(round(fontsize * float(text_scale))))
         ax.set_ylim(0.0, min(1.0, ymax * 1.2 if ymax > 0 else 1.0))
-        legend = ax.legend(frameon=True, loc="upper right")
-        legend.get_frame().set_alpha(1.0)
-        legend.get_frame().set_edgecolor("0.4")
+        ax.tick_params(axis="y", labelsize=max(int(round((fontsize - 1) * float(text_scale))), 8))
+        if legend_below:
+            fig.legend(
+                loc="lower center",
+                ncol=max(1, min(len(dataset_labels), 4)),
+                frameon=False,
+                bbox_to_anchor=(0.5, 0.02),
+                fontsize=max(int(round((fontsize - 1) * float(text_scale))), 8),
+            )
+        else:
+            legend = ax.legend(
+                frameon=True,
+                loc="upper right",
+                fontsize=max(int(round((fontsize - 1) * float(text_scale))), 8),
+            )
+            legend.get_frame().set_alpha(1.0)
+            legend.get_frame().set_edgecolor("0.4")
         if note_text not in {None, ""}:
             ax.text(
                 0.98,
@@ -856,11 +1409,14 @@ def plot_training_sample_landcover_comparison(
                     "alpha": 0.92,
                     "edgecolor": "0.45",
                 },
-                fontsize=max(fontsize - 3, 8),
+                fontsize=max(int(round((fontsize - 3) * float(text_scale))), 8),
             )
-        fig.tight_layout()
-        _ensure_parent_dir(save_path)
-        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        if legend_below:
+            bottom = 0.22 if counts_below_axis else 0.16
+            fig.subplots_adjust(left=0.09, right=0.985, bottom=bottom, top=0.95)
+        else:
+            fig.tight_layout()
+        _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -905,8 +1461,7 @@ def plot_placeholder_figure(
             },
         )
         fig.tight_layout()
-        _ensure_parent_dir(save_path)
-        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -948,6 +1503,8 @@ def plot_scatter_triptych(
         else:
             fig, axes = plt.subplots(1, 3, figsize=tuple(figsize), constrained_layout=False)
             axes = np.asarray(axes).reshape(-1)
+        panel_title_fontsize = fontsize + 4
+        panel_label_fontsize = fontsize + 6
         for ax, panel in zip(axes, panels):
             x = np.asarray(panel["x"], dtype=float)
             y = np.asarray(panel["y"], dtype=float)
@@ -1053,7 +1610,19 @@ def plot_scatter_triptych(
                 ax.set_ylim(default_y_min, default_y_max)
             ax.set_xlabel(panel["xlabel"])
             ax.set_ylabel(panel["ylabel"])
-            ax.set_title(panel["title"], pad=4)
+            ax.set_title(panel["title"], pad=10, fontsize=panel_title_fontsize)
+            if panel.get("panel_label") not in {None, ""}:
+                ax.text(
+                    -0.18,
+                    1.12,
+                    str(panel["panel_label"]),
+                    transform=ax.transAxes,
+                    va="top",
+                    ha="left",
+                    fontweight="bold",
+                    fontsize=panel_label_fontsize,
+                    clip_on=False,
+                )
             ax.text(
                 0.03,
                 0.97,
@@ -1077,8 +1646,7 @@ def plot_scatter_triptych(
             fig.subplots_adjust(left=0.08, right=0.985, bottom=0.14, top=0.92, wspace=0.34)
         else:
             fig.subplots_adjust(left=0.06, right=0.985, bottom=0.14, top=0.92, wspace=0.34)
-        _ensure_parent_dir(save_path)
-        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -1106,8 +1674,7 @@ def plot_monthly_variability_bars(
                 continue
             labels.append(f"{value:.1f}%\nN={int(n_groups)}")
         _annotate_bars(ax, bars, labels, fontsize=max(fontsize - 3, 8))
-        _ensure_parent_dir(save_path)
-        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -1122,6 +1689,7 @@ def plot_landcover_metric_grouped(
     figsize: Sequence[float],
     dpi: int,
     colors: Sequence[str],
+    legend_below: bool = False,
 ) -> None:
     with plt.rc_context(_paper_rc_params(fontsize)):
         fig, ax = plt.subplots(figsize=tuple(figsize), constrained_layout=True)
@@ -1144,7 +1712,7 @@ def plot_landcover_metric_grouped(
                 capsize=2.5,
                 error_kw={"elinewidth": 1.2, "capthick": 1.1, "zorder": 4},
                 zorder=2,
-            )
+                )
             all_bars.append(bars)
         ax.set_xticks(x, _format_landcover_labels(categories))
         ax.set_xlabel("Land cover")
@@ -1156,33 +1724,40 @@ def plot_landcover_metric_grouped(
             if finite_combined.size > 0:
                 ymax = max(ymax, float(np.max(finite_combined)))
         ax.set_ylim(-0.1, max(ymax + 0.12, 0.35))
+        count_y = float(ax.get_ylim()[0] + 0.02)
         for metric_idx, bars in enumerate(all_bars):
-            labels = []
             top_positions = []
-            for value, count in zip(values[:, metric_idx], counts[:, metric_idx]):
+            for row_idx, value in enumerate(values[:, metric_idx]):
                 if not np.isfinite(value):
-                    labels.append("")
                     top_positions.append(np.nan)
                     continue
                 err_val = 0.0
                 if err_arr is not None:
-                    err_candidate = err_arr[len(top_positions), metric_idx]
+                    err_candidate = err_arr[row_idx, metric_idx]
                     err_val = 0.0 if not np.isfinite(err_candidate) else float(err_candidate)
-                labels.append(_format_bar_metric_label(value, count, err_val if np.isfinite(err_val) and err_val > 0 else np.nan))
                 top_positions.append(float(value) + err_val)
-            _annotate_bars(
+            _annotate_metric_bars(
                 ax,
                 bars,
-                labels,
+                values=values[:, metric_idx],
+                counts=counts[:, metric_idx],
                 fontsize=max(fontsize - 5, 7),
-                zero_floor_for_negative=True,
                 tops=top_positions,
+                count_y=count_y,
             )
-        legend = ax.legend(frameon=True, ncol=2)
-        legend.get_frame().set_alpha(1.0)
-        legend.get_frame().set_edgecolor("0.4")
-        _ensure_parent_dir(save_path)
-        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        if legend_below:
+            fig.legend(
+                loc="lower center",
+                ncol=max(1, min(len(metric_labels), 4)),
+                frameon=False,
+                bbox_to_anchor=(0.5, 0.01),
+            )
+            fig.subplots_adjust(left=0.08, right=0.985, bottom=0.20, top=0.95)
+        else:
+            legend = ax.legend(frameon=True, ncol=2)
+            legend.get_frame().set_alpha(1.0)
+            legend.get_frame().set_edgecolor("0.4")
+        _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
 
@@ -1230,33 +1805,28 @@ def plot_landcover_comparison_panels(
                     error_kw={"elinewidth": 1.2, "capthick": 1.1, "zorder": 4},
                     zorder=2,
                 )
-                labels = []
                 top_positions = []
                 for row_idx, value in enumerate(values[:, model_idx]):
                     if not np.isfinite(value):
-                        labels.append("")
                         top_positions.append(np.nan)
                         continue
-                    count = np.nan if counts is None else counts[row_idx, model_idx]
                     err_val = 0.0
                     if errors is not None:
                         err_candidate = errors[row_idx, model_idx]
                         err_val = 0.0 if not np.isfinite(err_candidate) else float(err_candidate)
-                    labels.append(
-                        _format_bar_metric_label(
-                            value,
-                            count,
-                            err_val if np.isfinite(err_val) and err_val > 0 else np.nan,
-                        )
-                    )
                     top_positions.append(float(value) + err_val)
-                _annotate_bars(
+                count_col = (
+                    np.full(values.shape[0], np.nan, dtype=float)
+                    if counts is None else counts[:, model_idx]
+                )
+                _annotate_metric_bars(
                     ax,
                     bars,
-                    labels,
+                    values=values[:, model_idx],
+                    counts=count_col,
                     fontsize=max(fontsize - 5, 7),
-                    zero_floor_for_negative=True,
                     tops=top_positions,
+                    count_y=-0.08,
                 )
             finite_vals = values[np.isfinite(values)]
             if finite_vals.size > 0:
@@ -1275,11 +1845,10 @@ def plot_landcover_comparison_panels(
             frameon=False,
             ncol=max(1, min(len(model_labels), 4)),
             loc="lower center",
-            bbox_to_anchor=(0.5, 0.028),
+            bbox_to_anchor=(0.5, 0.005),
         )
         axes[-1].set_xticks(x, _format_landcover_labels(categories))
         axes[-1].set_xlabel("Land cover")
-        fig.subplots_adjust(left=0.09, right=0.985, bottom=0.115, top=0.93, hspace=0.34)
-        _ensure_parent_dir(save_path)
-        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        fig.subplots_adjust(left=0.09, right=0.985, bottom=0.16, top=0.93, hspace=0.34)
+        _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
