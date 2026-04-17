@@ -644,13 +644,9 @@ def main():
     )
     if persistent_out_zarr_path in {"", "None"}:
         persistent_out_zarr_path = None
-    out_zarr_path = (
-        str(persistent_out_zarr_path)
-        if persistent_out_zarr_path is not None
-        else os.path.join(
-            merged_dir,
-            config_or_override(None, cfg, "paths", "merged_store_name"),
-        )
+    out_zarr_path = os.path.join(
+        merged_dir,
+        config_or_override(None, cfg, "paths", "merged_store_name"),
     )
     run_config = {
         "run_name": run_name,

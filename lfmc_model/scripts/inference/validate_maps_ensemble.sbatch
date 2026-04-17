@@ -25,3 +25,8 @@ run_root="$(dirname "${MANIFEST_PATH}")"
 echo "Validating run ${run_root}"
 python3 -u "${script_dir}/validate_map_outputs.py" \
     --run_root "${run_root}"
+
+echo "Verifying year-local merged store for ${run_root}"
+python3 -u "${script_dir}/verify_map_store.py" \
+    --manifest_path "${MANIFEST_PATH}" \
+    --kind local

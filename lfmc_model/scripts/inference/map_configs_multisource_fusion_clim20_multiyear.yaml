@@ -20,6 +20,7 @@ multiyear:
   start_year: 2001
   end_year: 2024
   cleanup_year_run_dir_after_success: true
+  verification_sample_shards: 4
 
 sources:
   registry_path: /home/users/trobinet/long_lfmc/lfmc_model/scripts/inference/source_registry.yaml

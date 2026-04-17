@@ -97,6 +97,54 @@ def _copy_landcover_years(staging_root, production_root):
         year_to_prod_idx[year] = old_n
 
 
+def _range_starts(start: int, stop: int, step: int):
+    return range(start, stop, max(1, int(step)))
+
+
+def _copy_time_var_chunkwise(
+    staging_arr,
+    production_arr,
+    staging_slice: slice,
+    production_slice: slice,
+    var_name: str,
+):
+    if len(staging_arr.shape) == 1:
+        t_chunk = int(staging_arr.chunks[0])
+        n_blocks = max(1, int(np.ceil((staging_slice.stop - staging_slice.start) / t_chunk)))
+        block_idx = 0
+        for t0 in _range_starts(staging_slice.start, staging_slice.stop, t_chunk):
+            t1 = min(staging_slice.stop, t0 + t_chunk)
+            prod_t0 = production_slice.start + (t0 - staging_slice.start)
+            prod_t1 = prod_t0 + (t1 - t0)
+            production_arr[prod_t0:prod_t1] = staging_arr[t0:t1]
+            block_idx += 1
+            print(timestamped_message(f"{var_name}: copied block {block_idx}/{n_blocks}"))
+        return
+
+    t_chunk, y_chunk, x_chunk = [int(v) for v in staging_arr.chunks]
+    t_starts = list(_range_starts(staging_slice.start, staging_slice.stop, t_chunk))
+    y_starts = list(_range_starts(0, int(staging_arr.shape[1]), y_chunk))
+    x_starts = list(_range_starts(0, int(staging_arr.shape[2]), x_chunk))
+    total_blocks = len(t_starts) * len(y_starts) * len(x_starts)
+    block_idx = 0
+    for t0 in t_starts:
+        t1 = min(staging_slice.stop, t0 + t_chunk)
+        prod_t0 = production_slice.start + (t0 - staging_slice.start)
+        prod_t1 = prod_t0 + (t1 - t0)
+        for y0 in y_starts:
+            y1 = min(int(staging_arr.shape[1]), y0 + y_chunk)
+            for x0 in x_starts:
+                x1 = min(int(staging_arr.shape[2]), x0 + x_chunk)
+                production_arr[prod_t0:prod_t1, y0:y1, x0:x1] = staging_arr[t0:t1, y0:y1, x0:x1]
+                block_idx += 1
+                if block_idx == 1 or block_idx == total_blocks or block_idx % 200 == 0:
+                    print(
+                        timestamped_message(
+                            f"{var_name}: copied block {block_idx}/{total_blocks}"
+                        )
+                    )
+
+
 def _append_time_range(staging_root, production_root, staging_slice: slice, production_time: pd.DatetimeIndex):
     staging_time = _load_time_index(staging_root)[staging_slice]
     if len(production_time) > 0 and staging_time[0] <= production_time[-1]:
@@ -105,10 +153,17 @@ def _append_time_range(staging_root, production_root, staging_slice: slice, prod
     new_n = old_n + int(len(staging_time))
     production_root['time'].resize(new_n)
     production_root['time'][old_n:new_n] = np.asarray(staging_root['time'][staging_slice], dtype=np.int64)
+    production_slice = slice(old_n, new_n)
     for var_name in TIME_VARS:
         arr = production_root[var_name]
         arr.resize(new_n, arr.shape[1], arr.shape[2]) if var_name != OUTPUT_QUALITY_FLAG_NAME else arr.resize(new_n)
-        arr[old_n:new_n] = staging_root[var_name][staging_slice]
+        _copy_time_var_chunkwise(
+            staging_arr=staging_root[var_name],
+            production_arr=arr,
+            staging_slice=staging_slice,
+            production_slice=production_slice,
+            var_name=var_name,
+        )
 
 
 def _overwrite_time_range(staging_root, production_root, staging_slice: slice, production_slice: slice):
@@ -117,7 +172,13 @@ def _overwrite_time_range(staging_root, production_root, staging_slice: slice, p
     if not np.array_equal(staging_time.values.astype('datetime64[ns]'), production_time.values.astype('datetime64[ns]')):
         raise ValueError('Staging and production time coordinates differ for overwrite range')
     for var_name in TIME_VARS:
-        production_root[var_name][production_slice] = staging_root[var_name][staging_slice]
+        _copy_time_var_chunkwise(
+            staging_arr=staging_root[var_name],
+            production_arr=production_root[var_name],
+            staging_slice=staging_slice,
+            production_slice=production_slice,
+            var_name=var_name,
+        )
 
 
 def _write_metadata_record(metadata_dir: str, record: dict):
