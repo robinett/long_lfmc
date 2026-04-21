@@ -1225,7 +1225,7 @@ def plot_site_r2_landcover_distribution(
                     color=color,
                     fill=False,
                     common_norm=False,
-                    bw_adjust=0.35,
+                    bw_adjust=0.25,
                     cut=0,
                     clip=(x_min, x_max),
                     gridsize=512,
