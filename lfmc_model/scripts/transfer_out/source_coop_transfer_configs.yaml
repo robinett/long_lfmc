@@ -3,7 +3,7 @@ source_coop:
   endpoint_url: ""
   bucket: us-west-2.opendata.source.coop
   product_prefix: rseg/long-lfmc-test/
-  credentials_path: /home/users/trobinet/long_lfmc/lfmc_model/scripts/transfer_out/source_credentials.json
+  credentials_path: /home/users/trobinet/source_creds.txt
   verify_after_upload: true
   delete_extra_remote_files: false
   acl: none

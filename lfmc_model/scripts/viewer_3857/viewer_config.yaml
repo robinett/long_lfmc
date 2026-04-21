@@ -11,6 +11,7 @@ data:
   source_endpoint_url: https://data.source.coop
   grid_crs: EPSG:3857
   display_variable: lfmc_ens_mean
+  uncertainty_variable: lfmc_ens_std
   quality_variable: quality_flag
   landcover_variable: dominant_landcover_code
   initial_date: 2023-07-01

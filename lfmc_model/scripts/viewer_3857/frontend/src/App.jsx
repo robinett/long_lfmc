@@ -135,20 +135,30 @@ function buildTimeseriesGeometry(pointInfo, selectedDate) {
 
   const dates = pointInfo.timeseries.dates ?? [];
   const means = pointInfo.timeseries.lfmc_ens_mean ?? [];
-  const validPoints = [];
+  const stds = pointInfo.timeseries.lfmc_ens_std ?? [];
+  const validLinePoints = [];
+  const validBandPoints = [];
 
   for (let idx = 0; idx < dates.length; idx += 1) {
     const meanValue = means[idx];
-    if (meanValue === null || Number.isNaN(meanValue)) {
-      continue;
+    const stdValue = stds[idx];
+    if (meanValue !== null && !Number.isNaN(meanValue)) {
+      validLinePoints.push({
+        idx,
+        mean: Number(meanValue),
+      });
+      if (stdValue !== null && !Number.isNaN(stdValue)) {
+        validBandPoints.push({
+          idx,
+          mean: Number(meanValue),
+          low: Number(meanValue) - Number(stdValue),
+          high: Number(meanValue) + Number(stdValue),
+        });
+      }
     }
-    validPoints.push({
-      idx,
-      mean: Number(meanValue),
-    });
   }
 
-  if (validPoints.length < 2) {
+  if (validLinePoints.length < 2) {
     return null;
   }
 
@@ -158,8 +168,12 @@ function buildTimeseriesGeometry(pointInfo, selectedDate) {
   const innerWidth = width - padding.left - padding.right;
   const innerHeight = height - padding.top - padding.bottom;
 
-  const dataYMin = Math.min(...validPoints.map((point) => point.mean));
-  const dataYMax = Math.max(...validPoints.map((point) => point.mean));
+  const yValues = [
+    ...validLinePoints.map((point) => point.mean),
+    ...validBandPoints.flatMap((point) => [point.low, point.high]),
+  ];
+  const dataYMin = Math.min(...yValues);
+  const dataYMax = Math.max(...yValues);
   const yTicks = buildAxisTicks(dataYMin, dataYMax);
   const yMin = yTicks[0].value;
   const yMax = yTicks[yTicks.length - 1].value;
@@ -183,6 +197,18 @@ function buildTimeseriesGeometry(pointInfo, selectedDate) {
   }
 
   const linePath = linePathParts.join(" ");
+  const areaPath =
+    validBandPoints.length >= 2
+      ? [
+          validBandPoints
+            .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xCoord(point.idx)} ${yCoord(point.high)}`)
+            .join(" "),
+          ...[...validBandPoints]
+            .reverse()
+            .map((point) => `L ${xCoord(point.idx)} ${yCoord(point.low)}`),
+          "Z",
+        ].join(" ")
+      : null;
 
   const selectedIndex = Math.max(dates.indexOf(selectedDate), 0);
   const selectedX = xCoord(selectedIndex);
@@ -197,6 +223,7 @@ function buildTimeseriesGeometry(pointInfo, selectedDate) {
     height,
     padding,
     linePath,
+    areaPath,
     selectedX,
     todayLabelX,
     axisLeft: padding.left,
@@ -235,6 +262,7 @@ function TimeseriesChart({ pointInfo, selectedDate }) {
           y2={geometry.axisBottom}
           className="chart-axis"
         />
+        {geometry.areaPath ? <path d={geometry.areaPath} className="chart-band" /> : null}
         <path d={geometry.linePath} className="chart-line" />
         <line
           x1={geometry.selectedX}
@@ -292,6 +320,16 @@ function TimeseriesChart({ pointInfo, selectedDate }) {
           LFMC (%)
         </text>
       </svg>
+      <div className="timeseries-legend" aria-label="Timeseries legend">
+        <div className="timeseries-legend-item">
+          <span className="timeseries-legend-swatch timeseries-legend-swatch-line" />
+          <span className="timeseries-legend-label">Prediction</span>
+        </div>
+        <div className="timeseries-legend-item">
+          <span className="timeseries-legend-swatch timeseries-legend-swatch-band" />
+          <span className="timeseries-legend-label">Ensemble-based uncertainty</span>
+        </div>
+      </div>
     </div>
   );
 }

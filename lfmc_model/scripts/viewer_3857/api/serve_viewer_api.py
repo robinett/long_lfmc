@@ -115,6 +115,7 @@ class ViewerDataset:
         self.source_endpoint_url = str(data_cfg.get("source_endpoint_url", "")).strip()
         self.grid_crs = str(data_cfg["grid_crs"])
         self.display_variable = str(data_cfg["display_variable"])
+        self.uncertainty_variable = str(data_cfg["uncertainty_variable"])
         self.quality_variable = str(data_cfg["quality_variable"])
         self.landcover_variable = str(data_cfg["landcover_variable"])
         self.initial_date = str(data_cfg["initial_date"])
@@ -241,6 +242,14 @@ class ViewerDataset:
         )
         return tuple(float(value) for value in values)
 
+    @functools.lru_cache(maxsize=4096)
+    def _uncertainty_series_for_cell(self, y_idx: int, x_idx: int) -> Tuple[float, ...]:
+        values = np.asarray(
+            self.ds[self.uncertainty_variable].isel(y=y_idx, x=x_idx).values,
+            dtype=np.float32,
+        )
+        return tuple(float(value) for value in values)
+
     def _landcover_year_index(self, date_str: str) -> int:
         year = int(date_str[:4])
         if self.landcover_years.size == 1:
@@ -282,6 +291,7 @@ class ViewerDataset:
         x_idx, y_idx = self._cell_index_for_grid_xy(grid_x=float(grid_x), grid_y=float(grid_y))
         cell_bounds = self._cell_bounds(x_idx=x_idx, y_idx=y_idx)
         mean_series = self._mean_series_for_cell(y_idx=y_idx, x_idx=x_idx)
+        uncertainty_series = self._uncertainty_series_for_cell(y_idx=y_idx, x_idx=x_idx)
         landcover_year_idx = self._landcover_year_index(date_str)
         raw_landcover_value = np.asarray(
             self.landcover_da.isel(landcover_year=landcover_year_idx, y=y_idx, x=x_idx).values
@@ -320,6 +330,7 @@ class ViewerDataset:
                 "y": int(y_idx),
             },
             "lfmc_ens_mean": safe_float(mean_series[time_idx]),
+            "lfmc_ens_std": safe_float(uncertainty_series[time_idx]),
             "quality_flag": quality_value,
             "data_product_level": self.quality_labels.get(quality_value, "unknown"),
             "landcover_code": landcover_code,
@@ -327,6 +338,7 @@ class ViewerDataset:
             "timeseries": {
                 "dates": self.dates,
                 "lfmc_ens_mean": [safe_float(value) for value in mean_series],
+                "lfmc_ens_std": [safe_float(value) for value in uncertainty_series],
                 "quality_flag": [int(value) for value in self.quality_series],
             },
         }
@@ -364,6 +376,7 @@ class ScientificDataset:
         self.wgs84_to_grid = Transformer.from_crs("EPSG:4326", self.grid_crs, always_xy=True)
         self.grid_to_wgs84 = Transformer.from_crs(self.grid_crs, "EPSG:4326", always_xy=True)
         self.dates = [datetime64_to_datestr(value) for value in self.ds["time"].values]
+        self.date_to_index = {date_str: idx for idx, date_str in enumerate(self.dates)}
         self.x_values = np.asarray(self.ds["x"].values, dtype=np.float64)
         self.y_values = np.asarray(self.ds["y"].values, dtype=np.float64)
 
@@ -500,15 +513,14 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 grid_y = self._optional_float(query, "y")
                 lat = self._optional_float(query, "lat")
                 lon = self._optional_float(query, "lon")
-                self._json_response(
-                    viewer_dataset.point_payload(
-                        date_str=date_str,
-                        grid_x=grid_x,
-                        grid_y=grid_y,
-                        lat=lat,
-                        lon=lon,
-                    )
+                payload = viewer_dataset.point_payload(
+                    date_str=date_str,
+                    grid_x=grid_x,
+                    grid_y=grid_y,
+                    lat=lat,
+                    lon=lon,
                 )
+                self._json_response(payload)
                 return
             if parsed.path == "/api/download_csv":
                 start_date = self._require_param(query, "start_date")

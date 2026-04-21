@@ -115,18 +115,31 @@ def parse_credentials_file(credentials_path: Path) -> Dict[str, str]:
 
     env = {}
     line_re = re.compile(r"^(?:export\s+)?([A-Z0-9_]+)=(.*)$")
+    label_map = {
+        "access key": "AWS_ACCESS_KEY_ID",
+        "secret access key": "AWS_SECRET_ACCESS_KEY",
+        "session token": "AWS_SESSION_TOKEN",
+        "region": "AWS_DEFAULT_REGION",
+        "default region": "AWS_DEFAULT_REGION",
+    }
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         match = line_re.match(line)
-        if match is None:
+        if match is not None:
+            key = match.group(1)
+            value = match.group(2).strip()
+            if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) >= 2:
+                value = value[1:-1]
+            env[key] = value
             continue
-        key = match.group(1)
-        value = match.group(2).strip()
-        if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) >= 2:
-            value = value[1:-1]
-        env[key] = value
+        if ":" not in line:
+            continue
+        label, value = [part.strip() for part in line.split(":", maxsplit=1)]
+        env_key = label_map.get(label.lower())
+        if env_key and value:
+            env[env_key] = value
     return env
 
 

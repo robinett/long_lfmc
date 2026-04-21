@@ -29,6 +29,8 @@ def main() -> None:
     data_cfg = cfg["data"]
     source_store = str(data_cfg["source_store"]).strip()
     source_endpoint_url = str(data_cfg["source_endpoint_url"]).strip()
+    display_variable = str(data_cfg["display_variable"])
+    uncertainty_variable = str(data_cfg["uncertainty_variable"])
     if not source_store:
         raise ValueError("viewer_config data.source_store is empty")
 
@@ -50,14 +52,19 @@ def main() -> None:
             "Opened remote viewer dataset in "
             f"{elapsed:.2f}s with dims {dict(ds.sizes)}"
         )
+        for variable_name in [display_variable, uncertainty_variable]:
+            if variable_name not in ds.data_vars:
+                raise ValueError(f"Remote viewer dataset is missing expected variable {variable_name!r}")
         x_size = int(ds.sizes["x"])
         y_size = int(ds.sizes["y"])
         center_x = x_size // 2
         center_y = y_size // 2
-        mean_value = float(ds["lfmc_ens_mean"].isel(time=0, y=center_y, x=center_x).values)
+        mean_value = float(ds[display_variable].isel(time=0, y=center_y, x=center_x).values)
+        uncertainty_value = float(ds[uncertainty_variable].isel(time=0, y=center_y, x=center_x).values)
         log(
             "Sample read succeeded at "
-            f"time=0, y={center_y}, x={center_x}: lfmc_ens_mean={mean_value:.3f}"
+            f"time=0, y={center_y}, x={center_x}: "
+            f"{display_variable}={mean_value:.3f}, {uncertainty_variable}={uncertainty_value:.3f}"
         )
     finally:
         ds.close()

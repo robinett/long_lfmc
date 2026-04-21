@@ -52,6 +52,18 @@ def main() -> None:
     log(f"Verifying consolidated open for {viewer_dataset_path}")
     ds = xr.open_zarr(str(viewer_dataset_path), consolidated=True)
     try:
+        expected_variables = [
+            str(cfg["dataset"]["display_variable"]),
+            str(cfg["dataset"]["uncertainty_variable"]),
+            str(cfg["dataset"]["quality_variable"]),
+            str(cfg["dataset"]["landcover_variable"]),
+        ]
+        missing_variables = [name for name in expected_variables if name not in ds.data_vars]
+        if missing_variables:
+            raise ValueError(
+                "Viewer dataset is missing expected variables after rebuild: "
+                f"{missing_variables}"
+            )
         log(
             "Verified consolidated viewer dataset "
             f"with dims {dict(ds.sizes)} and variables {list(ds.data_vars)}"

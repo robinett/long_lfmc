@@ -6,6 +6,7 @@ dataset:
   viewer_grid_anchor_mode: source_extent_center
   viewer_sampling_method: nearest_source_cell
   display_variable: lfmc_ens_mean
+  uncertainty_variable: lfmc_ens_std
   quality_variable: quality_flag
   landcover_variable: dominant_landcover_code
 

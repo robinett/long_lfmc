@@ -50,6 +50,7 @@ class ViewerDataset3857Builder:
         self.target_grid_anchor_mode = str(dataset_cfg.get("viewer_grid_anchor_mode", "source_extent_center"))
         self.viewer_sampling_method = str(dataset_cfg.get("viewer_sampling_method", "nearest_source_cell"))
         self.display_variable = str(dataset_cfg["display_variable"])
+        self.uncertainty_variable = str(dataset_cfg["uncertainty_variable"])
         self.quality_variable = str(dataset_cfg["quality_variable"])
         self.landcover_variable = str(dataset_cfg["landcover_variable"])
 
@@ -192,6 +193,7 @@ class ViewerDataset3857Builder:
         lon_attrs = dict(self.ds["lon"].attrs)
         landcover_attrs = dict(self.ds[self.landcover_variable].attrs)
         mean_attrs = dict(self.ds[self.display_variable].attrs)
+        uncertainty_attrs = dict(self.ds[self.uncertainty_variable].attrs)
         quality_attrs = dict(self.ds[self.quality_variable].attrs)
 
         self._create_array(
@@ -222,6 +224,16 @@ class ViewerDataset3857Builder:
             chunks=(min(len(self.time_values), self.time_chunk_size), self.spatial_chunk_size, self.spatial_chunk_size),
             dims=["time", "y", "x"],
             attrs=mean_attrs,
+            fill_value=np.nan,
+        )
+        self._create_array(
+            root,
+            self.uncertainty_variable,
+            shape=(len(self.time_values), self.target_height, self.target_width),
+            dtype=np.float32,
+            chunks=(min(len(self.time_values), self.time_chunk_size), self.spatial_chunk_size, self.spatial_chunk_size),
+            dims=["time", "y", "x"],
+            attrs=uncertainty_attrs,
             fill_value=np.nan,
         )
         self._create_array(
@@ -349,6 +361,7 @@ class ViewerDataset3857Builder:
         self._write_quality(root)
         self._write_landcover(root)
         self._write_time_stack(root, self.display_variable)
+        self._write_time_stack(root, self.uncertainty_variable)
         log(f"Wrote derived viewer dataset to {self.viewer_dataset_path}")
 
 
