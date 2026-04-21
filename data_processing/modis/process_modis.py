@@ -40,24 +40,38 @@ def get_metadata(
     Function for creating daily netcdf files from modis hdf files
     '''
     print('getting metadata for all tiles')
-    # get the tiles that we are dealing with
-    first_day_year = start_date.strftime('%Y')
-    first_day_dir = os.path.join(
-        modis_raw_dir,
-        first_day_year
-    )
-    modis_files = sorted(
-        glob.glob(
-            os.path.join(
-                first_day_dir,
-                'MCD43A4*.hdf'
+    metadata_seed_date = None
+    first_day_files = []
+    current_date = start_date
+    while current_date <= end_date:
+        this_date_section = 'A' + current_date.strftime('%Y%j')
+        this_year_dir = os.path.join(
+            modis_raw_dir,
+            current_date.strftime('%Y')
+        )
+        candidate_files = sorted(
+            glob.glob(
+                os.path.join(
+                    this_year_dir,
+                    f'MCD43A4.{this_date_section}.*.hdf'
+                )
             )
         )
+        if len(candidate_files) > 0:
+            metadata_seed_date = current_date
+            first_day_files = candidate_files
+            break
+        current_date = current_date + datetime.timedelta(days=1)
+    if metadata_seed_date is None:
+        raise FileNotFoundError(
+            'No MODIS A4 files found to build tile metadata for '
+            f'{start_date.strftime("%Y-%m-%d")} -> {end_date.strftime("%Y-%m-%d")}'
+        )
+    print(
+        'using metadata seed date {}'.format(
+            metadata_seed_date.strftime('%Y-%m-%d')
+        )
     )
-    first_day_files = [
-        f for f in modis_files
-        if f.split('.')[1] == 'A' + end_date.strftime('%Y%j')
-    ]
     # get the iv and ih tiles from these files
     ivs = np.zeros(0)
     ihs = np.zeros(0)
@@ -77,7 +91,7 @@ def get_metadata(
     for h,htile in enumerate(ihs):
         vtile = ivs[h]
         # get the file for the first day corresponding to this tile
-        this_date_section = 'A' + end_date.strftime('%Y%j')
+        this_date_section = 'A' + metadata_seed_date.strftime('%Y%j')
         this_tile_section = 'h' + f"{int(htile):02}" + 'v' + f"{int(vtile):02}"
         tile_fname = [
             f for f in first_day_files
@@ -136,7 +150,8 @@ def regrid_to_daily_ncs(
     tiles_per_day,
     out_dir,
     quality_flag=0,
-    precision=-9999
+    precision=-9999,
+    allowed_missing_keys=None,
 ):
     '''
     Function for regridding modis files to daily netcdf files.
@@ -175,6 +190,8 @@ def regrid_to_daily_ncs(
     # our data has a scale factor. Make sure to include that here
     modis_scale_factor = 0.0001
     created_plot = False
+    if allowed_missing_keys is None:
+        allowed_missing_keys = set()
     while current_date <= end_date:
         # files only for today
         today_files = sorted(
@@ -217,10 +234,12 @@ def regrid_to_daily_ncs(
             )
         )
         all_datasets = []
+        date_tag = 'A' + current_date.strftime('%Y%j')
         print('working on {}'.format(
             current_date.strftime('%Y-%m-%d')
         ))
         print('extracting data')
+        present_tiles = set()
         for f,file in enumerate(today_files):
             #print('processing file {}'.format(file.split('/')[-1]))
             # if file is correupted or something and we can't read, just skip
@@ -233,6 +252,7 @@ def regrid_to_daily_ncs(
             # get the modis-formatted date and tile number from this file
             modis_date = file.split('/')[-1].split('.')[1]
             tile_number = file.split('/')[-1].split('.')[2]
+            present_tiles.add(tile_number)
             #print('extracting data on {} for tile {}'.format(
             #    current_date.strftime('%Y-%m-%d'),
             #    tile_number
@@ -368,6 +388,49 @@ def regrid_to_daily_ncs(
             # add the attributes to the dataset
             copied_ds = this_ds.copy(deep=True)
             all_datasets.append(copied_ds)
+        missing_tiles = sorted(set(metadata.keys()) - present_tiles)
+        for tile_number in missing_tiles:
+            missing_key = ('MCD43A4', date_tag, tile_number, '061')
+            if missing_key not in allowed_missing_keys:
+                continue
+            print(
+                'missing raw MCD43A4 for {} {}; writing NaN fallback tile'.format(
+                    current_date.strftime('%Y-%m-%d'),
+                    tile_number
+                )
+            )
+            if precision != -9999:
+                x_rounded = np.round(
+                    metadata[tile_number]['x']/ precision
+                ) * precision
+                y_rounded = np.round(
+                    metadata[tile_number]['y']/ precision
+                ) * precision
+            else:
+                x_rounded = metadata[tile_number]['x']
+                y_rounded = metadata[tile_number]['y']
+            first_layer = data_layers[0]
+            nan_tile = np.full(
+                (len(y_rounded), len(x_rounded)),
+                np.nan,
+                dtype=np.float32
+            )
+            this_ds = xr.Dataset(
+                {
+                    first_layer: (["y", "x"], nan_tile)
+                },
+                coords={
+                    "x":("x", x_rounded),
+                    "y":("y", y_rounded)
+                }
+            )
+            this_ds.attrs["crs"] = "EPSG:SR-ORG:6974"
+            for layer in data_layers[1:]:
+                this_ds[layer] = (
+                    ["y", "x"],
+                    np.full((len(y_rounded), len(x_rounded)), np.nan, dtype=np.float32)
+                )
+            all_datasets.append(this_ds)
         # combine all these into a single dataset
         # get the x and y coords
         x_coords = np.zeros(0)
@@ -468,4 +531,3 @@ def regrid_to_daily_ncs(
         )
         # increment the date
         current_date += datetime.timedelta(days=1)
-

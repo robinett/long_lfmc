@@ -35,7 +35,7 @@ CAST_FLOAT32 = True
 ENGINE = "h5netcdf"
 PARALLEL_OPEN = False
 COMP = DEFAULT_COMP
-DAYMET_VAR_WHITELIST = ["prcp", "srad", "swe", "tmax", "tmin", "vp"]
+DAYMET_VAR_WHITELIST = ["prcp", "srad", "swe", "tmax", "vp"]
 # ---------------------------
 
 

@@ -148,7 +148,6 @@ def resolve_inference_sources(
         )
     else:
         raise ValueError(f'Unsupported daymet_layout: {daymet_layout}')
-    monthly_latency_daymet_path = sources.get('daymet', {}).get('monthly_latency_path')
     low_latency_climate_path = sources.get('climate_low_latency', {}).get('path')
 
     start_date = pd.Timestamp(requested_start_date).normalize()
@@ -158,18 +157,6 @@ def resolve_inference_sources(
     daymet_paths: List[str]
     if daymet_mode == 'archive_only':
         daymet_paths = [archive_daymet_path]
-    elif daymet_mode == 'archive_then_monthly_latency':
-        if end_date <= archive_daymet_bounds['end_date']:
-            daymet_paths = [archive_daymet_path]
-        else:
-            latency_path = _require_path(
-                monthly_latency_daymet_path,
-                'monthly-latency Daymet zarr',
-            )
-            if start_date <= archive_daymet_bounds['end_date']:
-                daymet_paths = [archive_daymet_path, latency_path]
-            else:
-                daymet_paths = [latency_path]
     elif daymet_mode == 'archive_then_low_latency_climate':
         if end_date <= archive_daymet_bounds['end_date']:
             daymet_paths = [archive_daymet_path]
@@ -212,7 +199,6 @@ def resolve_inference_sources(
         'combined_daymet_path': combined_daymet_path,
         'archive_daymet_path': archive_daymet_path,
         'anomaly_daymet_path': anomaly_daymet_path,
-        'monthly_latency_daymet_path': monthly_latency_daymet_path,
         'low_latency_climate_path': low_latency_climate_path,
         'daymet_mode': daymet_mode,
         'daymet_paths': list(daymet_paths),

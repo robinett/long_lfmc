@@ -1,0 +1,51 @@
+ensemble:
+  outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_fullspatial_ensemble
+  input_data_name: ensemble/lfmc_vh_vv_365_fullspatial_ensemble
+  inputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs
+  fold: 9998
+  fallback_num_tasks: 3
+  model_type: standard
+
+data:
+  grid_path: /scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4
+  requested_start_date: 2024-07-01
+  requested_end_date: 2024-07-31
+
+paths:
+  run_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_fullspatial_ensemble_2024_07
+  tile_metadata_subdir: tile_metadata
+  prepared_subdir: prepared_tensors
+  shard_subdir: shards
+  merged_subdir: merged
+  merged_store_name: lfmc_maps.zarr
+  validation_subdir: validation
+  plots_subdir: plots
+
+chunking:
+  tile_size: 100
+  months_per_block: 1
+  time_chunk_days: 31
+  y_chunk: 256
+  x_chunk: 256
+
+submission:
+  validation_test: false
+  validation_prediction_split: val
+  interactive_validation_pipeline: false
+  forward_batch_size: 65536
+  validation_site_n: 10
+  array_concurrency: 128
+  tasks_per_job: 40
+  merge_blocks_per_job: 2
+  use_gpu_forward: true
+  gpu_fine_tasks_per_job: 20
+  gpu_max_jobs: 8
+  gpu_lock_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/gpu_locks
+  gpu_submit_sleep_seconds: 60
+  gpu_time_limit: "14:00:00"
+  gpu_cpus_per_task: 16
+  gpu_mem: 128G
+  gpu_constraint: GPU_MEM:80GB
+
+product:
+  tier: final

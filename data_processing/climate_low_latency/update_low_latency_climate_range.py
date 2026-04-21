@@ -4,6 +4,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import yaml
+import zarr
 from zarr import consolidate_metadata
 
 
@@ -19,6 +21,8 @@ DEFAULT_REGISTRY_PATH = REPO_ROOT / 'lfmc_model/scripts/inference/source_registr
 EXPECTED_VARIABLES = ['prcp', 'srad', 'swe', 'tmax', 'vp']
 DATA_CHUNKS = (1, len(EXPECTED_VARIABLES), 512, 512)
 LATLON_CHUNKS = (512, 512)
+PRISM_WORKER = REPO_ROOT / 'data_processing/climate_low_latency/run_prism_range_worker.sbatch'
+SNODAS_WORKER = REPO_ROOT / 'data_processing/climate_low_latency/run_snodas_range_worker.sbatch'
 
 
 def parse_args():
@@ -44,9 +48,18 @@ def load_registry(registry_path: Path) -> dict:
 def apply_registry_defaults(args):
     registry = load_registry(args.registry_path)
     climate_cfg = registry.get('processing', {}).get('climate_low_latency', {})
+    prism_cfg = registry.get('processing', {}).get('prism', {})
+    snodas_cfg = registry.get('processing', {}).get('snodas', {})
     args.regrid_root = args.regrid_root or Path(climate_cfg['regrid_root'])
     args.out_zarr = args.out_zarr or Path(climate_cfg['zarr_path'])
     args.append_coord_dir = args.append_coord_dir or Path(climate_cfg['append_coord_dir'])
+    args.prism_raw_root = Path(prism_cfg['raw_root'])
+    args.prism_extracted_root = Path(prism_cfg['extracted_root'])
+    args.prism_plots_dir = Path(prism_cfg['plots_dir'])
+    args.prism_release_latency_days = int(prism_cfg['release_latency_days'])
+    args.snodas_raw_root = Path(snodas_cfg['raw_root'])
+    args.snodas_plots_dir = Path(snodas_cfg['plots_dir'])
+    args.snodas_swe_product_token = str(snodas_cfg['swe_product_token'])
     if args.grid_path is None:
         args.grid_path = Path('/scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4')
     return args
@@ -66,6 +79,67 @@ def run_cmd(cmd):
     subprocess.run([str(part) for part in cmd], check=True)
 
 
+def run_capture(cmd):
+    print('Running command:')
+    print('  ' + ' '.join(str(part) for part in cmd))
+    return subprocess.run([str(part) for part in cmd], check=True, capture_output=True, text=True)
+
+
+def job_is_active(job_id: str) -> bool:
+    result = subprocess.run(
+        ['squeue', '-h', '-j', str(job_id), '-o', '%T'],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    states = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return len(states) > 0
+
+
+def final_job_state(job_id: str) -> str:
+    result = subprocess.run(
+        ['sacct', '-j', str(job_id), '--format=State', '-n', '-P'],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    states = [line.strip().split('|')[0] for line in result.stdout.splitlines() if line.strip()]
+    if not states:
+        return 'UNKNOWN'
+    for state in states:
+        if state not in {'COMPLETED'}:
+            return state
+    return 'COMPLETED'
+
+
+def submit_sbatch_job(script_path: Path, env_vars: dict[str, str], label: str) -> str:
+    env_arg = ','.join(['ALL'] + [f'{key}={value}' for key, value in env_vars.items()])
+    result = run_capture(['sbatch', '--parsable', '--export=' + env_arg, script_path])
+    job_id = result.stdout.strip()
+    print(f'Submitted {label} job {job_id}')
+    return job_id
+
+
+def wait_for_jobs(job_ids: dict[str, str], label: str, poll_seconds: int = 30) -> None:
+    pending = dict(job_ids)
+    print(f'Waiting for {label} jobs to complete: {pending}')
+    while pending:
+        completed_items = []
+        for item_label, job_id in pending.items():
+            if job_is_active(job_id):
+                print(f'  {label} item={item_label} job={job_id} state=ACTIVE; sleeping')
+                continue
+            state = final_job_state(job_id)
+            print(f'  {label} item={item_label} job={job_id} final_state={state}')
+            if state != 'COMPLETED':
+                raise RuntimeError(f'{label} job failed for item={item_label} job={job_id} state={state}')
+            completed_items.append(item_label)
+        for item_label in completed_items:
+            pending.pop(item_label, None)
+        if pending:
+            time.sleep(poll_seconds)
+
+
 def update_sources(args):
     prism_script = REPO_ROOT / 'data_processing/prism/update_prism_range.py'
     snodas_script = REPO_ROOT / 'data_processing/snodas/update_snodas_range.py'
@@ -75,13 +149,66 @@ def update_sources(args):
         '--registry_path', args.registry_path,
         '--grid_path', args.grid_path,
     ]
-    prism_cmd = [sys.executable, prism_script] + common
-    snodas_cmd = [sys.executable, snodas_script] + common
+    prism_cmd = [
+        sys.executable,
+        prism_script,
+        *common,
+        '--raw_root', args.prism_raw_root,
+        '--extracted_root', args.prism_extracted_root,
+        '--output_root', args.regrid_root,
+        '--plots_dir', args.prism_plots_dir,
+        '--release_latency_days', str(args.prism_release_latency_days),
+    ]
+    snodas_cmd = [
+        sys.executable,
+        snodas_script,
+        *common,
+        '--raw_root', args.snodas_raw_root,
+        '--output_root', args.regrid_root,
+        '--plots_dir', args.snodas_plots_dir,
+        '--swe_product_token', args.snodas_swe_product_token,
+    ]
     if args.check_only:
         prism_cmd.append('--check_only')
         snodas_cmd.append('--check_only')
-    run_cmd(prism_cmd)
-    run_cmd(snodas_cmd)
+        run_cmd(prism_cmd)
+        run_cmd(snodas_cmd)
+        return
+
+    job_ids = {
+        'prism': submit_sbatch_job(
+            PRISM_WORKER,
+            {
+                'START_DATE': args.start_date,
+                'END_DATE': args.end_date,
+                'REGISTRY_PATH': str(args.registry_path),
+                'GRID_PATH': str(args.grid_path),
+                'RAW_ROOT': str(args.prism_raw_root),
+                'EXTRACTED_ROOT': str(args.prism_extracted_root),
+                'OUTPUT_ROOT': str(args.regrid_root),
+                'PLOTS_DIR': str(args.prism_plots_dir),
+                'RELEASE_LATENCY_DAYS': str(args.prism_release_latency_days),
+                'OVERWRITE_EXISTING': '0',
+            },
+            'prism_range',
+        ),
+        'snodas': submit_sbatch_job(
+            SNODAS_WORKER,
+            {
+                'START_DATE': args.start_date,
+                'END_DATE': args.end_date,
+                'REGISTRY_PATH': str(args.registry_path),
+                'GRID_PATH': str(args.grid_path),
+                'RAW_ROOT': str(args.snodas_raw_root),
+                'OUTPUT_ROOT': str(args.regrid_root),
+                'PLOTS_DIR': str(args.snodas_plots_dir),
+                'SWE_PRODUCT_TOKEN': str(args.snodas_swe_product_token),
+                'OVERWRITE_EXISTING': '0',
+            },
+            'snodas_range',
+        ),
+    }
+    wait_for_jobs(job_ids, 'low_latency_source')
 
 
 def target_file_path(regrid_root: Path, var_name: str, date_value: pd.Timestamp) -> Path:
@@ -207,6 +334,23 @@ def ensure_compatible_store(out_zarr: Path):
     return info
 
 
+def truncate_store_before_date(out_zarr: Path, start_date: pd.Timestamp, info: dict):
+    times = [pd.Timestamp(ts).normalize() for ts in info['times']]
+    prefix_count = sum(1 for ts in times if ts < start_date)
+    print(
+        f'Truncating low-latency climate store before rebuild start '
+        f'{start_date.date()}; keeping {prefix_count} time steps'
+    )
+    root = zarr.open_group(str(out_zarr), mode='a')
+    root['time'].resize(prefix_count)
+    root['data'].resize(
+        prefix_count,
+        root['data'].shape[1],
+        root['data'].shape[2],
+        root['data'].shape[3],
+    )
+
+
 def append_range(args, start_date: pd.Timestamp, end_date: pd.Timestamp):
     target_grid = load_target_grid(args.grid_path)
     try:
@@ -218,6 +362,15 @@ def append_range(args, start_date: pd.Timestamp, end_date: pd.Timestamp):
             if existing_dates:
                 max_existing_date = max(existing_dates)
                 print(f'Existing low-latency climate store max date: {max_existing_date.date()}')
+                if max_existing_date > end_date:
+                    raise ValueError(
+                        'Requested low-latency climate rebuild does not reach the current store tail; '
+                        f'max existing date is {max_existing_date.date()} but requested end_date is {end_date.date()}'
+                    )
+                if start_date <= max_existing_date:
+                    truncate_store_before_date(args.out_zarr, start_date, info)
+                    existing_dates = {ts for ts in existing_dates if ts < start_date}
+                    max_existing_date = max(existing_dates) if existing_dates else None
 
         dates = pd.date_range(start_date, end_date, freq='D')
         wrote_any = False

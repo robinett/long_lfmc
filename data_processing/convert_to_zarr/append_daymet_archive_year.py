@@ -6,6 +6,7 @@ import argparse
 import calendar
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import xarray as xr
 
@@ -21,6 +22,25 @@ from daymet_to_zarr_worker import (
     load_or_build_month_index,
 )
 from zarr_build_utils import append_time, consolidate, open_time_batch, parse_daymet_regrid_filename, to_stacked_array, write_first
+
+
+def expected_batch_times(files: list[Path], year: str, month: str) -> pd.DatetimeIndex:
+    dates: list[pd.Timestamp] = []
+    for file_path in files:
+        _, raw_date = parse_daymet_regrid_filename(file_path)
+        if raw_date is None:
+            continue
+        dates.append(pd.Timestamp(f'{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}'))
+    if not dates:
+        return pd.DatetimeIndex([])
+
+    expected = pd.DatetimeIndex(sorted(pd.unique(dates))).normalize()
+    dec31 = pd.Timestamp(f'{year}-12-31')
+    dec30 = pd.Timestamp(f'{year}-12-30')
+    if month == '12' and calendar.isleap(int(year)) and dec31 not in expected and dec30 in expected:
+        expected = expected.append(pd.DatetimeIndex([dec31])).sort_values()
+        print(f'Expecting synthetic {year}-12-31 from filename-derived dates')
+    return expected
 
 
 def maybe_fill_missing_leap_dec31(ds: xr.Dataset, year: str, month: str) -> xr.Dataset:
@@ -46,6 +66,71 @@ def maybe_fill_missing_leap_dec31(ds: xr.Dataset, year: str, month: str) -> xr.D
     fill = fill.assign_coords(time=('time', [dec31.to_datetime64()]))
     print(f'Inserted synthetic {year}-12-31 from {year}-12-30')
     return xr.concat([ds, fill], dim='time').sortby('time')
+
+
+def resolve_time_units(out_zarr: Path, first_year: int) -> str:
+    if out_zarr.exists():
+        ds = xr.open_zarr(out_zarr, consolidated=False)
+        try:
+            units = ds['time'].encoding.get('units')
+            if units:
+                return str(units)
+        finally:
+            ds.close()
+    return f'days since {first_year}-01-01T00:00:00'
+
+
+def assign_batch_time_from_filenames(
+    ds: xr.Dataset,
+    files: list[Path],
+    year: str,
+    month: str,
+    time_units: str,
+) -> xr.Dataset:
+    expected = expected_batch_times(files, year, month)
+    if len(expected) == 0:
+        raise ValueError(f'Could not derive any expected dates for batch {year}-{month}')
+    if int(ds.sizes.get('time', 0)) != len(expected):
+        raise ValueError(
+            f'Batch {year}-{month} time length mismatch after open/fill: '
+            f'actual={int(ds.sizes.get("time", 0))} expected={len(expected)} '
+            f'first_expected={expected[0].date()} last_expected={expected[-1].date()}'
+        )
+    ds = ds.assign_coords(time=('time', expected.values))
+    ds['time'].encoding = {
+        'units': time_units,
+        'calendar': 'proleptic_gregorian',
+        'dtype': np.dtype('<i8'),
+    }
+    return ds
+
+
+def validate_written_time_axis(out_zarr: Path) -> pd.Timestamp:
+    ds = xr.open_zarr(out_zarr, consolidated=False)
+    try:
+        times = pd.DatetimeIndex(pd.to_datetime(ds['time'].values)).normalize()
+    finally:
+        ds.close()
+
+    if len(times) == 0:
+        raise ValueError(f'Written archive zarr has empty time axis: {out_zarr}')
+    if not times.is_monotonic_increasing:
+        raise ValueError(f'Written archive zarr time axis is not monotonic: {out_zarr}')
+
+    diffs = np.diff(times.values).astype('timedelta64[D]')
+    bad = np.where(diffs != np.timedelta64(1, 'D'))[0]
+    if len(bad) > 0:
+        idx = int(bad[0])
+        raise ValueError(
+            f'Written archive zarr time axis has non-daily jump at index={idx}: '
+            f'{times[idx]} -> {times[idx + 1]} diff_days={diffs[idx]} out_zarr={out_zarr}'
+        )
+
+    print(
+        f'Validated archive zarr time axis: days={len(times)} '
+        f'first={times[0].date()} last={times[-1].date()}'
+    )
+    return pd.Timestamp(times[-1]).normalize()
 
 
 def parse_args() -> argparse.Namespace:
@@ -128,6 +213,8 @@ def main() -> None:
     print(f'Found {len(labels)} requested Daymet month batches: {labels[0]} -> {labels[-1]}')
     print(f'Daymet vars present in index: {summary.get("vars_seen", [])}')
 
+    time_units = resolve_time_units(args.out_zarr, start_year)
+    print(f'Using archive time encoding units: {time_units}')
     max_time = existing_max_time(args.out_zarr)
     appended_months = 0
     appended_days = 0
@@ -155,8 +242,9 @@ def main() -> None:
             data_var_whitelist=DAYMET_VAR_WHITELIST,
         )
         ds = maybe_fill_missing_leap_dec31(ds, year, month)
+        ds = assign_batch_time_from_filenames(ds, files, year, month, time_units)
         ds = ds.sortby('time')
-        times = pd.to_datetime(ds['time'].values)
+        times = pd.DatetimeIndex(pd.to_datetime(ds['time'].values)).normalize()
         if len(times) == 0:
             print(f'Batch {ym} is empty after open; skipping')
             continue
@@ -178,7 +266,7 @@ def main() -> None:
         else:
             write_first(arr, args.out_zarr, compressor=COMP)
 
-        max_time = pd.Timestamp(times.max()).normalize()
+        max_time = validate_written_time_axis(args.out_zarr)
         appended_months += 1
         appended_days += len(times)
         print(f'Appended {len(times)} days from {ym}; new max date is {max_time.date()}')

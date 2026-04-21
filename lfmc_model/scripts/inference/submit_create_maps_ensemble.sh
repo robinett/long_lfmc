@@ -39,6 +39,42 @@ else:
 PYCFG
 }
 
+normalize_path() {
+    local path_value="$1"
+    if [[ -z "${path_value}" ]]; then
+        printf '\n'
+        return 0
+    fi
+    PATH_VALUE="${path_value}" python3 - <<'PYNORM'
+import os
+from pathlib import Path
+
+raw = os.environ["PATH_VALUE"]
+print(str(Path(raw).resolve()))
+PYNORM
+}
+
+ensure_path_within_root() {
+    local path_value="$1"
+    local root_value="$2"
+    local label="$3"
+    PATH_VALUE="${path_value}" ROOT_VALUE="${root_value}" LABEL_VALUE="${label}" python3 - <<'PYCHK'
+import os
+from pathlib import Path
+
+path_value = Path(os.environ["PATH_VALUE"]).resolve()
+root_value = Path(os.environ["ROOT_VALUE"]).resolve()
+label = os.environ["LABEL_VALUE"]
+
+try:
+    path_value.relative_to(root_value)
+except ValueError:
+    raise SystemExit(f"{label} {path_value} is outside configured run_root {root_value}")
+
+print(str(path_value))
+PYCHK
+}
+
 timestamp_slug() {
     date +"%Y%m%d_%H%M%S"
 }
@@ -389,6 +425,7 @@ multiyear_year_started_at_epoch="${MULTIYEAR_YEAR_STARTED_AT_EPOCH:-}"
 start_from_gpu="${START_FROM_GPU:-false}"
 existing_run_dir="${EXISTING_RUN_DIR:-}"
 auto_resume_complete_run="${AUTO_RESUME_COMPLETE_RUN:-true}"
+strict_config_run_root="${STRICT_CONFIG_RUN_ROOT:-false}"
 resume_partial_run="false"
 resume_completed_run="false"
 
@@ -499,7 +536,36 @@ print(str(run_dir))
 PYPARTIAL
 }
 
-configured_run_root="${RUN_ROOT:-$(cfg_value paths run_root '')}"
+config_run_root="$(cfg_value paths run_root '')"
+env_run_root="${RUN_ROOT:-}"
+if [[ -n "${env_run_root}" && -n "${config_run_root}" ]]; then
+    normalized_env_run_root="$(PATH_VALUE="${env_run_root}" normalize_path "${env_run_root}")"
+    normalized_config_run_root="$(PATH_VALUE="${config_run_root}" normalize_path "${config_run_root}")"
+    if [[ "${normalized_env_run_root}" != "${normalized_config_run_root}" ]]; then
+        echo "RUN_ROOT env override ${normalized_env_run_root} does not match config paths.run_root ${normalized_config_run_root}; refusing to continue." >&2
+        exit 1
+    fi
+fi
+
+if [[ -n "${config_run_root}" ]]; then
+    configured_run_root="${config_run_root}"
+else
+    configured_run_root="${env_run_root}"
+fi
+
+if [[ -n "${configured_run_root}" ]]; then
+    configured_run_root="$(PATH_VALUE="${configured_run_root}" normalize_path "${configured_run_root}")"
+fi
+
+if [[ "${strict_config_run_root}" == "true" && -z "${configured_run_root}" ]]; then
+    echo "STRICT_CONFIG_RUN_ROOT=true requires paths.run_root to be configured." >&2
+    exit 1
+fi
+
+if [[ -n "${existing_run_dir}" && -n "${configured_run_root}" ]]; then
+    existing_run_dir="$(ensure_path_within_root "${existing_run_dir}" "${configured_run_root}" "existing_run_dir")"
+fi
+
 if [[ "${start_from_gpu}" != "true" && -z "${existing_run_dir}" && "${auto_resume_complete_run}" == "true" && -n "${configured_run_root}" ]]; then
     if resumable_run_dir="$(find_resumable_run_dir "${configured_run_root}")"; then
         resume_completed_run="true"
@@ -628,9 +694,17 @@ run_root = os.environ.get("RUN_ROOT") or get_cfg(cfg, "paths", "run_root")
 print(latest_run_dir(run_root))
 PYRUN
     )"
+    if [[ -n "${configured_run_root}" ]]; then
+        latest_run_dir="$(ensure_path_within_root "${latest_run_dir}" "${configured_run_root}" "latest_run_dir")"
+    fi
     manifest_path="${latest_run_dir}/manifest.csv"
     run_name="$(basename "${latest_run_dir}")"
 fi
+
+if [[ -n "${configured_run_root}" ]]; then
+    latest_run_dir="$(ensure_path_within_root "${latest_run_dir}" "${configured_run_root}" "latest_run_dir")"
+fi
+
 mkdir -p "${gpu_lock_dir}"
 
 lock_count() {

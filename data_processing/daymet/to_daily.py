@@ -28,6 +28,7 @@ def parse_args():
     parser.add_argument('--plots_dir', type=str, default=DEFAULT_PLOTS_DIR)
     parser.add_argument('--year', type=int, default=None)
     parser.add_argument('--month', type=int, default=None)
+    parser.add_argument('--var', type=str, default=None)
     parser.add_argument('--dry_run', action='store_true')
     parser.add_argument('--run_smoke_test', action='store_true')
     parser.add_argument('--progress_every', type=int, default=10)
@@ -108,7 +109,7 @@ def process_file(
                 day.to_netcdf(out_path)
 
 
-def discover_files(input_root, years=None, months=None):
+def discover_files(input_root, years=None, months=None, vars_filter=None):
     files = []
     if years:
         year_dirs = [os.path.join(input_root, str(y)) for y in years]
@@ -116,6 +117,7 @@ def discover_files(input_root, years=None, months=None):
         year_dirs = [os.path.join(input_root, d) for d in os.listdir(input_root)]
 
     allowed_months = None if not months else {int(month) for month in months}
+    allowed_vars = None if not vars_filter else {str(var_name) for var_name in vars_filter}
 
     for ydir in year_dirs:
         if not os.path.isdir(ydir):
@@ -125,6 +127,8 @@ def discover_files(input_root, years=None, months=None):
                 continue
             match = FILE_RE.search(name)
             if not match:
+                continue
+            if allowed_vars is not None and match.group('var') not in allowed_vars:
                 continue
             stamp = match.group('stamp')
             if allowed_months is not None and len(stamp) == 6 and int(stamp[4:6]) not in allowed_months:
@@ -141,8 +145,9 @@ def main():
         if year_env:
             years = [int(year_env)]
     months = [int(args.month)] if args.month is not None else None
+    vars_filter = [args.var] if args.var is not None else None
 
-    files = discover_files(args.input_root, years, months)
+    files = discover_files(args.input_root, years, months, vars_filter)
     if not files:
         raise SystemExit('No matching NetCDF files found.')
 

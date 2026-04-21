@@ -2,8 +2,8 @@ sources:
   registry_path: /home/users/trobinet/long_lfmc/lfmc_model/scripts/inference/source_registry.yaml
 
 ensemble:
-  outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_fullspatial_ensemble
-  input_data_name: ensemble/lfmc_vh_vv_365_fullspatial_ensemble
+  outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+  input_data_name: ensemble/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
   inputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs
   fold: 9998
   fallback_num_tasks: 3
@@ -11,8 +11,8 @@ ensemble:
 
 data:
   grid_path: /scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4
-  requested_start_date: 2025-01-01
-  requested_end_date: 2025-01-31
+  requested_start_date: 2001-01-01
+  requested_end_date: 2001-01-31
 
 paths:
   run_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/map_runs/lfmc_vh_vv_365_fullspatial_ensemble_low_latency

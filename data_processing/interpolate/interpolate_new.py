@@ -36,25 +36,26 @@ def extract_date_from_filename(path):
     return datetime.strptime(match.group(1), "%Y%m%d")
 
 
-def expected_modis_path(base_path, dt):
+def candidate_modis_paths(base_path, dt):
     year = dt.strftime("%Y")
     month = dt.strftime("%m")
     day = dt.strftime("%d")
-    return (
-        Path(base_path)
-        / year
-        / month
-        / f"modis_reflectance_{year}{month}{day}_regridded.nc4"
-    )
+    base_dir = Path(base_path) / year / month
+    date_tag = f"{year}{month}{day}"
+    return [
+        base_dir / f"modis_reflectance_{date_tag}.nc4",
+        base_dir / f"modis_reflectance_{date_tag}_regridded.nc4",
+    ]
 
 
 def build_daily_file_map(base_path, start_dt, end_dt):
     file_map = {}
     all_dates = pd.date_range(start=start_dt, end=end_dt, freq="D")
     for dt in all_dates:
-        path = expected_modis_path(base_path, dt.to_pydatetime())
-        if path.exists():
-            file_map[pd.Timestamp(dt)] = str(path)
+        for path in candidate_modis_paths(base_path, dt.to_pydatetime()):
+            if path.exists():
+                file_map[pd.Timestamp(dt)] = str(path)
+                break
     return all_dates, file_map
 
 

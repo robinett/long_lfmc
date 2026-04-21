@@ -8,10 +8,11 @@ logs_dir="${script_dir}/logs"
 mkdir -p "${logs_dir}"
 
 update_year="${UPDATE_YEAR:-2025}"
-config_path="${script_dir}/map_configs_final_update.yaml"
-registry_path="${script_dir}/source_registry.yaml"
+config_path="${CONFIG_PATH:-${script_dir}/map_configs_final_update.yaml}"
+registry_path="${REGISTRY_PATH:-${script_dir}/source_registry.yaml}"
 process_env="/home/users/trobinet/uv_activations/activate_lfmc_process_py312.sh"
 model_env="/home/users/trobinet/uv_activations/activate_lfmc_model_py312.sh"
+current_model_script="${script_dir}/current_model_family_utils.py"
 
 daymet_update_script="${repo_root}/data_processing/daymet/update_daymet_archive_year.py"
 nlcd_update_script="${repo_root}/data_processing/nlcd/update_nlcd_year.py"
@@ -23,7 +24,6 @@ requested_end_date="${update_year}-12-31"
 skip_source_update="${SKIP_SOURCE_UPDATE:-0}"
 
 echo "Running final annual update for ${update_year}"
-source ~/.bashrc
 source "${process_env}"
 
 if [[ "${skip_source_update}" != "1" ]]; then
@@ -38,7 +38,19 @@ fi
 
 echo "Submitting final-year map production run ${requested_start_date} -> ${requested_end_date}"
 source "${model_env}"
-CONFIG_PATH="${config_path}" REQUESTED_START_DATE="${requested_start_date}" REQUESTED_END_DATE="${requested_end_date}" bash "${map_submit_script}"
+readarray -t model_values < <(python3 "${current_model_script}" --variant multitask --format lines)
+active_model_label="${model_values[0]}"
+ensemble_root="${ENSEMBLE_ROOT:-${model_values[1]}}"
+input_data_name="${INPUT_DATA_NAME:-${model_values[2]}}"
+echo "Using active model family ${active_model_label}"
+echo "  ensemble_root=${ensemble_root}"
+echo "  input_data_name=${input_data_name}"
+CONFIG_PATH="${config_path}" \
+REQUESTED_START_DATE="${requested_start_date}" \
+REQUESTED_END_DATE="${requested_end_date}" \
+ENSEMBLE_ROOT="${ensemble_root}" \
+INPUT_DATA_NAME="${input_data_name}" \
+bash "${map_submit_script}"
 
 readarray -t promotion_values < <(CONFIG_PATH="${config_path}" REGISTRY_PATH="${registry_path}" python3 - <<'PY2'
 import os

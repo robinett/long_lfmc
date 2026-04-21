@@ -5,6 +5,7 @@ import sys
 import argparse
 
 import process_modis as p_modis
+from get_modis import dict_to_key, load_missing_granules_manifest
 
 def main():
     # pass in the start and end dates from the submitting script
@@ -28,15 +29,23 @@ def main():
         required=True
     )
     parser.add_argument(
+        "--raw_root",
+        type=str,
+        help="Root directory containing raw MODIS HDF files",
+        required=False,
+        default=None
+    )
+    parser.add_argument(
         "--quality_flag",
         type=str,
         help="Quality flag to use. All flags <= quality_flag are used",
         required=True
     )
-    start_date_str = parser.parse_args().start_date
-    end_date_str = parser.parse_args().end_date
-    modis_processed_dir = parser.parse_args().out_dir
-    quality_flag = int(parser.parse_args().quality_flag)
+    args = parser.parse_args()
+    start_date_str = args.start_date
+    end_date_str = args.end_date
+    modis_processed_dir = args.out_dir
+    quality_flag = int(args.quality_flag)
     process_start_date = datetime.datetime.strptime(
         start_date_str,
         '%Y-%m-%d'
@@ -56,6 +65,8 @@ def main():
         'modis',
         'modis_earthaccess'
     )
+    if args.raw_root is not None:
+        modis_raw_dir = args.raw_root
     # scratch directory for processed modis
     #modis_processed_dir = os.path.join(
     #    scratch_dir,
@@ -127,6 +138,18 @@ def main():
         process_start_date,
         process_end_date
     )
+    missing_manifest = load_missing_granules_manifest(modis_raw_dir)
+    allowed_missing_keys = {
+        dict_to_key(record)
+        for records in missing_manifest.values()
+        for record in records
+    }
+    if allowed_missing_keys:
+        print(
+            'allowing {} MODIS logical gaps to be written as NaN tiles'.format(
+                len(allowed_missing_keys)
+            )
+        )
     p_modis.regrid_to_daily_ncs(
         modis_raw_dir,
         metadata,
@@ -135,7 +158,8 @@ def main():
         layer_names,
         tiles_per_day,
         modis_processed_dir,
-        quality_flag=quality_flag
+        quality_flag=quality_flag,
+        allowed_missing_keys=allowed_missing_keys,
     )
 
 if __name__ == '__main__':

@@ -67,10 +67,34 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def validate_existing_target_store(out_zarr: Path) -> None:
+    zarr_v3_meta = out_zarr / 'zarr.json'
+    zarr_v2_meta = out_zarr / '.zgroup'
+    if zarr_v3_meta.exists() and zarr_v2_meta.exists():
+        raise ValueError(
+            f'NLCD target zarr has mixed format metadata (both zarr.json and .zgroup): {out_zarr}. '
+            'Rebuild the staged target store before appending.'
+        )
+
+    try:
+        ds = xr.open_zarr(out_zarr, consolidated=False)
+    except Exception as exc:
+        raise ValueError(f'Failed to open existing NLCD target zarr cleanly: {out_zarr}') from exc
+
+    dims = set(ds.dims)
+    ds.close()
+    if 'year' not in dims:
+        raise ValueError(
+            f"Existing NLCD target zarr does not expose the expected 'year' dimension: {out_zarr}. "
+            'Rebuild the staged target store before appending.'
+        )
+
+
 def existing_years_and_dtype(out_zarr: Path) -> tuple[set[int], str | None]:
     if not out_zarr.exists():
         return set(), None
-    ds = xr.open_zarr(out_zarr)
+    validate_existing_target_store(out_zarr)
+    ds = xr.open_zarr(out_zarr, consolidated=False)
     years = set(pd.to_datetime(ds['year'].values).year.astype(int).tolist())
     first_var = CLASS_NAMES[0]
     return years, str(ds[first_var].dtype)

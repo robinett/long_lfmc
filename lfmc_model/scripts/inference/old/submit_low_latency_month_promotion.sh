@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# Archived monthly low-latency promotion driver. Retained for historical reference only.
+
 set -euo pipefail
 
 script_dir="/home/users/trobinet/long_lfmc/lfmc_model/scripts/inference"

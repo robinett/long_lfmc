@@ -6,7 +6,7 @@ import earthaccess
 import pandas as pd
 import xarray as xr
 
-DAYMET_VARS = ['tmax', 'tmin', 'prcp', 'vp', 'swe', 'srad']
+DAYMET_VARS = ['tmax', 'prcp', 'vp', 'swe', 'srad']
 DEFAULT_GRID_PATH = '/scratch/users/trobinet/long_lfmc/final_lfmc/grid/epsg5070_500m_westUS_grid.nc4'
 DEFAULT_OUTPUT_ROOT = '/scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_earthaccess'
 URL_TEMPLATE = (

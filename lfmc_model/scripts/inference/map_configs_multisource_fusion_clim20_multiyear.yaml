@@ -63,7 +63,7 @@ submission:
   gpu_cpus_per_task: 8
   gpu_mem: 36G
   serc_partition: serc
-  owners_gpu_max_jobs: 300
+  owners_gpu_max_jobs: 150
   owners_partition: owners
   owners_gpu_time_limit: "12:00:00"
   owners_gpu_cpus_per_task: 8

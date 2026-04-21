@@ -76,13 +76,13 @@ def month_dates(month_start: pd.Timestamp, month_end: pd.Timestamp) -> pd.Dateti
     return pd.date_range(month_start, month_end, freq='D')
 
 
-def expected_regrid_path(regrid_root: Path, dt_value: pd.Timestamp) -> Path:
-    return (
-        regrid_root
-        / dt_value.strftime('%Y')
-        / dt_value.strftime('%m')
-        / f'modis_reflectance_{dt_value.strftime("%Y%m%d")}_regridded.nc4'
-    )
+def candidate_regrid_paths(regrid_root: Path, dt_value: pd.Timestamp) -> list[Path]:
+    base_dir = regrid_root / dt_value.strftime('%Y') / dt_value.strftime('%m')
+    date_tag = dt_value.strftime('%Y%m%d')
+    return [
+        base_dir / f'modis_reflectance_{date_tag}.nc4',
+        base_dir / f'modis_reflectance_{date_tag}_regridded.nc4',
+    ]
 
 
 def _load_time_index_from_zarr(zarr_path: Path) -> pd.DatetimeIndex:
@@ -100,8 +100,10 @@ def canonical_has_full_month(canonical_zarr: Path, month_start: pd.Timestamp, mo
 
 
 def regridded_month_complete(regrid_root: Path, month_start: pd.Timestamp, month_end: pd.Timestamp) -> bool:
-    expected = [expected_regrid_path(regrid_root, ts) for ts in month_dates(month_start, month_end)]
-    return all(path.exists() for path in expected)
+    return all(
+        any(path.exists() for path in candidate_regrid_paths(regrid_root, ts))
+        for ts in month_dates(month_start, month_end)
+    )
 
 
 def modis_bounding_box(grid_path: Path):

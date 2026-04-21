@@ -19,6 +19,11 @@
 **/logs/
 **/testing/
 **/old/
+!data_processing/daymet/old/
+!data_processing/daymet/old/update_daymet_monthly_latency_month.py
+!lfmc_model/scripts/inference/old/
+!lfmc_model/scripts/inference/old/orchestrate_low_latency_monthly_update.sh
+!lfmc_model/scripts/inference/old/submit_low_latency_month_promotion.sh
 !/old/
 /old/*
 !/old/viewer/

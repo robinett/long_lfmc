@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# Archived monthly-latency Daymet updater. Retained for historical reference only.
+
 import argparse
 import subprocess
 import sys

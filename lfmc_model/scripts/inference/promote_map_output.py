@@ -33,7 +33,11 @@ def get_args():
     parser.add_argument('--production_zarr', type=str, required=True)
     parser.add_argument('--start_date', type=str, required=True)
     parser.add_argument('--end_date', type=str, required=True)
-    parser.add_argument('--mode', choices=['append_time_range', 'overwrite_time_range'], required=True)
+    parser.add_argument(
+        '--mode',
+        choices=['append_time_range', 'overwrite_time_range', 'replace_tail_range'],
+        required=True,
+    )
     parser.add_argument('--tier', type=str, required=True)
     parser.add_argument('--metadata_dir', type=str, default=None)
     parser.add_argument('--initialize_if_missing', action='store_true')
@@ -101,6 +105,13 @@ def _range_starts(start: int, stop: int, step: int):
     return range(start, stop, max(1, int(step)))
 
 
+def _resize_time_var(arr, new_n: int):
+    if len(arr.shape) == 1:
+        arr.resize(new_n)
+        return
+    arr.resize(new_n, *arr.shape[1:])
+
+
 def _copy_time_var_chunkwise(
     staging_arr,
     production_arr,
@@ -156,7 +167,47 @@ def _append_time_range(staging_root, production_root, staging_slice: slice, prod
     production_slice = slice(old_n, new_n)
     for var_name in TIME_VARS:
         arr = production_root[var_name]
-        arr.resize(new_n, arr.shape[1], arr.shape[2]) if var_name != OUTPUT_QUALITY_FLAG_NAME else arr.resize(new_n)
+        _resize_time_var(arr, new_n)
+        _copy_time_var_chunkwise(
+            staging_arr=staging_root[var_name],
+            production_arr=arr,
+            staging_slice=staging_slice,
+            production_slice=production_slice,
+            var_name=var_name,
+        )
+
+
+def _replace_tail_range(
+    staging_root,
+    production_root,
+    staging_slice: slice,
+    production_time: pd.DatetimeIndex,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+):
+    staging_time = _load_time_index(staging_root)[staging_slice]
+    if len(production_time) > 0 and production_time[-1] > end_date:
+        raise ValueError(
+            'replace_tail_range requires end_date to cover the current production tail; '
+            f'production max is {production_time[-1].date()} but requested end_date is {end_date.date()}'
+        )
+    prefix_count = int(np.searchsorted(production_time.values, start_date.to_datetime64(), side='left'))
+    if prefix_count < 0:
+        prefix_count = 0
+    for var_name in TIME_VARS:
+        _resize_time_var(production_root[var_name], prefix_count)
+    production_root['time'].resize(prefix_count)
+
+    new_n = prefix_count + int(len(staging_time))
+    production_root['time'].resize(new_n)
+    production_root['time'][prefix_count:new_n] = np.asarray(
+        staging_root['time'][staging_slice],
+        dtype=np.int64,
+    )
+    production_slice = slice(prefix_count, new_n)
+    for var_name in TIME_VARS:
+        arr = production_root[var_name]
+        _resize_time_var(arr, new_n)
         _copy_time_var_chunkwise(
             staging_arr=staging_root[var_name],
             production_arr=arr,
@@ -232,6 +283,15 @@ def main():
 
     if args.mode == 'append_time_range':
         _append_time_range(staging_root, production_root, staging_slice, production_time)
+    elif args.mode == 'replace_tail_range':
+        _replace_tail_range(
+            staging_root,
+            production_root,
+            staging_slice,
+            production_time,
+            start_date,
+            end_date,
+        )
     else:
         production_slice = _get_time_slice(production_time, start_date, end_date)
         _overwrite_time_range(staging_root, production_root, staging_slice, production_slice)
