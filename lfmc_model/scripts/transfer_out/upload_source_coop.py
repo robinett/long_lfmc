@@ -3,6 +3,7 @@
 import argparse
 import concurrent.futures
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -143,13 +144,26 @@ def parse_credentials_file(credentials_path: Path) -> Dict[str, str]:
     return env
 
 
-def local_inventory(source_path: Path) -> Tuple[int, int]:
+def local_inventory(source_path: Path, logger: Optional[TeeLogger] = None) -> Tuple[int, int]:
     file_count = 0
     total_bytes = 0
-    for path in source_path.rglob("*"):
-        if path.is_file():
-            file_count += 1
-            total_bytes += path.stat().st_size
+    started = time.time()
+    last_log_time = started
+    for path in iter_local_files(source_path):
+        file_count += 1
+        total_bytes += path.stat().st_size
+        now = time.time()
+        if logger is not None and (file_count == 1 or file_count % 100000 == 0 or now - last_log_time >= 30):
+            elapsed = now - started
+            rate = file_count / elapsed if elapsed > 0 else 0.0
+            logger.write(
+                timestamped_message(
+                    "Local inventory progress: "
+                    f"{file_count} files, {human_bytes(total_bytes)}, "
+                    f"{rate:.0f} files/s"
+                )
+            )
+            last_log_time = now
     return file_count, total_bytes
 
 
@@ -246,9 +260,10 @@ def resolve_aws_cli(aws_executable: str, env: Dict[str, str], logger: TeeLogger)
 
 
 def iter_local_files(source_path: Path) -> Iterable[Path]:
-    for path in sorted(source_path.rglob("*")):
-        if path.is_file():
-            yield path
+    for root, dirs, files in os.walk(source_path):
+        dirs[:] = [name for name in dirs if not name.startswith(".nfs")]
+        for filename in files:
+            yield Path(root) / filename
 
 
 def build_boto3_client(region: str, env: Dict[str, str], profile: Optional[str], endpoint_url: Optional[str]):
@@ -274,8 +289,66 @@ def list_remote_objects_boto3(client, bucket: str, key_prefix: str):
     remote_objects = []
     for page in paginator.paginate(Bucket=bucket, Prefix=f"{key_prefix}/"):
         for obj in page.get("Contents", []):
-            remote_objects.append({"Key": obj["Key"], "Size": int(obj["Size"])})
+            remote_objects.append(
+                {
+                    "Key": obj["Key"],
+                    "Size": int(obj["Size"]),
+                    "ETag": str(obj.get("ETag", "")).strip('"'),
+                }
+            )
     return remote_objects
+
+
+def file_md5_hex(path: Path) -> str:
+    digest = hashlib.md5()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def remote_object_matches_local(
+    client,
+    bucket: str,
+    path: Path,
+    remote_obj: Dict[str, object],
+    match_mode: str,
+) -> bool:
+    local_size = path.stat().st_size
+    remote_size = int(remote_obj["Size"])
+    if local_size != remote_size:
+        return False
+    if match_mode == "size":
+        return True
+
+    etag = str(remote_obj.get("ETag", "")).strip()
+    if re.fullmatch(r"[0-9a-fA-F]{32}", etag):
+        return file_md5_hex(path).lower() == etag.lower()
+    if match_mode == "etag":
+        return False
+
+    try:
+        head = client.head_object(Bucket=bucket, Key=str(remote_obj["Key"]))
+    except Exception:
+        return False
+    metadata = head.get("Metadata", {})
+    remote_md5 = str(metadata.get("local-md5", "")).strip().lower()
+    if not remote_md5:
+        return False
+    return file_md5_hex(path).lower() == remote_md5
+
+
+def upload_extra_args(path: Path, acl: str) -> Dict[str, object]:
+    stat = path.stat()
+    extra_args = {
+        "Metadata": {
+            "local-size": str(stat.st_size),
+            "local-mtime-ns": str(stat.st_mtime_ns),
+        }
+    }
+    if acl != "none":
+        extra_args["ACL"] = acl
+    return extra_args
 
 
 def upload_with_boto3(
@@ -288,29 +361,57 @@ def upload_with_boto3(
     dry_run: bool,
     total_bytes: int,
     max_workers: int,
+    transfer_max_concurrency: int,
+    match_mode: str,
+    single_part_threshold_gb: int,
 ):
+    from boto3.s3.transfer import TransferConfig
+
     uploaded_files = 0
     uploaded_bytes = 0
     start_time = time.time()
     last_progress_time = start_time
-    extra_args = {}
     progress_lock = threading.Lock()
-    if acl != "none":
-        extra_args["ACL"] = acl
+    transfer_config = TransferConfig(
+        max_concurrency=transfer_max_concurrency,
+        multipart_threshold=single_part_threshold_gb * 1024**3,
+        use_threads=transfer_max_concurrency > 1,
+    )
 
     local_files = list(iter_local_files(source_path))
     total_files = len(local_files)
+    remote_objects = list_remote_objects_boto3(client, bucket=bucket, key_prefix=key_prefix)
+    remote_by_key = {str(obj["Key"]): obj for obj in remote_objects}
+    upload_files = []
+    upload_bytes = 0
+    skipped_files = 0
+    skipped_bytes = 0
+    for path in local_files:
+        rel_path = path.relative_to(source_path).as_posix()
+        key = f"{key_prefix}/{rel_path}"
+        file_size = path.stat().st_size
+        remote_obj = remote_by_key.get(key)
+        if remote_obj is not None and remote_object_matches_local(client, bucket, path, remote_obj, match_mode):
+            skipped_files += 1
+            skipped_bytes += file_size
+        else:
+            upload_files.append(path)
+            upload_bytes += file_size
+
     logger.write(
         timestamped_message(
-            f"Uploading with boto3: {total_files} files, {human_bytes(total_bytes)} total, "
-            f"max_workers={max_workers}"
+            f"Uploading with boto3: {len(upload_files)}/{total_files} files need transfer, "
+            f"{human_bytes(upload_bytes)}/{human_bytes(total_bytes)} need transfer, "
+            f"skipping {skipped_files} existing matching files ({human_bytes(skipped_bytes)}), "
+            f"max_workers={max_workers}, transfer_max_concurrency={transfer_max_concurrency}, "
+            f"match_mode={match_mode}, single_part_threshold_gb={single_part_threshold_gb}"
         )
     )
 
     def maybe_log_progress(now: float) -> None:
         nonlocal last_progress_time
         should_log_progress = (
-            uploaded_files == total_files
+            uploaded_files == len(upload_files)
             or uploaded_files == 1
             or uploaded_files % 100 == 0
             or (now - last_progress_time) >= 15.0
@@ -320,9 +421,9 @@ def upload_with_boto3(
                 timestamped_message(
                     format_progress_message(
                         uploaded_files=uploaded_files,
-                        total_files=total_files,
+                        total_files=len(upload_files),
                         uploaded_bytes=uploaded_bytes,
-                        total_bytes=total_bytes,
+                        total_bytes=upload_bytes,
                         elapsed_seconds=now - start_time,
                     )
                 )
@@ -335,26 +436,56 @@ def upload_with_boto3(
         file_size = path.stat().st_size
         if dry_run:
             return path, file_size
-        client.upload_file(str(path), bucket, key, ExtraArgs=extra_args or None)
+        client.upload_file(
+            str(path),
+            bucket,
+            key,
+            ExtraArgs=upload_extra_args(path, acl),
+            Config=transfer_config,
+        )
         return path, file_size
 
     if dry_run:
-        for path in local_files[:10]:
+        for path in upload_files[:10]:
             rel_path = path.relative_to(source_path).as_posix()
             key = f"{key_prefix}/{rel_path}"
             logger.write(timestamped_message(f"Dry run upload candidate: s3://{bucket}/{key}"))
         logger.write(timestamped_message("Dry run enabled. Uploads were not executed."))
         return
 
+    if not upload_files:
+        logger.write(timestamped_message("No files need upload."))
+        return
+
+    def submit_next(executor, path_iter, future_to_path) -> bool:
+        try:
+            path = next(path_iter)
+        except StopIteration:
+            return False
+        future = executor.submit(upload_one, path)
+        future_to_path[future] = path
+        return True
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_path = {executor.submit(upload_one, path): path for path in local_files}
-        for future in concurrent.futures.as_completed(future_to_path):
-            path = future_to_path[future]
-            _, file_size = future.result()
-            with progress_lock:
-                uploaded_files += 1
-                uploaded_bytes += file_size
-                maybe_log_progress(time.time())
+        path_iter = iter(upload_files)
+        future_to_path = {}
+        for _ in range(max_workers):
+            if not submit_next(executor, path_iter, future_to_path):
+                break
+
+        while future_to_path:
+            done, _ = concurrent.futures.wait(
+                future_to_path,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                path = future_to_path.pop(future)
+                _, file_size = future.result()
+                submit_next(executor, path_iter, future_to_path)
+                with progress_lock:
+                    uploaded_files += 1
+                    uploaded_bytes += file_size
+                    maybe_log_progress(time.time())
 
 
 def delete_extra_remote_objects_boto3(
@@ -493,6 +624,15 @@ def main():
     boto3_max_workers = int(source_cfg.get("boto3_max_workers", 16))
     if boto3_max_workers < 1:
         raise ValueError("source_coop.boto3_max_workers must be at least 1")
+    boto3_transfer_max_concurrency = int(source_cfg.get("boto3_transfer_max_concurrency", 1))
+    if boto3_transfer_max_concurrency < 1:
+        raise ValueError("source_coop.boto3_transfer_max_concurrency must be at least 1")
+    boto3_match_mode = str(source_cfg.get("boto3_match_mode", "metadata")).strip().lower()
+    if boto3_match_mode not in {"size", "etag", "metadata"}:
+        raise ValueError("source_coop.boto3_match_mode must be one of: size, etag, metadata")
+    boto3_single_part_threshold_gb = int(source_cfg.get("boto3_single_part_threshold_gb", 5))
+    if boto3_single_part_threshold_gb < 1:
+        raise ValueError("source_coop.boto3_single_part_threshold_gb must be at least 1")
 
     if not source_path.exists():
         raise FileNotFoundError(f"Source path does not exist: {source_path}")
@@ -522,7 +662,7 @@ def main():
         logger.write(timestamped_message(f"Artifact type: {artifact_type}"))
         logger.write(timestamped_message(f"Source path: {source_path}"))
 
-        local_file_count, local_total_bytes = local_inventory(source_path)
+        local_file_count, local_total_bytes = local_inventory(source_path, logger=logger)
         logger.write(
             timestamped_message(
                 f"Local inventory: {local_file_count} files, {human_bytes(local_total_bytes)}"
@@ -613,6 +753,9 @@ def main():
                 dry_run=args.dry_run,
                 total_bytes=local_total_bytes,
                 max_workers=boto3_max_workers,
+                transfer_max_concurrency=boto3_transfer_max_concurrency,
+                match_mode=boto3_match_mode,
+                single_part_threshold_gb=boto3_single_part_threshold_gb,
             )
             if delete_extra_remote_files:
                 delete_extra_remote_objects_boto3(

@@ -11,6 +11,7 @@ python3 "${script_dir}/prepare_viewer_3857_dataset_for_source.py"
 
 python3 "${script_dir}/upload_source_coop.py" \
     --config_path "${script_dir}/source_coop_transfer_configs.yaml" \
-    --dataset_key viewer_3857_lfmc_maps
+    --dataset_key viewer_3857_lfmc_maps \
+    --delete_extra_remote_files
 
 python3 "${script_dir}/verify_remote_viewer_dataset_3857.py"
