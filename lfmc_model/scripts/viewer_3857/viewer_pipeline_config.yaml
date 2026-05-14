@@ -1,0 +1,58 @@
+dataset:
+  dataset_label: Long LFMC Viewer 3857
+  scientific_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/final_products/lfmc_vh_vv_365_multisource_fusion_clim20_2001_2024.zarr
+  scientific_grid_crs: EPSG:5070
+  viewer_grid_crs: EPSG:3857
+  viewer_grid_anchor_mode: source_extent_center
+  viewer_sampling_method: nearest_source_cell
+  display_variable: lfmc_ens_mean
+  uncertainty_variable: lfmc_ens_std
+  quality_variable: quality_flag
+  landcover_variable: dominant_landcover_code
+  initial_date: latest
+
+output:
+  viewer_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857.zarr
+  lookup_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lookup_5070_to_3857.zarr
+  asset_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_assets/web_mercator_3857
+  manifest_filename: manifest.json
+  state_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/state
+  viewer_resolution_m: 500.0
+  time_chunk_size: 1
+  spatial_chunk_size: 256
+  latlon_row_chunk_size: 256
+
+batching:
+  init_block_days: 180
+  append_block_days: 180
+
+tiles:
+  tile_size: 512
+  min_zoom: 0
+  max_zoom: 3
+  extra_view_resolutions:
+    - 250.0
+    - 125.0
+    - 62.5
+    - 31.25
+    - 15.625
+    - 7.8125
+
+rendering:
+  default_valid_alpha: 191
+  evergreen_forest_alpha: 30
+
+layers:
+  mean:
+    variable: lfmc_ens_mean
+    label: LFMC
+    unit: percent
+    min: 40.0
+    max: 220.0
+    palette:
+      - [109, 39, 27]
+      - [202, 126, 74]
+      - [208, 196, 135]
+      - [109, 142, 96]
+      - [37, 59, 54]
+    stops: [0.0, 0.18, 0.40, 0.68, 1.0]

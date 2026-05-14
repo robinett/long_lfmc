@@ -1,6 +1,6 @@
 dataset:
   dataset_label: Long LFMC Viewer 3857
-  scientific_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/final_products/lfmc_vh_vv_365_multisource_fusion_clim20_2023_07_08.zarr
+  scientific_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/final_products/lfmc_vh_vv_365_multisource_fusion_clim20_2001_2024.zarr
   scientific_grid_crs: EPSG:5070
   viewer_grid_crs: EPSG:3857
   viewer_grid_anchor_mode: source_extent_center
@@ -14,6 +14,6 @@ output:
   viewer_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857.zarr
   clear_existing: true
   viewer_resolution_m: 500.0
-  time_chunk_size: 128
+  time_chunk_size: 1
   spatial_chunk_size: 256
   latlon_row_chunk_size: 256
