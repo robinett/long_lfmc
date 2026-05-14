@@ -2,10 +2,12 @@
 
 import csv
 import functools
+import hmac
 import io
 import json
 import mimetypes
 import os
+import threading
 import time
 import urllib.parse
 from http import HTTPStatus
@@ -350,6 +352,11 @@ class ViewerDataset:
             raise ValueError("Attempted path traversal outside asset root")
         return candidate
 
+    def close(self) -> None:
+        self._mean_series_for_cell.cache_clear()
+        self._uncertainty_series_for_cell.cache_clear()
+        self.ds.close()
+
 
 class ScientificDataset:
     def __init__(self, cfg: Dict[str, object]):
@@ -458,11 +465,120 @@ class ScientificDataset:
         filename = f"lfmc_sites_{start_date}_to_{end_date}.csv"
         return buffer.getvalue().encode("utf-8"), filename
 
+    def close(self) -> None:
+        self.ds.close()
 
-cfg = load_config()
+
+def build_datasets() -> Tuple[Dict[str, object], ViewerDataset, ScientificDataset]:
+    fresh_cfg = load_config()
+    return fresh_cfg, ViewerDataset(fresh_cfg), ScientificDataset(fresh_cfg)
+
+
 dask.config.set(scheduler="synchronous")
-viewer_dataset = ViewerDataset(cfg)
-scientific_dataset = ScientificDataset(cfg)
+cfg, viewer_dataset, scientific_dataset = build_datasets()
+dataset_lock = threading.RLock()
+last_refresh_time = time.time()
+
+
+def refresh_datasets(reason: str = "manual") -> Dict[str, object]:
+    global cfg, viewer_dataset, scientific_dataset, last_refresh_time
+
+    log(f"Refreshing datasets reason={reason}")
+    fresh_cfg, fresh_viewer_dataset, fresh_scientific_dataset = build_datasets()
+    with dataset_lock:
+        old_viewer_dataset = viewer_dataset
+        old_scientific_dataset = scientific_dataset
+        cfg = fresh_cfg
+        viewer_dataset = fresh_viewer_dataset
+        scientific_dataset = fresh_scientific_dataset
+        last_refresh_time = time.time()
+        payload = {
+            "status": "refreshed",
+            "reason": reason,
+            "refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_refresh_time)),
+            "viewer_dates": len(viewer_dataset.dates),
+            "viewer_first_date": viewer_dataset.dates[0] if viewer_dataset.dates else None,
+            "viewer_last_date": viewer_dataset.dates[-1] if viewer_dataset.dates else None,
+            "scientific_dates": len(scientific_dataset.dates),
+            "scientific_first_date": scientific_dataset.dates[0] if scientific_dataset.dates else None,
+            "scientific_last_date": scientific_dataset.dates[-1] if scientific_dataset.dates else None,
+        }
+
+    old_viewer_dataset.close()
+    old_scientific_dataset.close()
+    log(
+        "Dataset refresh complete "
+        f"viewer_dates={payload['viewer_dates']} "
+        f"scientific_dates={payload['scientific_dates']}"
+    )
+    return payload
+
+
+def should_refresh_for_date_error(exc: Exception) -> bool:
+    return "Date not available" in str(exc)
+
+
+def viewer_metadata_payload() -> Dict[str, object]:
+    with dataset_lock:
+        payload = viewer_dataset.metadata()
+        payload["last_refresh_epoch"] = last_refresh_time
+        return payload
+
+
+def viewer_point_payload_with_refresh(
+    date_str: str,
+    grid_x: float = None,
+    grid_y: float = None,
+    lat: float = None,
+    lon: float = None,
+) -> Dict[str, object]:
+    try:
+        with dataset_lock:
+            return viewer_dataset.point_payload(
+                date_str=date_str,
+                grid_x=grid_x,
+                grid_y=grid_y,
+                lat=lat,
+                lon=lon,
+            )
+    except ValueError as exc:
+        if not should_refresh_for_date_error(exc):
+            raise
+
+    refresh_datasets(reason=f"point_date_miss:{date_str}")
+    with dataset_lock:
+        return viewer_dataset.point_payload(
+            date_str=date_str,
+            grid_x=grid_x,
+            grid_y=grid_y,
+            lat=lat,
+            lon=lon,
+        )
+
+
+def scientific_csv_with_refresh(
+    sites: List[Tuple[float, float]],
+    start_date: str,
+    end_date: str,
+) -> Tuple[bytes, str]:
+    try:
+        with dataset_lock:
+            return scientific_dataset.download_csv_bytes_for_sites(
+                sites=sites,
+                start_date=start_date,
+                end_date=end_date,
+            )
+    except ValueError as exc:
+        if not should_refresh_for_date_error(exc):
+            raise
+
+    refresh_datasets(reason=f"csv_date_miss:{start_date}:{end_date}")
+    with dataset_lock:
+        return scientific_dataset.download_csv_bytes_for_sites(
+            sites=sites,
+            start_date=start_date,
+            end_date=end_date,
+        )
 
 
 class ViewerRequestHandler(BaseHTTPRequestHandler):
@@ -473,8 +589,8 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
 
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         super().end_headers()
 
     def do_OPTIONS(self) -> None:
@@ -505,7 +621,7 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 self._json_response({"status": "ok"})
                 return
             if parsed.path == "/api/metadata":
-                self._json_response(viewer_dataset.metadata())
+                self._json_response(viewer_metadata_payload())
                 return
             if parsed.path == "/api/point":
                 date_str = self._require_param(query, "date")
@@ -513,7 +629,7 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 grid_y = self._optional_float(query, "y")
                 lat = self._optional_float(query, "lat")
                 lon = self._optional_float(query, "lon")
-                payload = viewer_dataset.point_payload(
+                payload = viewer_point_payload_with_refresh(
                     date_str=date_str,
                     grid_x=grid_x,
                     grid_y=grid_y,
@@ -535,7 +651,7 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                     lat = float(self._require_param(query, "lat"))
                     lon = float(self._require_param(query, "lon"))
                     sites = [(lat, lon)]
-                csv_bytes, filename = scientific_dataset.download_csv_bytes_for_sites(
+                csv_bytes, filename = scientific_csv_with_refresh(
                     sites=sites,
                     start_date=start_date,
                     end_date=end_date,
@@ -548,6 +664,29 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
         except Exception as exc:
             self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def do_POST(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        try:
+            if parsed.path == "/api/refresh":
+                self._require_refresh_auth()
+                payload = refresh_datasets(reason="refresh_endpoint")
+                self._json_response(payload)
+                return
+            self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
+        except PermissionError as exc:
+            self._json_response({"error": str(exc)}, status=HTTPStatus.UNAUTHORIZED)
+        except Exception as exc:
+            self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+
+    def _require_refresh_auth(self) -> None:
+        expected_token = str(os.environ.get("LONG_LFMC_API_REFRESH_TOKEN", "")).strip()
+        if not expected_token:
+            raise PermissionError("Refresh endpoint is disabled; LONG_LFMC_API_REFRESH_TOKEN is not set")
+        header = str(self.headers.get("Authorization", "")).strip()
+        expected_header = f"Bearer {expected_token}"
+        if not hmac.compare_digest(header, expected_header):
+            raise PermissionError("Invalid refresh token")
 
     def _require_param(self, query: Dict[str, List[str]], name: str) -> str:
         values = query.get(name)
