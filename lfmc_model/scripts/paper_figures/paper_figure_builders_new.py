@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 
 import contextlib
+import gc
 import glob
 import hashlib
 import io
 import json
+import multiprocessing as mp
 import os
 import shutil
 import sys
+import traceback
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import torch
 import xarray as xr
 from shapely.geometry import Point
 
@@ -36,6 +40,8 @@ from compare_timeseries import (  # noqa: E402
 from eval_deep import (  # noqa: E402
     _WGS84_TO_5070,
     _build_ensemble_eval_df,
+    _build_row_keys,
+    _extract_target_frame,
     build_lfmc_space_time_tables,
     build_lfmc_y2y_df,
     build_site_month_anomaly_eval_df,
@@ -348,6 +354,7 @@ def _timeseries_panel_title(
     criterion_label: str,
     selected_years: Sequence[int],
     site_r2: float,
+    extra_r2_parts: Optional[Sequence[str]] = None,
 ) -> str:
     criterion_key = str(criterion_label).strip().lower()
     percentile_lookup = cfg.get("timeseries_selection", {}).get("r2_percentiles", {})
@@ -361,7 +368,30 @@ def _timeseries_panel_title(
         line1_parts.append(f"Years shown: {selected_years[0]} - {selected_years[-1]}")
     line2_parts = [criterion_text]
     line2_parts.append(f"Site R²: {site_r2:.2f}" if np.isfinite(site_r2) else "Site R²: nan")
+    if extra_r2_parts is not None:
+        line2_parts.extend([str(part) for part in extra_r2_parts if str(part).strip() != ""])
     return " | ".join(line1_parts) + "\n" + " | ".join(line2_parts)
+
+
+def _date_matched_r2(obs_dates, obs_values, pred_dates, pred_values) -> float:
+    obs_dt = pd.to_datetime(obs_dates, errors="coerce")
+    pred_dt = pd.to_datetime(pred_dates, errors="coerce")
+    obs_arr = np.asarray(obs_values, dtype=float)
+    pred_arr = np.asarray(pred_values, dtype=float)
+    if len(obs_dt) == 0 or len(pred_dt) == 0 or len(obs_arr) != len(obs_dt) or len(pred_arr) != len(pred_dt):
+        return np.nan
+    obs_df = pd.DataFrame({"date": obs_dt.normalize(), "obs": obs_arr})
+    pred_df = pd.DataFrame({"date": pred_dt.normalize(), "pred": pred_arr})
+    obs_df = obs_df[np.isfinite(obs_df["obs"])].dropna(subset=["date"]).copy()
+    pred_df = pred_df[np.isfinite(pred_df["pred"])].dropna(subset=["date"]).copy()
+    if len(obs_df) == 0 or len(pred_df) == 0:
+        return np.nan
+    pred_df = pred_df.groupby("date", as_index=False)["pred"].mean()
+    matched = obs_df.merge(pred_df, on="date", how="inner")
+    if len(matched) < 2:
+        return np.nan
+    metrics = compute_basic_metrics(matched["obs"].values, matched["pred"].values)
+    return float(metrics.get("r2", np.nan))
 
 
 def _top_consecutive_observation_years(dates, n_years: int) -> List[int]:
@@ -607,20 +637,236 @@ def _model_cache_token(runtime: Dict[str, object], model_key: str) -> str:
     return token
 
 
-def _load_eval_context(runtime: Dict[str, object], model_key: str) -> Dict[str, object]:
-    cache = runtime.setdefault("eval_contexts", {})
-    if model_key in cache:
-        return cache[model_key]
+def _load_fold_predictions_for_targets(model_dir: str, target_names: Sequence[str]) -> pd.DataFrame:
+    requested_targets = {str(target_name).strip().lower() for target_name in target_names}
+    fold_info_path = os.path.join(model_dir, "fold_info.json")
+    with open(fold_info_path, "r") as file_obj:
+        fold_info = json.load(file_obj)
+    fold_frames = []
+    for fold in fold_info.keys():
+        print(f"Loading test outputs for fold {fold}")
+        fold_dir = os.path.join(model_dir, f"fold_{fold}")
+        test_info_path = os.path.join(fold_dir, "test_info.csv")
+        test_outputs_path = os.path.join(fold_dir, "test_outputs.pth")
+        test_info = pd.read_csv(test_info_path, low_memory=False)
+        test_outputs = torch.load(test_outputs_path, map_location="cpu", weights_only=False)
+        source = test_info["source"].astype(str)
+        frame_builders = [
+            (
+                "lfmc",
+                source == "nfmd",
+                test_outputs.get("lfmc_preds", []),
+                test_outputs.get("lfmc_true", []),
+            ),
+            (
+                "vv",
+                source.str.startswith("vv"),
+                test_outputs.get("vv_preds", []),
+                test_outputs.get("vv_true", []),
+            ),
+            (
+                "vh",
+                source.str.startswith("vh"),
+                test_outputs.get("vh_preds", []),
+                test_outputs.get("vh_true", []),
+            ),
+        ]
+        for target_name, mask, preds, true_vals in frame_builders:
+            if target_name not in requested_targets:
+                continue
+            target_frame = _extract_target_frame(
+                test_info=test_info,
+                preds=preds,
+                true_vals=true_vals,
+                mask=mask,
+                target_name=target_name,
+                fold=fold,
+            )
+            if len(target_frame) > 0:
+                fold_frames.append(target_frame)
+                print(
+                    f"  Added {len(target_frame)} rows for target {target_name} "
+                    f"from fold {fold}"
+                )
+        del test_outputs
+        gc.collect()
+    if len(fold_frames) == 0:
+        raise ValueError(
+            f"No evaluation rows found for targets {sorted(requested_targets)} in model dir: {model_dir}"
+        )
+    eval_df = pd.concat(fold_frames, ignore_index=True)
+    eval_df["date"] = pd.to_datetime(eval_df["date"], errors="coerce")
+    return eval_df
+
+
+def _write_compact_target_prediction_cache(
+    model_dir: str,
+    target_names: Sequence[str],
+    legacy_cache_path: str,
+    row_key_path: str,
+    pred_path: str,
+    template_path: Optional[str],
+) -> None:
+    try:
+        if os.path.exists(legacy_cache_path):
+            df = pd.read_pickle(legacy_cache_path)
+        else:
+            df = _load_fold_predictions_for_targets(model_dir, target_names)
+            df.to_pickle(legacy_cache_path)
+        df = df.reset_index(drop=True)
+        _build_row_keys(df).to_pickle(row_key_path)
+        np.save(pred_path, df["pred"].to_numpy(dtype=float))
+        if template_path is not None:
+            df.to_pickle(template_path)
+    except Exception:
+        traceback.print_exc()
+        raise
+
+
+def _ensure_compact_target_prediction_cache(
+    model_dir: str,
+    target_names: Sequence[str],
+    legacy_cache_path: str,
+    row_key_path: str,
+    pred_path: str,
+    template_path: Optional[str],
+) -> None:
+    required_paths = [row_key_path, pred_path]
+    if template_path is not None:
+        required_paths.append(template_path)
+    if all(os.path.exists(path) for path in required_paths):
+        return
+    os.makedirs(os.path.dirname(legacy_cache_path), exist_ok=True)
+    os.makedirs(os.path.dirname(row_key_path), exist_ok=True)
+    os.makedirs(os.path.dirname(pred_path), exist_ok=True)
+    if template_path is not None:
+        os.makedirs(os.path.dirname(template_path), exist_ok=True)
+    ctx = mp.get_context("fork")
+    proc = ctx.Process(
+        target=_write_compact_target_prediction_cache,
+        args=(model_dir, target_names, legacy_cache_path, row_key_path, pred_path, template_path),
+    )
+    proc.start()
+    proc.join()
+    if proc.exitcode != 0:
+        raise RuntimeError(
+            f"Failed to write compact target prediction cache for {model_dir}; "
+            f"child exit code {proc.exitcode}"
+        )
+
+
+def _load_ensemble_eval_df_for_targets_streaming(
+    runtime: Dict[str, object],
+    model_key: str,
+    target_names: Sequence[str],
+) -> pd.DataFrame:
+    cache = runtime.setdefault("target_eval_df_streaming_cache", {})
+    target_key = tuple(sorted(str(target_name).strip().lower() for target_name in target_names))
+    cache_key = (model_key, target_key)
+    if cache_key in cache:
+        return cache[cache_key].copy()
     model_cfg = _model_cfg(runtime["cfg"], model_key)
     member_dirs = _select_model_member_dirs(model_cfg)
-    member_eval_dfs = [load_fold_predictions(member_dir) for member_dir in member_dirs]
+    if len(member_dirs) == 0:
+        raise ValueError(f"No ensemble members were found for model '{model_key}'")
+    template = None
+    template_row_keys = None
+    pred_arrays = []
+    legacy_member_cache_dir = os.path.join(
+        _model_cache_dir(runtime, model_key),
+        "target_prediction_cache",
+        "_".join(target_key),
+    )
+    compact_member_cache_dir = os.path.join(
+        _model_cache_dir(runtime, model_key),
+        "target_prediction_compact_cache",
+        "_".join(target_key),
+    )
+    for member_idx, member_dir in enumerate(member_dirs):
+        member_cache_name = hashlib.sha1(str(member_dir).encode("utf-8")).hexdigest()[:12]
+        legacy_member_cache_path = os.path.join(
+            legacy_member_cache_dir,
+            f"member_{member_idx:02d}_{member_cache_name}.pkl",
+        )
+        row_key_path = os.path.join(
+            compact_member_cache_dir,
+            f"member_{member_idx:02d}_{member_cache_name}_row_keys.pkl",
+        )
+        pred_path = os.path.join(
+            compact_member_cache_dir,
+            f"member_{member_idx:02d}_{member_cache_name}_pred.npy",
+        )
+        template_path = None
+        if member_idx == 0:
+            template_path = os.path.join(
+                compact_member_cache_dir,
+                f"member_{member_idx:02d}_{member_cache_name}_template.pkl",
+            )
+        print(f"Preparing compact target prediction cache for member {member_idx + 1}/{len(member_dirs)}")
+        _ensure_compact_target_prediction_cache(
+            member_dir,
+            target_names,
+            legacy_member_cache_path,
+            row_key_path,
+            pred_path,
+            template_path,
+        )
+        member_row_keys = pd.read_pickle(row_key_path)
+        member_pred = np.load(pred_path)
+        if template is None:
+            template = pd.read_pickle(template_path).reset_index(drop=True)
+            template_row_keys = member_row_keys.copy()
+        else:
+            if len(member_pred) != len(template):
+                raise ValueError(
+                    f"Member {member_idx} row count mismatch: {len(member_pred)} vs {len(template)}"
+                )
+            if not template_row_keys.equals(member_row_keys):
+                raise ValueError(
+                    f"Member {member_idx} row alignment mismatch in streaming ensemble evaluation"
+                )
+        pred_arrays.append(np.asarray(member_pred, dtype=float).copy())
+        print(f"  Added cached predictions for member {member_idx + 1}/{len(member_dirs)}")
+        del member_row_keys, member_pred
+        gc.collect()
+    print("Combining cached member predictions")
+    pred_stack = np.stack(pred_arrays, axis=1)
+    out = template.copy()
+    out["pred"] = pred_stack.mean(axis=1)
+    out["pred_std_ensemble"] = pred_stack.std(axis=1, ddof=0)
+    print(f"Built streaming ensemble dataframe with {len(out)} rows")
+    cache[cache_key] = out
+    return out.copy()
+
+
+def _load_eval_context(
+    runtime: Dict[str, object],
+    model_key: str,
+    target_names: Optional[Sequence[str]] = None,
+) -> Dict[str, object]:
+    cache = runtime.setdefault("eval_contexts", {})
+    target_key = None
+    if target_names is not None:
+        target_key = tuple(sorted(str(target_name).strip().lower() for target_name in target_names))
+    cache_key = (model_key, target_key)
+    if cache_key in cache:
+        return cache[cache_key]
+    model_cfg = _model_cfg(runtime["cfg"], model_key)
+    member_dirs = _select_model_member_dirs(model_cfg)
+    if target_names is None:
+        member_eval_dfs = [load_fold_predictions(member_dir) for member_dir in member_dirs]
+    else:
+        member_eval_dfs = [
+            _load_fold_predictions_for_targets(member_dir, target_names)
+            for member_dir in member_dirs
+        ]
     context = {
         "model_key": model_key,
         "member_dirs": member_dirs,
         "member_eval_dfs": member_eval_dfs,
         "eval_df": _build_ensemble_eval_df(member_eval_dfs),
     }
-    cache[model_key] = context
+    cache[cache_key] = context
     return context
 
 
@@ -1474,7 +1720,9 @@ def _build_test_location_count_table(
     target_name_lookup = {str(target_name).strip().lower() for target_name in target_names}
     reference_member_dir = member_dirs[member_idx]
     reference_location_keys = set()
-    union_frames = []
+    seen_row_keys = set()
+    location_counts = {}
+    member_location_counts = {}
     for member_dir in member_dirs:
         member_df = _load_test_row_union(runtime, member_dir)
         member_df = member_df[
@@ -1482,44 +1730,43 @@ def _build_test_location_count_table(
         ].copy()
         if len(member_df) == 0:
             continue
-        member_df["member_dir"] = os.path.basename(member_dir)
         member_df["_row_key"] = _build_test_obs_row_key(member_df)
-        union_frames.append(member_df)
+        member_df["latitude"] = pd.to_numeric(member_df["latitude"], errors="coerce")
+        member_df["longitude"] = pd.to_numeric(member_df["longitude"], errors="coerce")
+        member_df = member_df.dropna(subset=["latitude", "longitude", "_row_key"]).copy()
+        if len(member_df) == 0:
+            continue
+        member_location_keys = {
+            (float(row.latitude), float(row.longitude))
+            for row in member_df[["latitude", "longitude"]].drop_duplicates().itertuples(index=False)
+        }
+        for location_key in member_location_keys:
+            member_location_counts[location_key] = member_location_counts.get(location_key, 0) + 1
         if member_dir == reference_member_dir:
-            reference_location_keys = {
-                (
-                    float(pd.to_numeric(row.latitude, errors="coerce")),
-                    float(pd.to_numeric(row.longitude, errors="coerce")),
-                )
-                for row in member_df[["latitude", "longitude"]].dropna().itertuples(index=False)
-            }
-    if len(union_frames) == 0:
+            reference_location_keys = member_location_keys
+        member_df = member_df.drop_duplicates(subset=["_row_key"]).reset_index(drop=True)
+        for row in member_df[["_row_key", "latitude", "longitude"]].itertuples(index=False):
+            row_key = str(row[0])
+            if row_key in seen_row_keys:
+                continue
+            seen_row_keys.add(row_key)
+            location_key = (float(row.latitude), float(row.longitude))
+            location_counts[location_key] = location_counts.get(location_key, 0) + 1
+    if len(location_counts) == 0:
         raise ValueError(
             f"No test rows matched targets {list(target_names)} for model '{model_key}'"
         )
-    union_df = pd.concat(union_frames, ignore_index=True, sort=False)
-    unique_obs_df = union_df.drop_duplicates(subset=["_row_key"]).copy()
-    member_presence_df = union_df[
-        ["latitude", "longitude", "member_dir"]
-    ].drop_duplicates().reset_index(drop=True)
-    grouped = (
-        unique_obs_df.groupby(["latitude", "longitude"], as_index=False, dropna=False)
-        .agg(
-            n_points=("_row_key", "size"),
-        )
-        .merge(
-            member_presence_df.groupby(
-                ["latitude", "longitude"],
-                as_index=False,
-                dropna=False,
-            ).agg(
-                n_members=("member_dir", "nunique"),
-            ),
-            on=["latitude", "longitude"],
-            how="left",
-        )
+    grouped = pd.DataFrame.from_records(
+        [
+            {
+                "latitude": location_key[0],
+                "longitude": location_key[1],
+                "n_points": int(n_points),
+                "n_members": int(member_location_counts.get(location_key, 0)),
+            }
+            for location_key, n_points in location_counts.items()
+        ]
     )
-    grouped["n_members"] = pd.to_numeric(grouped["n_members"], errors="coerce").fillna(0).astype(int)
     grouped["marker_group"] = "all_points"
     if include_reference_member_flag:
         if lfmc_location_keys is not None:
@@ -1550,18 +1797,429 @@ def _build_test_location_count_table(
     ).reset_index(drop=True)
 
 
-def _load_ensemble_site_entry(cfg: Dict[str, object], model_key: str) -> Dict[str, object]:
+def _split_species_names(values: pd.Series) -> List[str]:
+    species_names = set()
+    for value in values.dropna().astype(str):
+        for part in value.split(";"):
+            name = part.strip()
+            if name != "":
+                species_names.add(name)
+    return sorted(species_names)
+
+
+def _target_member_unique_rows(
+    runtime: Dict[str, object],
+    member_dir: str,
+    target_names: Sequence[str],
+) -> pd.DataFrame:
+    target_name_lookup = {str(target_name).strip().lower() for target_name in target_names}
+    df = _load_test_row_union(runtime, member_dir)
+    df = df[
+        df["target"].astype(str).str.strip().str.lower().isin(target_name_lookup)
+    ].copy()
+    if len(df) == 0:
+        return df
+    df["_row_key"] = _build_test_obs_row_key(df)
+    df = df.drop_duplicates(subset=["_row_key"]).reset_index(drop=True)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["measurement_day"] = df["date"].dt.normalize()
+    else:
+        df["measurement_day"] = pd.NaT
+    df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
+    df = df.dropna(subset=["latitude", "longitude"]).reset_index(drop=True)
+    return df
+
+
+def _union_unique_target_rows(
+    runtime: Dict[str, object],
+    member_dirs: Sequence[str],
+    target_names: Sequence[str],
+) -> pd.DataFrame:
+    seen_row_keys = set()
+    frames = []
+    for member_dir in member_dirs:
+        member_df = _target_member_unique_rows(runtime, member_dir, target_names)
+        if len(member_df) == 0:
+            continue
+        keep_mask = ~member_df["_row_key"].astype(str).isin(seen_row_keys)
+        new_df = member_df.loc[keep_mask].copy()
+        seen_row_keys.update(new_df["_row_key"].astype(str).tolist())
+        if len(new_df) > 0:
+            frames.append(new_df)
+    if len(frames) == 0:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True, sort=False)
+
+
+def _finite_series(values: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(values, errors="coerce")
+    return numeric[np.isfinite(numeric)]
+
+
+def _add_distribution_stats(row: Dict[str, object], prefix: str, values: pd.Series) -> None:
+    finite = _finite_series(values)
+    row[f"mean_{prefix}"] = float(finite.mean()) if len(finite) > 0 else np.nan
+    row[f"sd_{prefix}"] = float(finite.std(ddof=1)) if len(finite) > 1 else np.nan
+    row[f"median_{prefix}"] = float(finite.median()) if len(finite) > 0 else np.nan
+    row[f"min_{prefix}"] = float(finite.min()) if len(finite) > 0 else np.nan
+    row[f"max_{prefix}"] = float(finite.max()) if len(finite) > 0 else np.nan
+
+
+def _lfmc_site_detail_table(lfmc_rows: pd.DataFrame) -> pd.DataFrame:
+    detail_rows = []
+    if len(lfmc_rows) == 0:
+        return pd.DataFrame(
+            columns=[
+                "latitude",
+                "longitude",
+                "n_observations",
+                "n_measurement_days",
+                "n_species",
+                "species_site_class",
+                "species_names",
+            ]
+        )
+    work = lfmc_rows.copy()
+    work = work.dropna(subset=["latitude", "longitude"]).reset_index(drop=True)
+    if "measurement_day" not in work.columns:
+        work["measurement_day"] = pd.NaT
+    for (latitude, longitude), group in work.groupby(["latitude", "longitude"], dropna=False):
+        species = _split_species_names(group["fuel_type"]) if "fuel_type" in group.columns else []
+        detail_rows.append(
+            {
+                "latitude": float(latitude),
+                "longitude": float(longitude),
+                "n_observations": int(len(group)),
+                "n_measurement_days": int(group["measurement_day"].dropna().nunique()),
+                "n_species": int(len(species)),
+                "species_site_class": "multi_species" if len(species) > 1 else "single_species",
+                "species_names": "; ".join(species),
+            }
+        )
+    return pd.DataFrame.from_records(detail_rows).sort_values(
+        ["n_observations", "latitude", "longitude"],
+        ascending=[False, True, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+
+def _summarize_lfmc_site_detail(site_detail_df: pd.DataFrame) -> Dict[str, object]:
+    row: Dict[str, object] = {
+        "n_sites": int(len(site_detail_df)),
+        "single_species_sites": int((site_detail_df["species_site_class"] == "single_species").sum()),
+        "multi_species_sites": int((site_detail_df["species_site_class"] == "multi_species").sum()),
+        "total_lfmc_observations": int(site_detail_df["n_observations"].sum()),
+        "total_lfmc_measurement_days": int(site_detail_df["n_measurement_days"].sum()),
+    }
+    _add_distribution_stats(row, "observations_per_site", site_detail_df["n_observations"])
+    _add_distribution_stats(row, "measurement_days_per_site", site_detail_df["n_measurement_days"])
+    return row
+
+
+def _build_lfmc_sampling_statistics(
+    runtime: Dict[str, object],
+    model_key: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    model_cfg = _model_cfg(runtime["cfg"], model_key)
+    member_dirs = _select_model_member_dirs(model_cfg)
+    member_rows = []
+    for member_idx, member_dir in enumerate(member_dirs, start=1):
+        member_df = _target_member_unique_rows(runtime, member_dir, ["lfmc"])
+        site_detail_df = _lfmc_site_detail_table(member_df)
+        row = _summarize_lfmc_site_detail(site_detail_df)
+        row.update(
+            {
+                "model_key": model_key,
+                "member_index": int(member_idx),
+                "member_dir": os.path.basename(member_dir),
+            }
+        )
+        member_rows.append(row)
+    by_member_df = pd.DataFrame.from_records(member_rows)
+    union_df = _union_unique_target_rows(runtime, member_dirs, ["lfmc"])
+    site_detail_df = _lfmc_site_detail_table(union_df)
+    overall_row = _summarize_lfmc_site_detail(site_detail_df)
+    overall_row.update(
+        {
+            "model_key": model_key,
+            "aggregation": "unique_rows_across_members",
+            "n_members": int(len(member_dirs)),
+        }
+    )
+    overall_df = pd.DataFrame.from_records([overall_row])
+    return by_member_df, overall_df, site_detail_df
+
+
+def _summarize_s1_counts(
+    location_counts: pd.Series,
+    day_counts: pd.Series,
+) -> Dict[str, object]:
+    row: Dict[str, object] = {
+        "n_locations": int(len(location_counts)),
+        "total_s1_observations": int(location_counts.sum()) if len(location_counts) > 0 else 0,
+    }
+    _add_distribution_stats(row, "s1_observations_per_location", location_counts)
+    _add_distribution_stats(row, "s1_observation_days_per_location", day_counts)
+    return row
+
+
+def _build_s1_sampling_statistics(
+    runtime: Dict[str, object],
+    model_key: str,
+    lfmc_location_keys: set,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    model_cfg = _model_cfg(runtime["cfg"], model_key)
+    member_dirs = _select_model_member_dirs(model_cfg)
+    member_rows = []
+    coincident_rows = []
+    seen_row_keys = set()
+    union_location_counts = {}
+    union_location_days = {}
+    union_location_keys = set()
+    for member_idx, member_dir in enumerate(member_dirs, start=1):
+        member_df = _target_member_unique_rows(runtime, member_dir, ["vv", "vh"])
+        if len(member_df) == 0:
+            continue
+        member_location_counts = member_df.groupby(["latitude", "longitude"], dropna=False).size()
+        member_day_counts = (
+            member_df.dropna(subset=["measurement_day"])
+            .groupby(["latitude", "longitude"], dropna=False)["measurement_day"]
+            .nunique()
+        )
+        row = _summarize_s1_counts(member_location_counts, member_day_counts)
+        row.update(
+            {
+                "model_key": model_key,
+                "member_index": int(member_idx),
+                "member_dir": os.path.basename(member_dir),
+            }
+        )
+        member_rows.append(row)
+        member_location_keys = {
+            (float(latitude), float(longitude))
+            for latitude, longitude in member_location_counts.index.to_list()
+        }
+        coincident_count = len(member_location_keys & lfmc_location_keys)
+        noncoincident_count = len(member_location_keys - lfmc_location_keys)
+        coincident_rows.append(
+            {
+                "model_key": model_key,
+                "member_index": int(member_idx),
+                "member_dir": os.path.basename(member_dir),
+                "s1_locations": int(len(member_location_keys)),
+                "coincident_with_lfmc": int(coincident_count),
+                "not_coincident_with_lfmc": int(noncoincident_count),
+                "pct_coincident_with_lfmc": (
+                    100.0 * float(coincident_count) / float(len(member_location_keys))
+                    if len(member_location_keys) > 0 else np.nan
+                ),
+            }
+        )
+        for row_key, latitude, longitude, measurement_day in member_df[
+            ["_row_key", "latitude", "longitude", "measurement_day"]
+        ].itertuples(index=False, name=None):
+            row_key = str(row_key)
+            if row_key in seen_row_keys:
+                continue
+            seen_row_keys.add(row_key)
+            location_key = (float(latitude), float(longitude))
+            union_location_keys.add(location_key)
+            union_location_counts[location_key] = union_location_counts.get(location_key, 0) + 1
+            if pd.notna(measurement_day):
+                union_location_days.setdefault(location_key, set()).add(pd.Timestamp(measurement_day).normalize())
+    union_counts = pd.Series(union_location_counts, dtype=float)
+    union_day_counts = pd.Series(
+        {location_key: len(days) for location_key, days in union_location_days.items()},
+        dtype=float,
+    )
+    overall_row = _summarize_s1_counts(union_counts, union_day_counts)
+    overall_row.update(
+        {
+            "model_key": model_key,
+            "aggregation": "unique_rows_across_members",
+            "n_members": int(len(member_dirs)),
+        }
+    )
+    union_coincident_count = len(union_location_keys & lfmc_location_keys)
+    union_noncoincident_count = len(union_location_keys - lfmc_location_keys)
+    coincident_overall_df = pd.DataFrame.from_records(
+        [
+            {
+                "model_key": model_key,
+                "aggregation": "unique_locations_across_members",
+                "s1_locations": int(len(union_location_keys)),
+                "coincident_with_lfmc": int(union_coincident_count),
+                "not_coincident_with_lfmc": int(union_noncoincident_count),
+                "pct_coincident_with_lfmc": (
+                    100.0 * float(union_coincident_count) / float(len(union_location_keys))
+                    if len(union_location_keys) > 0 else np.nan
+                ),
+            }
+        ]
+    )
+    return (
+        pd.DataFrame.from_records(member_rows),
+        pd.DataFrame.from_records([overall_row]),
+        pd.DataFrame.from_records(coincident_rows),
+        coincident_overall_df,
+    )
+
+
+def _dry_lfmc_performance_for_eval_df(
+    eval_df: pd.DataFrame,
+    model_key: str,
+    member_label: str,
+    min_obs: int,
+    dry_quantile: float,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    lfmc_df = build_lfmc_y2y_df(eval_df)
+    if len(lfmc_df) == 0:
+        empty_summary = pd.DataFrame()
+        empty_site = pd.DataFrame()
+        return empty_summary, empty_site
+    lfmc_df = lfmc_df.copy()
+    lfmc_df["site_key"] = lfmc_df["site_key"].astype(str)
+    eligible_site_counts = lfmc_df.groupby("site_key", dropna=False).size()
+    eligible_site_keys = set(eligible_site_counts[eligible_site_counts >= int(min_obs)].index.astype(str))
+    eligible_df = lfmc_df[lfmc_df["site_key"].isin(eligible_site_keys)].copy()
+    dry_indices = []
+    site_rows = []
+    for site_key, site_df in eligible_df.groupby("site_key", dropna=False):
+        site_df = site_df.sort_values(["obs", "date"], ascending=[True, True], kind="mergesort")
+        dry_n = max(1, int(np.ceil(float(dry_quantile) * len(site_df))))
+        dry_site_df = site_df.iloc[:dry_n].copy()
+        dry_indices.extend(dry_site_df.index.tolist())
+        all_metrics = compute_basic_metrics(site_df["obs"].values, site_df["pred"].values)
+        dry_metrics = compute_basic_metrics(dry_site_df["obs"].values, dry_site_df["pred"].values)
+        site_rows.append(
+            {
+                "model_key": model_key,
+                "member": member_label,
+                "site_key": str(site_key),
+                "latitude": float(pd.to_numeric(site_df["latitude"], errors="coerce").iloc[0]),
+                "longitude": float(pd.to_numeric(site_df["longitude"], errors="coerce").iloc[0]),
+                "n_observations": int(len(site_df)),
+                "n_dry_observations": int(len(dry_site_df)),
+                "dry_quantile": float(dry_quantile),
+                "dry_lfmc_threshold": float(dry_site_df["obs"].max()) if len(dry_site_df) > 0 else np.nan,
+                "all_site_r2": all_metrics.get("r2", np.nan),
+                "all_site_rmse": all_metrics.get("rmse", np.nan),
+                "dry_site_r2": dry_metrics.get("r2", np.nan),
+                "dry_site_rmse": dry_metrics.get("rmse", np.nan),
+            }
+        )
+    dry_df = eligible_df.loc[dry_indices].copy() if len(dry_indices) > 0 else eligible_df.iloc[0:0].copy()
+    site_metric_df = pd.DataFrame.from_records(site_rows)
+    all_metrics = compute_basic_metrics(eligible_df["obs"].values, eligible_df["pred"].values)
+    dry_metrics = compute_basic_metrics(dry_df["obs"].values, dry_df["pred"].values)
+    summary_rows = []
+    for subset_name, subset_df, metrics, site_r2_col, site_rmse_col in [
+        ("all_lfmc_at_sites_with_min_obs", eligible_df, all_metrics, "all_site_r2", "all_site_rmse"),
+        ("driest_within_site_lfmc", dry_df, dry_metrics, "dry_site_r2", "dry_site_rmse"),
+    ]:
+        finite_site_r2 = _finite_series(site_metric_df[site_r2_col])
+        finite_site_rmse = _finite_series(site_metric_df[site_rmse_col])
+        summary_rows.append(
+            {
+                "model_key": model_key,
+                "member": member_label,
+                "subset": subset_name,
+                "min_obs_per_site": int(min_obs),
+                "dry_quantile": float(dry_quantile),
+                "n_sites": int(subset_df["site_key"].nunique()) if len(subset_df) > 0 else 0,
+                "n_observations": int(len(subset_df)),
+                "r2": metrics.get("r2", np.nan),
+                "rmse": metrics.get("rmse", np.nan),
+                "n_sites_with_finite_site_r2": int(len(finite_site_r2)),
+                "mean_site_r2": float(finite_site_r2.mean()) if len(finite_site_r2) > 0 else np.nan,
+                "median_site_r2": float(finite_site_r2.median()) if len(finite_site_r2) > 0 else np.nan,
+                "mean_site_rmse": float(finite_site_rmse.mean()) if len(finite_site_rmse) > 0 else np.nan,
+                "median_site_rmse": float(finite_site_rmse.median()) if len(finite_site_rmse) > 0 else np.nan,
+            }
+        )
+    return pd.DataFrame.from_records(summary_rows), site_metric_df
+
+
+def _build_dry_lfmc_performance_statistics(
+    runtime: Dict[str, object],
+    model_key: str,
+    min_obs: int,
+    dry_quantile: float,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    context = _load_eval_context(runtime, model_key)
+    overall_df, site_df = _dry_lfmc_performance_for_eval_df(
+        context["eval_df"],
+        model_key=model_key,
+        member_label="ensemble_mean",
+        min_obs=min_obs,
+        dry_quantile=dry_quantile,
+    )
+    member_rows = []
+    for member_idx, member_eval_df in enumerate(context["member_eval_dfs"], start=1):
+        member_summary_df, _ = _dry_lfmc_performance_for_eval_df(
+            member_eval_df,
+            model_key=model_key,
+            member_label=f"member_{member_idx}",
+            min_obs=min_obs,
+            dry_quantile=dry_quantile,
+        )
+        if len(member_summary_df) == 0:
+            continue
+        member_summary_df["member_index"] = int(member_idx)
+        member_rows.append(member_summary_df)
+    by_member_df = (
+        pd.concat(member_rows, ignore_index=True, sort=False)
+        if len(member_rows) > 0 else pd.DataFrame()
+    )
+    return overall_df, by_member_df, site_df
+
+
+def _load_member_site_error_subset_worker(member_dir: str, site_keys: Sequence[str], queue) -> None:
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            site_error = get_site_error(member_dir)
+        site_key_set = {str(site_key) for site_key in site_keys}
+        queue.put({site_key: site_error[site_key] for site_key in site_key_set if site_key in site_error})
+    except Exception:
+        traceback.print_exc()
+        raise
+
+
+def _load_ensemble_site_entry(
+    cfg: Dict[str, object],
+    model_key: str,
+    site_keys: Optional[Sequence[str]] = None,
+) -> Dict[str, object]:
     model_cfg = _model_cfg(cfg, model_key)
     member_dirs = _select_model_member_dirs(model_cfg)
     member_site_errors = {}
     member_site_error_list = []
+    site_key_list = None if site_keys is None else [str(site_key) for site_key in site_keys]
     for member_idx, member_dir in enumerate(member_dirs, start=1):
         print(
             f"Loading site errors for {model_cfg['display_name']} member "
             f"{member_idx}/{len(member_dirs)}: {os.path.basename(member_dir)}"
         )
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            this_site_error = get_site_error(member_dir)
+        if site_key_list is None:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                this_site_error = get_site_error(member_dir)
+        else:
+            ctx = mp.get_context("fork")
+            queue = ctx.Queue(maxsize=1)
+            proc = ctx.Process(
+                target=_load_member_site_error_subset_worker,
+                args=(member_dir, site_key_list, queue),
+            )
+            proc.start()
+            proc.join()
+            if proc.exitcode != 0:
+                raise RuntimeError(
+                    f"Failed to load selected site errors for {os.path.basename(member_dir)}; "
+                    f"child exit code {proc.exitcode}"
+                )
+            this_site_error = queue.get()
         member_site_errors[member_dir] = this_site_error
         member_site_error_list.append(this_site_error)
     site_error = aggregate_site_errors(member_site_error_list)
@@ -1966,6 +2624,8 @@ def _build_timeseries_panel(
     plot_vv: bool,
     plot_vh: bool,
     prefer_sar_observation_density: bool = False,
+    prediction_label: Optional[str] = None,
+    include_sar_r2_in_title: bool = False,
 ) -> Dict[str, object]:
     cfg = runtime["cfg"]
     anchor_site = model_entry["site_error"][site_key]
@@ -1999,6 +2659,7 @@ def _build_timeseries_panel(
 
     site_r2 = float(anchor_site.get("r2", np.nan))
     site_lat, site_lon = _parse_site_lat_lon(site_key)
+    extra_r2_parts = []
     panel = {
         "title": _timeseries_panel_title(
             cfg=cfg,
@@ -2006,12 +2667,13 @@ def _build_timeseries_panel(
             criterion_label=criterion_label,
             selected_years=selected_years,
             site_r2=site_r2,
+            extra_r2_parts=extra_r2_parts,
         ),
         "site_latitude": float(site_lat),
         "site_longitude": float(site_lon),
         "series": [
             {
-                "label": model_entry["name"],
+                "label": prediction_label or model_entry["name"],
                 "dates": infer_dates,
                 "values": infer_values,
                 "lower": infer_lower,
@@ -2064,6 +2726,12 @@ def _build_timeseries_panel(
             selected_years,
         )
         vv_dates = _canonicalize_dates_to_year_slots(vv_dates, selected_years)
+        vv_r2 = np.nan
+        if include_sar_r2_in_title and len(infer_out["vv_pred"]) > 0:
+            vv_infer_dates = _canonicalize_dates_to_year_slots(infer_out["dates"], selected_years)
+            vv_r2 = _date_matched_r2(vv_dates, vv_obs_vals, vv_infer_dates, infer_out["vv_pred"])
+        if include_sar_r2_in_title:
+            extra_r2_parts.append(f"VV R²: {vv_r2:.2f}" if np.isfinite(vv_r2) else "VV R²: nan")
         panel["right_series"].append(
             {
                 "label": "Observed VV",
@@ -2130,6 +2798,12 @@ def _build_timeseries_panel(
             selected_years,
         )
         vh_dates = _canonicalize_dates_to_year_slots(vh_dates, selected_years)
+        vh_r2 = np.nan
+        if include_sar_r2_in_title and len(infer_out["vh_pred"]) > 0:
+            vh_infer_dates = _canonicalize_dates_to_year_slots(infer_out["dates"], selected_years)
+            vh_r2 = _date_matched_r2(vh_dates, vh_obs_vals, vh_infer_dates, infer_out["vh_pred"])
+        if include_sar_r2_in_title:
+            extra_r2_parts.append(f"VH R²: {vh_r2:.2f}" if np.isfinite(vh_r2) else "VH R²: nan")
         panel["right_series"].append(
             {
                 "label": "Observed VH",
@@ -2192,6 +2866,15 @@ def _build_timeseries_panel(
     if len(panel["right_series"]) > 0:
         panel["right_ylabel"] = "VV / VH (dB)"
         panel["timeseries_mode"] = "banded_sar"
+    if include_sar_r2_in_title and len(extra_r2_parts) > 0:
+        panel["title"] = _timeseries_panel_title(
+            cfg=cfg,
+            site_key=site_key,
+            criterion_label=criterion_label,
+            selected_years=selected_years,
+            site_r2=site_r2,
+            extra_r2_parts=extra_r2_parts,
+        )
     return panel
 
 
@@ -2400,6 +3083,9 @@ def build_figure_2(runtime: Dict[str, object]) -> str:
 def build_figure_3(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
     fig_cfg = cfg["figures"]["figure_3"]
+    figure_fontsize = int(round(
+        int(cfg["plotting"].get("fontsize", 14)) * float(fig_cfg.get("text_scale", 1.0))
+    ))
     lfmc_df = _build_test_location_count_table(
         runtime,
         model_key=str(fig_cfg["lfmc_model_key"]),
@@ -2417,7 +3103,6 @@ def build_figure_3(runtime: Dict[str, object]) -> str:
         target_names=["vv", "vh"],
         representative_member_index=int(fig_cfg.get("representative_member_index", 0)),
         include_reference_member_flag=True,
-        lfmc_location_keys=lfmc_location_keys,
     )
     for grp, cnt in sar_df["marker_group"].value_counts().items():
         print(f"  SAR marker group '{grp}': {cnt} locations")
@@ -2429,8 +3114,9 @@ def build_figure_3(runtime: Dict[str, object]) -> str:
     plot_training_location_maps(
         panels=[
             {
-                "title": "a",
-                "title_fontweight": "bold",
+                "panel_label": "a",
+                "title": "LFMC sampling sites",
+                "title_fontweight": "normal",
                 "map_df": lfmc_df,
                 "marker_defs": {
                     "all_points": {"marker": "o", "label": "LFMC training locations"},
@@ -2439,17 +3125,24 @@ def build_figure_3(runtime: Dict[str, object]) -> str:
                 "cbar_label": "LFMC measurements at site",
                 "cbar_pad": 0.06,
                 "stats_total_label": "Total measurements",
-                "stats_median_label": "Median measurements/site",
+                "stats_mean_label": "Mean measurements/site",
+                "stats_x": 0.50,
+                "stats_y": -0.045,
+                "stats_ha": "center",
+                "stats_va": "top",
                 "marker_size": float(fig_cfg.get("marker_size", 34.0)),
             },
             {
-                "title": "b",
-                "title_fontweight": "bold",
+                "panel_label": "b",
+                "title": "Sentinel-1 sampling sites",
+                "title_fontweight": "normal",
                 "map_df": sar_df,
                 "marker_defs": {
-                    "lfmc_coincident": {"marker": "^", "label": "at LFMC sites"},
-                    "member_1_non_coincident": {"marker": "s", "label": "ensemble member 1 sites"},
-                    "other_members_non_coincident": {
+                    "member_1": {
+                        "marker": "o",
+                        "label": "ensemble member 1 sites",
+                    },
+                    "other_members": {
                         "marker": "o",
                         "label": "all other ensemble member sites",
                         "size": 10.0,
@@ -2463,12 +3156,18 @@ def build_figure_3(runtime: Dict[str, object]) -> str:
                 "cbar_label": "SAR observations at site",
                 "cbar_pad": 0.06,
                 "stats_total_label": "Total observations",
-                "stats_median_label": "Median observations/site",
+                "stats_mean_label": "Mean observations/site",
+                "stats_x": 0.50,
+                "stats_y": -0.045,
+                "stats_ha": "center",
+                "stats_va": "top",
                 "marker_size": float(fig_cfg.get("marker_size", 34.0)),
+                "legend_loc": "upper center",
+                "legend_bbox_to_anchor": (0.50, -0.31),
             },
         ],
         save_path=save_path,
-        fontsize=int(cfg["plotting"].get("fontsize", 14)),
+        fontsize=figure_fontsize,
         figsize=fig_cfg["figsize"],
         dpi=int(cfg["plotting"].get("dpi", 350)),
         state_lines_only=True,
@@ -2482,19 +3181,106 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
     site_min_obs = int(cfg["variability"]["site_min_obs"])
     monthly_min_obs = int(cfg["variability"]["monthly_min_obs"])
     monthly_min_years = int(cfg["variability"]["monthly_min_years"])
-    context = _load_eval_context(runtime, str(fig_cfg["model_key"]))
-    lfmc_df = context["eval_df"][context["eval_df"]["target"] == "lfmc"].reset_index(drop=True)
+    lfmc_df = _load_ensemble_eval_df_for_targets_streaming(
+        runtime,
+        str(fig_cfg["model_key"]),
+        target_names=["lfmc"],
+    ).reset_index(drop=True)
+    lfmc_y2y_df = build_lfmc_y2y_df(lfmc_df)
     _, site_summary_df, anomaly_df = _build_filtered_site_space_time_tables(
         lfmc_df,
         min_obs=site_min_obs,
     )
     _, month_anom_df, valid_month_groups = _build_filtered_site_month_anomaly_tables(
-        lfmc_df=build_lfmc_y2y_df(context["eval_df"]),
+        lfmc_df=lfmc_y2y_df,
         min_obs=monthly_min_obs,
         min_years=monthly_min_years,
     )
     if len(month_anom_df) == 0 or len(valid_month_groups) == 0:
         raise ValueError("No source-centered monthly anomaly rows available for Figure 4")
+    def mean_bias(obs_values, pred_values) -> float:
+        obs_arr = np.asarray(obs_values, dtype=float)
+        pred_arr = np.asarray(pred_values, dtype=float)
+        mask = np.isfinite(obs_arr) & np.isfinite(pred_arr)
+        if not np.any(mask):
+            return float("nan")
+        return float(np.mean(pred_arr[mask] - obs_arr[mask]))
+
+    def dry_diagnostics(obs_values, pred_values, worst_error_fraction: float) -> Dict[str, float]:
+        obs_arr = np.asarray(obs_values, dtype=float)
+        pred_arr = np.asarray(pred_values, dtype=float)
+        mask = np.isfinite(obs_arr) & np.isfinite(pred_arr)
+        obs_arr = obs_arr[mask]
+        pred_arr = pred_arr[mask]
+        if obs_arr.size == 0:
+            return {
+                "n_observations": 0,
+                "pearson_r": np.nan,
+                "full_r2": np.nan,
+                "bias": np.nan,
+                "r2_bias_removed": np.nan,
+                "worst_error_fraction": float(worst_error_fraction),
+                "worst_error_n_removed": 0,
+                "worst_error_sse_share": np.nan,
+                "r2_without_worst_error_fraction": np.nan,
+            }
+        residual = pred_arr - obs_arr
+        bias = float(np.mean(residual))
+        full_metrics = compute_basic_metrics(obs_arr, pred_arr)
+        bias_removed_metrics = compute_basic_metrics(obs_arr, pred_arr - bias)
+        if obs_arr.size > 1 and np.std(obs_arr) > 0.0 and np.std(pred_arr) > 0.0:
+            pearson_r = float(np.corrcoef(obs_arr, pred_arr)[0, 1])
+        else:
+            pearson_r = np.nan
+        squared_error = residual ** 2
+        worst_n = max(1, int(round(obs_arr.size * float(worst_error_fraction))))
+        worst_n = min(worst_n, int(obs_arr.size))
+        worst_order = np.argsort(squared_error)[::-1]
+        worst_idx = worst_order[:worst_n]
+        keep_mask = np.ones(obs_arr.size, dtype=bool)
+        keep_mask[worst_idx] = False
+        if np.any(keep_mask):
+            trimmed_metrics = compute_basic_metrics(obs_arr[keep_mask], pred_arr[keep_mask])
+        else:
+            trimmed_metrics = {"r2": np.nan}
+        total_sse = float(np.sum(squared_error))
+        if total_sse > 0.0:
+            worst_sse_share = float(np.sum(squared_error[worst_idx]) / total_sse)
+        else:
+            worst_sse_share = np.nan
+        return {
+            "n_observations": int(obs_arr.size),
+            "pearson_r": pearson_r,
+            "full_r2": full_metrics.get("r2", np.nan),
+            "bias": bias,
+            "r2_bias_removed": bias_removed_metrics.get("r2", np.nan),
+            "worst_error_fraction": float(worst_error_fraction),
+            "worst_error_n_removed": int(worst_n),
+            "worst_error_sse_share": worst_sse_share,
+            "r2_without_worst_error_fraction": trimmed_metrics.get("r2", np.nan),
+        }
+
+    dry_site_min_obs = int(fig_cfg.get("dry_site_min_obs", 10))
+    dry_quantile = float(fig_cfg.get("dry_site_quantile", 0.20))
+    dry_worst_error_fraction = float(fig_cfg.get("dry_worst_error_fraction", 0.10))
+    dry_eligible_df = lfmc_y2y_df.copy()
+    dry_eligible_df["site_key"] = dry_eligible_df["site_key"].astype(str)
+    site_counts = dry_eligible_df.groupby("site_key", dropna=False).size()
+    eligible_site_keys = set(site_counts[site_counts >= dry_site_min_obs].index.astype(str))
+    dry_eligible_df = dry_eligible_df[dry_eligible_df["site_key"].isin(eligible_site_keys)].copy()
+    dry_chunks = []
+    for site_key, site_df in dry_eligible_df.groupby("site_key", dropna=False):
+        site_df = site_df.sort_values(["obs", "date"], ascending=[True, True], kind="mergesort")
+        dry_n = max(1, int(np.ceil(dry_quantile * len(site_df))))
+        dry_site_df = site_df.iloc[:dry_n].copy()
+        dry_site_df["dry_rank_within_site"] = np.arange(1, len(dry_site_df) + 1)
+        dry_site_df["dry_n_within_site"] = dry_n
+        dry_site_df["site_n_observations"] = len(site_df)
+        dry_site_df["dry_lfmc_threshold"] = float(dry_site_df["obs"].max())
+        dry_chunks.append(dry_site_df)
+    if len(dry_chunks) == 0:
+        raise ValueError("No LFMC rows were available for the Figure 4 driest-observation panel")
+    dry_lfmc_df = pd.concat(dry_chunks, ignore_index=True)
     overall_metrics = compute_basic_metrics(lfmc_df["obs"].values, lfmc_df["pred"].values)
     site_mean_metrics = compute_basic_metrics(
         site_summary_df["obs_mean"].values,
@@ -2508,13 +3294,23 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
         month_anom_df["obs_dev"].values,
         month_anom_df["pred_dev"].values,
     )
-    overall_std = _overall_metric_std(context)
-    space_std, time_std = _space_time_metric_stds(context, min_obs=site_min_obs)
-    month_anom_std = _monthly_source_centered_metric_std(
-        context,
-        min_obs=monthly_min_obs,
-        min_years=monthly_min_years,
+    dry_lfmc_metrics = compute_basic_metrics(
+        dry_lfmc_df["obs"].values,
+        dry_lfmc_df["pred"].values,
     )
+    dry_diagnostic_row = {
+        "model_key": str(fig_cfg["model_key"]),
+        "dry_site_min_obs": int(dry_site_min_obs),
+        "dry_site_quantile": float(dry_quantile),
+    }
+    dry_diagnostic_row.update(
+        dry_diagnostics(
+            dry_lfmc_df["obs"].values,
+            dry_lfmc_df["pred"].values,
+            worst_error_fraction=dry_worst_error_fraction,
+        )
+    )
+    print("Prepared Figure 4 metrics and bias annotations")
     panels = [
         {
             "title": "Overall",
@@ -2528,8 +3324,9 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
                 "n": overall_metrics["n"],
                 "rmse": overall_metrics["rmse"],
                 "r2": overall_metrics["r2"],
-                "rmse_std": overall_std["rmse"],
-                "r2_std": overall_std["r2"],
+                "bias": mean_bias(lfmc_df["obs"].values, lfmc_df["pred"].values),
+                "rmse_std": np.nan,
+                "r2_std": np.nan,
             },
             "cbar_label": "Count",
             "gridsize": int(fig_cfg.get("hexbin_gridsize", 60)),
@@ -2546,8 +3343,9 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
                 "n": anomaly_metrics["n"],
                 "rmse": anomaly_metrics["rmse"],
                 "r2": anomaly_metrics["r2"],
-                "rmse_std": time_std["rmse"],
-                "r2_std": time_std["r2"],
+                "bias": mean_bias(anomaly_df["obs_anom"].values, anomaly_df["pred_anom"].values),
+                "rmse_std": np.nan,
+                "r2_std": np.nan,
             },
             "cbar_label": "Count",
             "gridsize": int(fig_cfg.get("hexbin_gridsize", 60)),
@@ -2564,8 +3362,9 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
                 "n": site_mean_metrics["n"],
                 "rmse": site_mean_metrics["rmse"],
                 "r2": site_mean_metrics["r2"],
-                "rmse_std": space_std["rmse"],
-                "r2_std": space_std["r2"],
+                "bias": mean_bias(site_summary_df["obs_mean"].values, site_summary_df["pred_mean"].values),
+                "rmse_std": np.nan,
+                "r2_std": np.nan,
             },
             "color_array": site_summary_df["n_obs"].values,
             "cbar_label": "Observations at site",
@@ -2574,19 +3373,20 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
             "cbar_extend": "max",
         },
         {
-            "title": "Deviation from monthly average",
+            "title": "Deviation from\nmonthly average",
             "panel_label": "d",
             "kind": "hexbin",
             "x": month_anom_df["obs_dev"].values,
             "y": month_anom_df["pred_dev"].values,
             "xlabel": "Observed deviation from monthly mean (%)",
-            "ylabel": "Predicted deviation from monthly mean (%)",
+            "ylabel": "Predicted deviation\nfrom monthly mean (%)",
             "metrics": {
                 "n": month_anom_metrics["n"],
                 "rmse": month_anom_metrics["rmse"],
                 "r2": month_anom_metrics["r2"],
-                "rmse_std": month_anom_std["rmse"],
-                "r2_std": month_anom_std["r2"],
+                "bias": mean_bias(month_anom_df["obs_dev"].values, month_anom_df["pred_dev"].values),
+                "rmse_std": np.nan,
+                "r2_std": np.nan,
             },
             "cbar_label": "Count",
             "gridsize": int(fig_cfg.get("hexbin_gridsize", 60)),
@@ -2595,9 +3395,30 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
             "xlim": (-100, 100),
             "ylim": (-100, 100),
         },
+        {
+            "title": f"Driest {dry_quantile * 100:.0f}%\nwithin site",
+            "panel_label": "e",
+            "kind": "hexbin",
+            "x": dry_lfmc_df["obs"].values,
+            "y": dry_lfmc_df["pred"].values,
+            "xlabel": "Observed LFMC (%)",
+            "ylabel": "Predicted LFMC (%)",
+            "metrics": {
+                "n": dry_lfmc_metrics["n"],
+                "rmse": dry_lfmc_metrics["rmse"],
+                "r2": dry_lfmc_metrics["r2"],
+                "bias": mean_bias(dry_lfmc_df["obs"].values, dry_lfmc_df["pred"].values),
+                "rmse_std": np.nan,
+                "r2_std": np.nan,
+            },
+            "cbar_label": "Count",
+            "gridsize": int(fig_cfg.get("hexbin_gridsize", 60)),
+        },
     ]
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
     table_path = _table_output_path(runtime, "figure_04_site_tables")
+    dry_table_path = _table_output_path(runtime, "figure_04_driest_lfmc_points")
+    dry_diagnostics_path = _table_output_path(runtime, "figure_04_driest_lfmc_diagnostics")
     combined_table = site_summary_df.merge(
         anomaly_df.groupby(["latitude", "longitude"], as_index=False).agg(
             n_anomaly_rows=("obs_anom", "size")
@@ -2615,12 +3436,25 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
         how="left",
     )
     combined_table.to_csv(table_path, index=False)
+    dry_lfmc_df.to_csv(dry_table_path, index=False)
+    pd.DataFrame.from_records([dry_diagnostic_row]).to_csv(dry_diagnostics_path, index=False)
+    print(f"Wrote Figure 4 site table: {table_path}")
+    print(f"Wrote Figure 4 driest LFMC point table: {dry_table_path}")
+    print(f"Wrote Figure 4 driest LFMC diagnostics table: {dry_diagnostics_path}")
+    print(f"Plotting Figure 4 to {save_path}")
     plot_scatter_triptych(
         panels=panels,
         save_path=save_path,
         fontsize=int(cfg["plotting"].get("fontsize", 14)),
         figsize=fig_cfg["figsize"],
         dpi=int(cfg["plotting"].get("dpi", 350)),
+        title_fontsize=int(fig_cfg.get("title_fontsize", 24)),
+        axis_label_fontsize=int(fig_cfg.get("axis_label_fontsize", 28)),
+        tick_label_fontsize=int(fig_cfg.get("tick_label_fontsize", 26)),
+        colorbar_label_fontsize=int(fig_cfg.get("colorbar_label_fontsize", 28)),
+        colorbar_tick_fontsize=int(fig_cfg.get("colorbar_tick_fontsize", 26)),
+        stats_fontsize=int(fig_cfg.get("stats_fontsize", 20)),
+        panel_label_fontsize=int(fig_cfg.get("panel_label_fontsize", 30)),
     )
     return save_path
 
@@ -2644,6 +3478,7 @@ def build_figure_5(runtime: Dict[str, object]) -> str:
                 years_to_plot=int(fig_cfg.get("years_to_plot", 3)),
                 plot_vv=bool(fig_cfg.get("plot_vv", False)),
                 plot_vh=bool(fig_cfg.get("plot_vh", False)),
+                prediction_label=fig_cfg.get("prediction_legend_label"),
             )
         )
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
@@ -2665,6 +3500,11 @@ def build_figure_5(runtime: Dict[str, object]) -> str:
         fontsize=int(cfg["plotting"].get("fontsize", 14)),
         figsize=fig_cfg["figsize"],
         dpi=int(cfg["plotting"].get("dpi", 350)),
+        locator_inset_bounds=fig_cfg.get("locator_inset_bounds"),
+        locator_marker_size=float(fig_cfg.get("locator_marker_size", 24.0)),
+        uncertainty_before_observations=bool(fig_cfg.get("uncertainty_before_observations", False)),
+        legend_fontsize=fig_cfg.get("legend_fontsize"),
+        legend_ncol=fig_cfg.get("legend_ncol"),
     )
     return save_path
 
@@ -2735,6 +3575,25 @@ def build_figure_6(runtime: Dict[str, object]) -> str:
             fig_cfg["metric_colors"][3],
         ],
         legend_below=True,
+        group_gap_scale=float(fig_cfg.get("group_gap_scale", 1.0)),
+        count_label_rotation=float(fig_cfg.get("count_label_rotation", 0.0)),
+        count_values_only=bool(fig_cfg.get("count_values_only", False)),
+        n_label=str(fig_cfg["n_label"]) if fig_cfg.get("n_label") is not None else None,
+        count_label_y=float(fig_cfg.get("count_label_y", -0.035)),
+        x_tick_pad=float(fig_cfg.get("x_tick_pad", 36.0)),
+        y_tick_fontsize=fig_cfg.get("y_tick_fontsize"),
+        category_label_fontsize=fig_cfg.get("category_label_fontsize"),
+        annotation_fontsize=fig_cfg.get("annotation_fontsize"),
+        value_label_fontsize=fig_cfg.get("value_label_fontsize"),
+        count_label_fontsize=fig_cfg.get("count_label_fontsize"),
+        n_label_fontsize=fig_cfg.get("n_label_fontsize"),
+        y_label_fontsize=fig_cfg.get("y_label_fontsize"),
+        legend_fontsize=fig_cfg.get("legend_fontsize"),
+        legend_ncol=fig_cfg.get("legend_ncol"),
+        legend_bbox_y=float(fig_cfg.get("legend_bbox_y", 0.015)),
+        legend_bottom=float(fig_cfg.get("legend_bottom", 0.31)),
+        value_label_rotation=float(fig_cfg.get("value_label_rotation", 0.0)),
+        wrap_landcover_labels=bool(fig_cfg.get("wrap_landcover_labels", False)),
     )
     return save_path
 
@@ -2799,7 +3658,7 @@ def build_figure_7(runtime: Dict[str, object]) -> str:
         overall_counts.append(overall_count_row)
     legend_labels = list(fig_cfg.get("legend_labels", model_labels))
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
-    table_path = _table_output_path(runtime, "figure_07_ablation_overall")
+    table_path = _table_output_path(runtime, "figure_08_ablation_overall")
     pd.DataFrame.from_records(merged_rows).to_csv(table_path, index=False)
     plot_landcover_comparison_panels(
         categories=categories,
@@ -2807,7 +3666,7 @@ def build_figure_7(runtime: Dict[str, object]) -> str:
         colors=colors,
         panels=[
             {
-                "title": "Overall",
+                "title": str(fig_cfg.get("panel_title", "")),
                 "ylabel": "R²",
                 "values": np.asarray(overall_values, dtype=float).T,
                 "errors": np.asarray(overall_errors, dtype=float).T,
@@ -2818,6 +3677,22 @@ def build_figure_7(runtime: Dict[str, object]) -> str:
         fontsize=int(cfg["plotting"].get("fontsize", 14)),
         figsize=fig_cfg["figsize"],
         dpi=int(cfg["plotting"].get("dpi", 350)),
+        group_gap_scale=float(fig_cfg.get("group_gap_scale", 1.0)),
+        count_label_y=float(fig_cfg.get("count_label_y", -0.06)),
+        count_values_only=bool(fig_cfg.get("count_values_only", False)),
+        n_label=str(fig_cfg["n_label"]) if fig_cfg.get("n_label") is not None else None,
+        x_tick_pad=float(fig_cfg.get("x_tick_pad", 28.0)),
+        value_label_fontsize=fig_cfg.get("value_label_fontsize"),
+        count_label_fontsize=fig_cfg.get("count_label_fontsize"),
+        n_label_fontsize=fig_cfg.get("n_label_fontsize"),
+        y_tick_fontsize=fig_cfg.get("y_tick_fontsize"),
+        category_label_fontsize=fig_cfg.get("category_label_fontsize"),
+        y_label_fontsize=fig_cfg.get("y_label_fontsize"),
+        legend_fontsize=fig_cfg.get("legend_fontsize"),
+        legend_bbox_y=float(fig_cfg.get("legend_bbox_y", 0.005)),
+        legend_bottom=float(fig_cfg.get("legend_bottom", 0.27)),
+        value_label_rotation=float(fig_cfg.get("value_label_rotation", 0.0)),
+        count_label_rotation=float(fig_cfg.get("count_label_rotation", 0.0)),
     )
     return save_path
 
@@ -2828,8 +3703,8 @@ def build_figure_8(runtime: Dict[str, object]) -> str:
     summary_df, member_df = _build_training_sample_landcover_tables(runtime, fig_cfg)
     if len(summary_df) == 0:
         raise ValueError("No training-sample landcover rows were available for Figure 8")
-    summary_table_path = _table_output_path(runtime, "figure_08_training_sample_landcover_counts")
-    member_table_path = _table_output_path(runtime, "figure_08_training_sample_landcover_member_counts")
+    summary_table_path = _table_output_path(runtime, "supplementary_figure_02_training_sample_landcover_counts")
+    member_table_path = _table_output_path(runtime, "supplementary_figure_02_training_sample_landcover_member_counts")
     summary_df.to_csv(summary_table_path, index=False)
     member_df.to_csv(member_table_path, index=False)
     categories = [
@@ -2881,6 +3756,17 @@ def build_figure_8(runtime: Dict[str, object]) -> str:
         text_scale=float(fig_cfg.get("text_scale", 1.0)),
         x_label_rotation=float(fig_cfg.get("x_label_rotation", 25.0)),
         counts_below_axis=bool(fig_cfg.get("counts_below_axis", False)),
+        count_label_y=float(fig_cfg.get("count_label_y", -0.12)),
+        value_label_fontsize=fig_cfg.get("value_label_fontsize"),
+        count_label_fontsize=fig_cfg.get("count_label_fontsize"),
+        value_label_rotation=float(fig_cfg.get("value_label_rotation", 0.0)),
+        y_tick_fontsize=fig_cfg.get("y_tick_fontsize"),
+        category_label_fontsize=fig_cfg.get("category_label_fontsize"),
+        y_label_fontsize=fig_cfg.get("y_label_fontsize"),
+        legend_fontsize=fig_cfg.get("legend_fontsize"),
+        legend_bbox_y=float(fig_cfg.get("legend_bbox_y", 0.02)),
+        legend_bottom=fig_cfg.get("legend_bottom"),
+        x_tick_pad=fig_cfg.get("x_tick_pad"),
     )
     return save_path
 
@@ -2889,48 +3775,78 @@ def build_supplementary_figure_1(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
     fig_cfg = cfg["figures"]["supplementary_figure_1"]
     model_key = str(fig_cfg["model_key"])
-    model_entry = _load_ensemble_site_entry(cfg, model_key)
-    eval_context = _load_eval_context(runtime, model_key)
-    print(
-        "Supplementary Figure 1 SAR test R2 across members "
-        "(each member uses all held-out test rows across folds):"
-    )
-    for target_name, display_name in [("vv", "VV"), ("vh", "VH")]:
-        member_r2_vals = []
-        member_n_vals = []
-        for member_eval_df in eval_context["member_eval_dfs"]:
-            target_df = member_eval_df[
-                member_eval_df["target"].astype(str).str.strip().str.lower() == target_name
-            ].reset_index(drop=True)
-            member_metrics = compute_basic_metrics(
-                target_df["obs"].values,
-                target_df["pred"].values,
-            )
-            member_r2_vals.append(member_metrics.get("r2", np.nan))
-            member_n_vals.append(member_metrics.get("n", 0))
-        finite_r2 = np.asarray(member_r2_vals, dtype=float)
-        finite_r2 = finite_r2[np.isfinite(finite_r2)]
-        mean_r2 = float(finite_r2.mean()) if finite_r2.size > 0 else np.nan
-        std_r2 = _metric_std(member_r2_vals)
-        total_n = int(np.sum(np.asarray(member_n_vals, dtype=int)))
-        if np.isfinite(mean_r2):
-            r2_summary = f"{mean_r2:.2f}"
-            if np.isfinite(std_r2):
-                r2_summary = f"{r2_summary} +/- {std_r2:.2f}"
-        else:
-            r2_summary = "nan"
+    table_path = _table_output_path(runtime, "supplementary_figure_01_sites")
+    selected = None
+    if bool(fig_cfg.get("reuse_existing_sites_table", False)) and os.path.exists(table_path):
+        site_table = pd.read_csv(table_path)
+        required_columns = {"criterion", "site_key"}
+        if required_columns.issubset(site_table.columns):
+            if "rank" in site_table.columns:
+                site_table = site_table.sort_values(["criterion", "rank"])
+            selected = {
+                str(criterion): group["site_key"].astype(str).tolist()
+                for criterion, group in site_table.groupby("criterion", sort=False)
+            }
+            print(f"Reusing Supplementary Figure 1 site table: {table_path}")
+    selected_site_keys = None
+    if selected is not None:
+        selected_site_keys = [
+            site_key
+            for criterion in fig_cfg["criteria_order"]
+            for site_key in selected.get(criterion, [])
+        ]
+    model_entry = _load_ensemble_site_entry(cfg, model_key, site_keys=selected_site_keys)
+    if selected is None:
         print(
-            f"  {display_name}: R2 = {r2_summary} "
-            f"across {finite_r2.size}/{len(member_r2_vals)} members; "
-            f"total held-out rows across members = {total_n}"
+            "Supplementary Figure 1 SAR test R2 across members "
+            "(each member uses all held-out test rows across folds):"
         )
-    selected = _select_timeseries_sites(
-        runtime,
-        model_entry,
-        fig_cfg,
-        require_sar_overlap_same_year=True,
-        prefer_sar_observation_density=True,
-    )
+        sar_member_r2_vals = {"vv": [], "vh": []}
+        sar_member_n_vals = {"vv": [], "vh": []}
+        for member_idx, member_dir in enumerate(model_entry["member_dirs"], start=1):
+            print(
+                f"Loading SAR test outputs for Supplementary Figure 1 member "
+                f"{member_idx}/{len(model_entry['member_dirs'])}: {os.path.basename(member_dir)}"
+            )
+            member_eval_df = _load_fold_predictions_for_targets(member_dir, ["vv", "vh"])
+            for target_name in ["vv", "vh"]:
+                target_df = member_eval_df[
+                    member_eval_df["target"].astype(str).str.strip().str.lower() == target_name
+                ].reset_index(drop=True)
+                member_metrics = compute_basic_metrics(
+                    target_df["obs"].values,
+                    target_df["pred"].values,
+                )
+                sar_member_r2_vals[target_name].append(member_metrics.get("r2", np.nan))
+                sar_member_n_vals[target_name].append(member_metrics.get("n", 0))
+            del member_eval_df
+            gc.collect()
+        for target_name, display_name in [("vv", "VV"), ("vh", "VH")]:
+            member_r2_vals = sar_member_r2_vals[target_name]
+            member_n_vals = sar_member_n_vals[target_name]
+            finite_r2 = np.asarray(member_r2_vals, dtype=float)
+            finite_r2 = finite_r2[np.isfinite(finite_r2)]
+            mean_r2 = float(finite_r2.mean()) if finite_r2.size > 0 else np.nan
+            std_r2 = _metric_std(member_r2_vals)
+            total_n = int(np.sum(np.asarray(member_n_vals, dtype=int)))
+            if np.isfinite(mean_r2):
+                r2_summary = f"{mean_r2:.2f}"
+                if np.isfinite(std_r2):
+                    r2_summary = f"{r2_summary} +/- {std_r2:.2f}"
+            else:
+                r2_summary = "nan"
+            print(
+                f"  {display_name}: R2 = {r2_summary} "
+                f"across {finite_r2.size}/{len(member_r2_vals)} members; "
+                f"total held-out rows across members = {total_n}"
+            )
+        selected = _select_timeseries_sites(
+            runtime,
+            model_entry,
+            fig_cfg,
+            require_sar_overlap_same_year=True,
+            prefer_sar_observation_density=True,
+        )
     panels = []
     for criterion in fig_cfg["criteria_order"]:
         site_list = selected.get(criterion, [])
@@ -2946,10 +3862,11 @@ def build_supplementary_figure_1(runtime: Dict[str, object]) -> str:
                 plot_vv=bool(fig_cfg.get("plot_vv", False)),
                 plot_vh=bool(fig_cfg.get("plot_vh", False)),
                 prefer_sar_observation_density=True,
+                prediction_label=fig_cfg.get("prediction_legend_label"),
+                include_sar_r2_in_title=bool(fig_cfg.get("include_sar_r2_in_title", False)),
             )
         )
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
-    table_path = _table_output_path(runtime, "supplementary_figure_01_sites")
     site_rows = []
     for criterion, site_list in selected.items():
         for rank_idx, site_key in enumerate(site_list, start=1):
@@ -2967,6 +3884,11 @@ def build_supplementary_figure_1(runtime: Dict[str, object]) -> str:
         fontsize=int(cfg["plotting"].get("fontsize", 14)),
         figsize=fig_cfg["figsize"],
         dpi=int(cfg["plotting"].get("dpi", 350)),
+        locator_inset_bounds=fig_cfg.get("locator_inset_bounds"),
+        locator_marker_size=float(fig_cfg.get("locator_marker_size", 24.0)),
+        uncertainty_before_observations=bool(fig_cfg.get("uncertainty_before_observations", False)),
+        legend_fontsize=fig_cfg.get("legend_fontsize"),
+        legend_ncol=fig_cfg.get("legend_ncol"),
     )
     return save_path
 
@@ -3013,6 +3935,22 @@ def build_supplementary_figure_3(runtime: Dict[str, object]) -> str:
         fontsize=int(cfg["plotting"].get("fontsize", 14)),
         figsize=fig_cfg["figsize"],
         dpi=int(cfg["plotting"].get("dpi", 350)),
+        group_gap_scale=float(fig_cfg.get("group_gap_scale", 1.0)),
+        count_label_y=float(fig_cfg.get("count_label_y", -0.06)),
+        count_values_only=bool(fig_cfg.get("count_values_only", False)),
+        n_label=str(fig_cfg["n_label"]) if fig_cfg.get("n_label") is not None else None,
+        x_tick_pad=float(fig_cfg.get("x_tick_pad", 28.0)),
+        value_label_fontsize=fig_cfg.get("value_label_fontsize"),
+        count_label_fontsize=fig_cfg.get("count_label_fontsize"),
+        n_label_fontsize=fig_cfg.get("n_label_fontsize"),
+        y_tick_fontsize=fig_cfg.get("y_tick_fontsize"),
+        category_label_fontsize=fig_cfg.get("category_label_fontsize"),
+        y_label_fontsize=fig_cfg.get("y_label_fontsize"),
+        legend_fontsize=fig_cfg.get("legend_fontsize"),
+        legend_bbox_y=float(fig_cfg.get("legend_bbox_y", 0.005)),
+        legend_bottom=float(fig_cfg.get("legend_bottom", 0.27)),
+        value_label_rotation=float(fig_cfg.get("value_label_rotation", 0.0)),
+        count_label_rotation=float(fig_cfg.get("count_label_rotation", 0.0)),
     )
     return save_path
 
@@ -3121,7 +4059,7 @@ def build_supplementary_figure_4(runtime: Dict[str, object]) -> str:
         mean_counts.append(mean_count_row)
         monthly_counts.append(monthly_count_row)
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
-    table_path = _table_output_path(runtime, "supplementary_figure_04_ablation_all_metrics")
+    table_path = _table_output_path(runtime, "supplementary_figure_03_ablation_all_metrics")
     pd.DataFrame.from_records(merged_rows).to_csv(table_path, index=False)
     legend_labels = list(fig_cfg.get("legend_labels", model_labels))
     plot_landcover_comparison_panels(
@@ -3181,12 +4119,248 @@ def build_supplementary_figure_5(runtime: Dict[str, object]) -> str:
     return save_path
 
 
+def _member_distribution_table(
+    df: pd.DataFrame,
+    metric_cols: Sequence[str],
+    group_cols: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    group_cols = list(group_cols or [])
+    rows = []
+    if len(df) == 0:
+        return pd.DataFrame(columns=group_cols + ["metric", "mean", "sd", "min", "max"])
+    if len(group_cols) == 0:
+        grouped = [((), df)]
+    else:
+        grouped = df.groupby(group_cols, dropna=False)
+    for group_key, group_df in grouped:
+        if len(group_cols) == 0:
+            group_values = {}
+        else:
+            if not isinstance(group_key, tuple):
+                group_key = (group_key,)
+            group_values = {
+                group_col: group_value
+                for group_col, group_value in zip(group_cols, group_key)
+            }
+        for metric_col in metric_cols:
+            if metric_col not in group_df.columns:
+                continue
+            finite = _finite_series(group_df[metric_col])
+            row = dict(group_values)
+            row.update(
+                {
+                    "metric": metric_col,
+                    "mean": float(finite.mean()) if len(finite) > 0 else np.nan,
+                    "sd": float(finite.std(ddof=1)) if len(finite) > 1 else np.nan,
+                    "min": float(finite.min()) if len(finite) > 0 else np.nan,
+                    "max": float(finite.max()) if len(finite) > 0 else np.nan,
+                }
+            )
+            rows.append(row)
+    return pd.DataFrame.from_records(rows)
+
+
+def build_result_statistics(runtime: Dict[str, object]) -> str:
+    cfg = runtime["cfg"]
+    stats_cfg = cfg["figures"]["result_statistics"]
+    lfmc_model_key = str(stats_cfg.get("lfmc_model_key", "single_task_16"))
+    sar_model_key = str(stats_cfg.get("sar_model_key", "multitask_16"))
+    performance_model_key = str(stats_cfg.get("performance_model_key", "multitask_16"))
+    dry_site_min_obs = int(stats_cfg.get("dry_site_min_obs", 10))
+    dry_site_quantile = float(stats_cfg.get("dry_site_quantile", 0.20))
+
+    print("  Building reproducible LFMC sampling statistics...")
+    lfmc_by_member_df, lfmc_overall_df, lfmc_site_detail_df = _build_lfmc_sampling_statistics(
+        runtime,
+        model_key=lfmc_model_key,
+    )
+    lfmc_location_keys = {
+        (float(row.latitude), float(row.longitude))
+        for row in lfmc_site_detail_df[["latitude", "longitude"]].itertuples(index=False)
+    }
+
+    print("  Building reproducible Sentinel-1 sampling statistics...")
+    (
+        s1_by_member_df,
+        s1_overall_df,
+        s1_coincident_by_member_df,
+        s1_coincident_overall_df,
+    ) = _build_s1_sampling_statistics(
+        runtime,
+        model_key=sar_model_key,
+        lfmc_location_keys=lfmc_location_keys,
+    )
+
+    print("  Building reproducible dry-LFMC performance statistics...")
+    (
+        dry_performance_df,
+        dry_performance_by_member_df,
+        dry_performance_by_site_df,
+    ) = _build_dry_lfmc_performance_statistics(
+        runtime,
+        model_key=performance_model_key,
+        min_obs=dry_site_min_obs,
+        dry_quantile=dry_site_quantile,
+    )
+    lfmc_member_distribution_df = _member_distribution_table(
+        lfmc_by_member_df,
+        metric_cols=[
+            "n_sites",
+            "single_species_sites",
+            "multi_species_sites",
+            "total_lfmc_observations",
+            "total_lfmc_measurement_days",
+            "mean_observations_per_site",
+            "sd_observations_per_site",
+            "median_observations_per_site",
+            "min_observations_per_site",
+            "max_observations_per_site",
+            "mean_measurement_days_per_site",
+            "sd_measurement_days_per_site",
+            "median_measurement_days_per_site",
+            "min_measurement_days_per_site",
+            "max_measurement_days_per_site",
+        ],
+    )
+    s1_member_distribution_df = _member_distribution_table(
+        s1_by_member_df,
+        metric_cols=[
+            "n_locations",
+            "total_s1_observations",
+            "mean_s1_observations_per_location",
+            "sd_s1_observations_per_location",
+            "median_s1_observations_per_location",
+            "min_s1_observations_per_location",
+            "max_s1_observations_per_location",
+            "mean_s1_observation_days_per_location",
+            "sd_s1_observation_days_per_location",
+            "median_s1_observation_days_per_location",
+            "min_s1_observation_days_per_location",
+            "max_s1_observation_days_per_location",
+        ],
+    )
+    s1_coincident_member_distribution_df = _member_distribution_table(
+        s1_coincident_by_member_df,
+        metric_cols=[
+            "s1_locations",
+            "coincident_with_lfmc",
+            "not_coincident_with_lfmc",
+            "pct_coincident_with_lfmc",
+        ],
+    )
+    dry_performance_member_distribution_df = _member_distribution_table(
+        dry_performance_by_member_df,
+        metric_cols=[
+            "n_sites",
+            "n_observations",
+            "r2",
+            "rmse",
+            "n_sites_with_finite_site_r2",
+            "mean_site_r2",
+            "median_site_r2",
+            "mean_site_rmse",
+            "median_site_rmse",
+        ],
+        group_cols=["subset"],
+    )
+
+    outputs = [
+        (
+            "result_statistics_lfmc_site_summary_by_member.csv",
+            lfmc_by_member_df,
+            "LFMC sampling-site species and observation summaries for each ensemble member.",
+        ),
+        (
+            "result_statistics_lfmc_site_summary_member_distribution.csv",
+            lfmc_member_distribution_df,
+            "Mean, standard deviation, minimum, and maximum of LFMC sampling summaries across ensemble members.",
+        ),
+        (
+            "result_statistics_lfmc_site_summary_overall.csv",
+            lfmc_overall_df,
+            "LFMC sampling-site species and observation summaries after de-duplicating across members.",
+        ),
+        (
+            "result_statistics_lfmc_site_details_overall.csv",
+            lfmc_site_detail_df,
+            "Per-site LFMC species counts, observation counts, and measurement-day counts.",
+        ),
+        (
+            "result_statistics_s1_site_summary_by_member.csv",
+            s1_by_member_df,
+            "Sentinel-1 observation and observation-day summaries for each ensemble member.",
+        ),
+        (
+            "result_statistics_s1_site_summary_member_distribution.csv",
+            s1_member_distribution_df,
+            "Mean, standard deviation, minimum, and maximum of Sentinel-1 summaries across ensemble members.",
+        ),
+        (
+            "result_statistics_s1_site_summary_overall.csv",
+            s1_overall_df,
+            "Sentinel-1 observation and observation-day summaries after de-duplicating across members.",
+        ),
+        (
+            "result_statistics_s1_lfmc_coincident_locations_by_member.csv",
+            s1_coincident_by_member_df,
+            "Sentinel-1 locations coincident and not coincident with LFMC sampling sites for each member.",
+        ),
+        (
+            "result_statistics_s1_lfmc_coincident_locations_member_distribution.csv",
+            s1_coincident_member_distribution_df,
+            "Mean, standard deviation, minimum, and maximum of Sentinel-1/LFMC coincidence counts across members.",
+        ),
+        (
+            "result_statistics_s1_lfmc_coincident_locations_overall.csv",
+            s1_coincident_overall_df,
+            "Sentinel-1 locations coincident and not coincident with LFMC sampling sites after aggregating members.",
+        ),
+        (
+            "result_statistics_lfmc_dry_performance.csv",
+            dry_performance_df,
+            "Overall LFMC R2/RMSE for all eligible observations and the driest within-site observations.",
+        ),
+        (
+            "result_statistics_lfmc_dry_performance_by_member.csv",
+            dry_performance_by_member_df,
+            "Per-member LFMC R2/RMSE for all eligible observations and the driest within-site observations.",
+        ),
+        (
+            "result_statistics_lfmc_dry_performance_member_distribution.csv",
+            dry_performance_member_distribution_df,
+            "Mean, standard deviation, minimum, and maximum of dry-LFMC performance metrics across ensemble members.",
+        ),
+        (
+            "result_statistics_lfmc_dry_performance_by_site.csv",
+            dry_performance_by_site_df,
+            "Per-site all-observation and dry-observation LFMC performance for eligible sites.",
+        ),
+    ]
+    manifest_rows = []
+    for filename, df, description in outputs:
+        path = _table_output_path(runtime, os.path.splitext(filename)[0])
+        df.to_csv(path, index=False)
+        manifest_rows.append(
+            {
+                "filename": filename,
+                "path": path,
+                "n_rows": int(len(df)),
+                "description": description,
+            }
+        )
+        print(f"  Wrote {filename}: {len(df):,} rows")
+    manifest_path = _table_output_path(runtime, os.path.splitext(str(stats_cfg["filename"]))[0])
+    pd.DataFrame.from_records(manifest_rows).to_csv(manifest_path, index=False)
+    return manifest_path
+
+
 def build_enabled_figures(
     cfg: Dict[str, object],
     only_figures: Optional[Sequence[str]] = None,
 ) -> Dict[str, str]:
     runtime = init_runtime(cfg)
     figure_builders = {
+        "result_statistics": build_result_statistics,
         "figure_1": build_figure_1,
         "figure_2": build_figure_2,
         "figure_3": build_figure_3,

@@ -1,0 +1,320 @@
+paths:
+  output_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/plots/paper_figures_20260606
+  inputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inputs
+  gmba_basic_shapefile: /scratch/users/trobinet/long_lfmc/final_lfmc/gmba_mountins/GMBA_Inventory_v2.0_standard_basic/GMBA_Inventory_v2.0_standard_basic.shp
+  operational_lfmc_map_zarr: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/final_products/lfmc_vh_vv_365_multisource_fusion_clim20_2001_2024.zarr
+
+plotting:
+  dpi: 350
+  fontsize: 14
+  forward_batch_size: 4096
+
+variability:
+  site_min_obs: 10
+  monthly_min_obs: 20
+  monthly_min_years: 3
+
+filters:
+  landcover_order:
+    - shrub
+    - evergreen_forest
+    - deciduous_forest
+    - grass
+
+models:
+  multitask_16:
+    display_name: Multitask LFMC Model (16-member ensemble)
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+    input_data_name: ensemble/lfmc_vh_vv_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+    is_ensemble: true
+    ensemble_member_name_prefix:
+    ensemble_selection_key:
+    model_num_tasks: 3
+    color: "#cf5c36"
+  single_task_16:
+    display_name: Single-task LFMC Model (16-member ensemble)
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+    input_data_name: lfmc_365_multisource_fusion_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+    is_ensemble: true
+    ensemble_member_name_prefix:
+    ensemble_selection_key:
+    model_num_tasks: 1
+    color: "#2f5d50"
+  multitask_no_daymet_16:
+    display_name: Multitask LFMC Model, no Daymet (16-member ensemble)
+    outputs_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/outputs/lfmc_vh_vv_365_multisource_fusion_no_daymet_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+    input_data_name: ensemble/lfmc_vh_vv_365_multisource_fusion_no_daymet_k3_dw64_dm128_ds32_dc64_sh32_lfp64_sarp32_wd64_lr5e-4_tw5_vpd_anoms_nozone_clim20
+    is_ensemble: true
+    ensemble_member_name_prefix:
+    ensemble_selection_key:
+    model_num_tasks: 3
+    color: "#6f6a2f"
+
+timeseries_selection:
+  r2_percentiles:
+    good: 95
+    average: 50
+    poor: 5
+
+figures:
+  result_statistics:
+    enabled: true
+    lfmc_model_key: single_task_16
+    sar_model_key: multitask_16
+    performance_model_key: multitask_16
+    dry_site_min_obs: 10
+    dry_site_quantile: 0.20
+    filename: result_statistics_manifest.csv
+
+  figure_1:
+    enabled: true
+    title: Figure 1 Placeholder
+    description: Placeholder for the conceptual figure.
+    source_path:
+    figsize: [9.8, 4.8]
+    filename: figure_01_conceptual_placeholder.png
+
+  figure_2:
+    enabled: true
+    map_variable: lfmc_ens_mean
+    map_dates:
+      - 2020-06-01
+      - 2020-10-01
+      - 2023-06-01
+      - 2023-10-01
+    panel_labels: ["a", "b", "c", "d"]
+    col_labels: ["June 1", "Oct 1"]
+    row_labels: ["2020\ndry year", "2023\nwet year"]
+    state_lines_only: true
+    subplot_wspace: -0.4
+    subplot_hspace: 0.04
+    vmin:
+    vmax:
+    figsize: [12.2, 10.5]
+    filename: figure_02_lfmc_snapshots.png
+
+  figure_3:
+    enabled: true
+    lfmc_model_key: single_task_16
+    sar_model_key: multitask_16
+    representative_member_index: 0
+    lfmc_cmap: viridis
+    sar_cmap: cividis
+    marker_size: 32.0
+    text_scale: 1.5
+    figsize: [12.4, 6.2]
+    filename: figure_03_training_maps.png
+
+  figure_4:
+    enabled: true
+    model_key: multitask_16
+    hexbin_gridsize: 60
+    dry_site_min_obs: 10
+    dry_site_quantile: 0.20
+    dry_worst_error_fraction: 0.10
+    title_fontsize: 48
+    axis_label_fontsize: 28
+    tick_label_fontsize: 26
+    colorbar_label_fontsize: 28
+    colorbar_tick_fontsize: 26
+    stats_fontsize: 30
+    panel_label_fontsize: 30
+    figsize: [21.0, 22.0]
+    filename: figure_04_performance_scatters.png
+
+  figure_5:
+    enabled: true
+    model_key: multitask_16
+    num_sites_per_criterion: 1
+    min_measurements: 10
+    years_to_plot: 5
+    require_mountain_polygon: true
+    criteria_order:
+      - good
+      - average
+      - poor
+    plot_vv: false
+    plot_vh: false
+    prediction_legend_label: LFMC Model
+    uncertainty_before_observations: true
+    locator_inset_bounds: [1.14, 0.22, 0.25, 0.58]
+    locator_marker_size: 34.0
+    legend_fontsize: 14
+    legend_ncol: 2
+    figsize: [12.0, 10.5]
+    filename: figure_05_multitask_timeseries.png
+
+  figure_6:
+    enabled: true
+    model_key: multitask_16
+    metric_colors:
+      - "#000000"
+      - "#c0392b"
+      - "#e67e22"
+      - "#f0c808"
+    group_gap_scale: 2.0
+    count_label_rotation: -35.0
+    count_label_y: -0.03
+    x_tick_pad: 52.0
+    count_values_only: true
+    n_label: "N ="
+    y_tick_fontsize: 22.0
+    category_label_fontsize: 20.0
+    annotation_fontsize: 14.0
+    value_label_fontsize: 15.5
+    count_label_fontsize: 13.0
+    n_label_fontsize: 13.0
+    y_label_fontsize: 30.0
+    value_label_rotation: 32.0
+    legend_fontsize: 24.0
+    legend_ncol: 2
+    legend_bbox_y: 0.02
+    legend_bottom: 0.40
+    wrap_landcover_labels: true
+    figsize: [16.2, 7.6]
+    filename: figure_06_landcover_breakdown.png
+
+  figure_7:
+    enabled: true
+    model_keys:
+      - multitask_16
+      - single_task_16
+      - multitask_no_daymet_16
+    legend_labels:
+      - Full multitask model
+      - Single-task model (no Sentinel-1 supervision)
+      - Multitask model w/o weather inputs
+    model_colors:
+      - "#000000"
+      - "#8ecae6"
+      - "#1d4e89"
+    group_gap_scale: 2.0
+    count_label_y: -0.03
+    x_tick_pad: 52.0
+    count_values_only: true
+    n_label: "N ="
+    y_tick_fontsize: 22.0
+    category_label_fontsize: 20.0
+    value_label_fontsize: 15.5
+    count_label_fontsize: 13.0
+    n_label_fontsize: 13.0
+    y_label_fontsize: 30.0
+    value_label_rotation: 32.0
+    legend_fontsize: 24.0
+    legend_bbox_y: 0.02
+    legend_bottom: 0.40
+    panel_title: ""
+    figsize: [16.2, 7.2]
+    filename: figure_08_ablation_overall.png
+
+  figure_8:
+    enabled: true
+    figsize: [13.8, 6.6]
+    legend_below: true
+    text_scale: 1.25
+    x_label_rotation: 0
+    counts_below_axis: true
+    count_label_y: -0.035
+    x_tick_pad: 44.0
+    value_label_fontsize: 15.5
+    count_label_fontsize: 13.0
+    y_tick_fontsize: 20.0
+    category_label_fontsize: 18.0
+    y_label_fontsize: 24.0
+    legend_fontsize: 22.0
+    legend_bbox_y: 0.02
+    legend_bottom: 0.37
+    filename: supplementary_figure_02_training_sample_landcover_distribution.png
+    datasets:
+      lfmc_only:
+        label: LFMC-only
+        color: "#9ad17b"
+        model_key: single_task_16
+        target_names:
+          - lfmc
+      lfmc_vv_vh:
+        label: LFMC + VV + VH
+        color: "#2d6a4f"
+        model_key: multitask_16
+        target_names:
+          - lfmc
+          - vv
+          - vh
+
+  supplementary_figure_1:
+    enabled: true
+    model_key: multitask_16
+    num_sites_per_criterion: 1
+    min_measurements: 10
+    years_to_plot: 5
+    require_mountain_polygon: true
+    criteria_order:
+      - good
+      - average
+      - poor
+    plot_vv: true
+    plot_vh: true
+    prediction_legend_label: LFMC Model
+    include_sar_r2_in_title: true
+    uncertainty_before_observations: true
+    reuse_existing_sites_table: true
+    locator_inset_bounds: [1.14, 0.22, 0.25, 0.58]
+    locator_marker_size: 34.0
+    legend_fontsize: 14
+    legend_ncol: 3
+    figsize: [12.0, 10.5]
+    filename: supplementary_figure_01_vv_vh_timeseries.png
+
+  supplementary_figure_2:
+    enabled: false
+    model_key: multitask_16
+    site_min_obs: 10
+    x_limits: [-1.0, 1.0]
+    figsize: [10.2, 5.8]
+    filename: supplementary_figure_02_site_r2_landcover_distribution.png
+
+  supplementary_figure_3:
+    enabled: false
+    title: Supplementary Figure S3 Placeholder
+    description: Evergreen-focused analyses will be added here in a future revision.
+    figsize: [9.8, 4.6]
+    filename: supplementary_figure_03_evergreen_placeholder.png
+
+  supplementary_figure_4:
+    enabled: true
+    model_keys:
+      - multitask_16
+      - single_task_16
+      - multitask_no_daymet_16
+    legend_labels:
+      - Full multitask model
+      - Single-task model (no Sentinel-1 supervision)
+      - Multitask model w/o weather inputs
+    model_colors:
+      - "#000000"
+      - "#8ecae6"
+      - "#1d4e89"
+    group_gap_scale: 2.0
+    count_label_y: -0.03
+    x_tick_pad: 52.0
+    count_values_only: true
+    n_label: "N ="
+    y_tick_fontsize: 20.0
+    category_label_fontsize: 18.0
+    value_label_fontsize: 14.5
+    count_label_fontsize: 12.0
+    n_label_fontsize: 12.0
+    y_label_fontsize: 26.0
+    value_label_rotation: 32.0
+    legend_fontsize: 20.0
+    legend_bbox_y: 0.01
+    legend_bottom: 0.31
+    figsize: [16.2, 14.8]
+    filename: supplementary_figure_03_ablation_all_metrics.png
+
+  supplementary_figure_5:
+    enabled: true
+    title: Supplementary Figure S5 Placeholder
+    description: Low-latency versus normal-pipeline comparisons will be added here in a future revision.
+    figsize: [9.8, 4.6]
+    filename: supplementary_figure_05_low_latency_placeholder.png

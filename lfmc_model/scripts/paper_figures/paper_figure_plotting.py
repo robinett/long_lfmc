@@ -59,10 +59,14 @@ def _ensure_parent_dir(save_path: str) -> None:
 
 def _save_figure_outputs(fig, save_path: str, dpi: int, bbox_inches: str = "tight") -> None:
     _ensure_parent_dir(save_path)
+    print(f"Saving PNG: {save_path}", flush=True)
     fig.savefig(save_path, dpi=dpi, bbox_inches=bbox_inches)
+    print(f"Saved PNG: {save_path}", flush=True)
     stem, _ = os.path.splitext(save_path)
     svg_path = f"{stem}.svg"
+    print(f"Saving SVG: {svg_path}", flush=True)
     fig.savefig(svg_path, bbox_inches=bbox_inches)
+    print(f"Saved SVG: {svg_path}", flush=True)
 
 
 def _albers_equal_area_5070():
@@ -189,6 +193,11 @@ def _add_prediction_region_lines(
 
 def _format_landcover_labels(categories: Sequence[str]) -> List[str]:
     return [LANDCOVER_DISPLAY.get(str(cat), str(cat)) for cat in categories]
+
+
+def _format_landcover_labels_wrapped(categories: Sequence[str]) -> List[str]:
+    labels = _format_landcover_labels(categories)
+    return [label.replace(" Forest", "\nForest") for label in labels]
 
 
 def _panel_limits_from_series(series_list: Sequence[Dict[str, object]], pad_fraction: float = 0.08) -> Optional[tuple]:
@@ -323,11 +332,24 @@ def _annotate_metric_bars(
     counts: Sequence[float],
     fontsize: int,
     tops: Optional[Sequence[float]] = None,
+    value_fontsize: Optional[float] = None,
+    count_fontsize: Optional[float] = None,
+    value_rotation: float = 0.0,
+    value_ha: str = "center",
+    value_va: str = "bottom",
     count_y: Optional[float] = None,
+    count_transform=None,
+    count_prefix: str = "N=",
+    count_rotation: float = 0.0,
+    count_ha: str = "center",
+    count_va: str = "bottom",
+    value_y_min: Optional[float] = None,
 ) -> None:
     top_values = None if tops is None else np.asarray(tops, dtype=float)
     value_arr = np.asarray(values, dtype=float)
     count_arr = np.asarray(counts, dtype=float)
+    resolved_value_fontsize = fontsize if value_fontsize is None else float(value_fontsize)
+    resolved_count_fontsize = fontsize if count_fontsize is None else float(count_fontsize)
     for idx, bar in enumerate(bars):
         if idx >= len(value_arr) or not np.isfinite(value_arr[idx]):
             continue
@@ -336,22 +358,35 @@ def _annotate_metric_bars(
             top = float(top_values[idx])
         offset = 0.01 * max(abs(top), abs(bar.get_height()), 1.0)
         x_loc = bar.get_x() + (bar.get_width() / 2.0)
+        value_y = top + offset
+        resolved_value_va = value_va
+        if value_y_min is not None and value_y < value_y_min:
+            value_y = value_y_min
+            resolved_value_va = "bottom"
         ax.text(
             x_loc,
-            top + offset,
+            value_y,
             f"{float(value_arr[idx]):.2f}",
-            ha="center",
-            va="bottom",
-            fontsize=fontsize,
+            ha=value_ha,
+            va=resolved_value_va,
+            fontsize=resolved_value_fontsize,
+            rotation=value_rotation,
+            rotation_mode="anchor",
+            clip_on=False,
         )
         if idx < len(count_arr) and np.isfinite(count_arr[idx]) and count_y is not None:
+            count_label = f"{count_prefix}{int(round(float(count_arr[idx])))}"
             ax.text(
                 x_loc,
                 count_y,
-                f"N={int(round(float(count_arr[idx])))}",
-                ha="center",
-                va="bottom",
-                fontsize=fontsize,
+                count_label,
+                ha=count_ha,
+                va=count_va,
+                fontsize=resolved_count_fontsize,
+                rotation=count_rotation,
+                rotation_mode="anchor",
+                transform=count_transform if count_transform is not None else ax.transData,
+                clip_on=False,
             )
 
 
@@ -361,6 +396,11 @@ def plot_stacked_timeseries_panels(
     fontsize: int,
     figsize: Sequence[float],
     dpi: int,
+    locator_inset_bounds: Optional[Sequence[float]] = None,
+    locator_marker_size: float = 24.0,
+    uncertainty_before_observations: bool = False,
+    legend_fontsize: Optional[float] = None,
+    legend_ncol: Optional[int] = None,
 ) -> None:
     if len(panels) == 0:
         raise ValueError("No panels provided for stacked timeseries figure")
@@ -449,7 +489,7 @@ def plot_stacked_timeseries_panels(
             site_lat = panel.get("site_latitude")
             site_lon = panel.get("site_longitude")
             if site_lat is not None and site_lon is not None:
-                inset_bounds = [1.01, 0.56, 0.18, 0.47]
+                inset_bounds = list(locator_inset_bounds or [1.01, 0.56, 0.18, 0.47])
                 inset_ax = ax.inset_axes(
                     inset_bounds,
                     projection=_albers_equal_area_5070(),
@@ -470,7 +510,7 @@ def plot_stacked_timeseries_panels(
                     [float(site_lon)],
                     [float(site_lat)],
                     transform=ccrs.PlateCarree(),
-                    s=24,
+                    s=locator_marker_size,
                     color="#cf5c36",
                     edgecolor="white",
                     linewidth=0.7,
@@ -504,20 +544,32 @@ def plot_stacked_timeseries_panels(
         pred_handles, pred_labels = _dedupe_legend(prediction_legend)
         obs_handles, obs_labels = _dedupe_legend(observation_legend)
         total_legend_items = len(pred_labels) + len(obs_labels) + (1 if uncertainty_patch is not None else 0)
+        resolved_legend_fontsize = (
+            float(legend_fontsize)
+            if legend_fontsize is not None
+            else float(mpl.rcParams.get("legend.fontsize", max(fontsize - 2, 8)))
+        )
+        resolved_legend_ncol = int(legend_ncol) if legend_ncol is not None else None
         if total_legend_items <= 4:
-            combined_handles = pred_handles + obs_handles
-            combined_labels = pred_labels + obs_labels
             if uncertainty_patch is not None:
-                combined_handles.append(uncertainty_patch)
-                combined_labels.append("Ensemble-based uncertainty")
+                if uncertainty_before_observations:
+                    combined_handles = pred_handles + [uncertainty_patch] + obs_handles
+                    combined_labels = pred_labels + ["Ensemble-based uncertainty"] + obs_labels
+                else:
+                    combined_handles = pred_handles + obs_handles + [uncertainty_patch]
+                    combined_labels = pred_labels + obs_labels + ["Ensemble-based uncertainty"]
+            else:
+                combined_handles = pred_handles + obs_handles
+                combined_labels = pred_labels + obs_labels
             if len(combined_handles) > 0:
                 fig.legend(
                     combined_handles,
                     combined_labels,
                     loc="lower center",
-                    ncol=len(combined_handles),
+                    ncol=resolved_legend_ncol or len(combined_handles),
                     frameon=False,
                     bbox_to_anchor=(0.5, 0.008),
+                    fontsize=resolved_legend_fontsize,
                 )
             bottom = 0.125
         else:
@@ -529,23 +581,25 @@ def plot_stacked_timeseries_panels(
                     pred_handles,
                     pred_labels,
                     loc="lower center",
-                    ncol=max(1, min(len(pred_labels), 4)),
+                    ncol=resolved_legend_ncol or max(1, min(len(pred_labels), 4)),
                     frameon=False,
                     bbox_to_anchor=(0.5, 0.038),
+                    fontsize=resolved_legend_fontsize,
                 )
             if len(obs_handles) > 0:
                 fig.legend(
                     obs_handles,
                     obs_labels,
                     loc="lower center",
-                    ncol=max(1, min(len(obs_labels), 4)),
+                    ncol=resolved_legend_ncol or max(1, min(len(obs_labels), 4)),
                     frameon=False,
                     bbox_to_anchor=(0.5, 0.004),
+                    fontsize=resolved_legend_fontsize,
                 )
             bottom = 0.165
         fig.subplots_adjust(
             left=0.12,
-            right=0.84 if has_locator_insets else 0.91,
+            right=0.80 if (has_locator_insets and locator_inset_bounds is not None) else (0.84 if has_locator_insets else 0.91),
             top=0.95,
             bottom=bottom,
             hspace=0.34,
@@ -938,12 +992,15 @@ def plot_training_location_maps(
                 pad=float(panel.get("cbar_pad", 0.02)),
                 extend=extend,
             )
-            cbar.set_label(str(panel["cbar_label"]))
+            cbar.set_label(str(panel["cbar_label"]), fontsize=fontsize)
+            cbar.ax.tick_params(labelsize=max(fontsize - 1, 8))
             if len(legend_handles) > 1:
                 legend = ax.legend(
                     handles=legend_handles,
                     frameon=True,
-                    loc="lower left",
+                    loc=str(panel.get("legend_loc", "lower left")),
+                    bbox_to_anchor=panel.get("legend_bbox_to_anchor"),
+                    fontsize=max(fontsize - 2, 8),
                 )
                 legend_zorder = 10000
                 legend.set_zorder(legend_zorder)
@@ -962,18 +1019,18 @@ def plot_training_location_maps(
             stats_lines = [
                 f"Sites: {int(gdf[['longitude', 'latitude']].drop_duplicates().shape[0]):,}",
                 f"{str(panel.get('stats_total_label', 'Total points'))}: {int(np.nansum(counts)):,}",
-                f"{str(panel.get('stats_median_label', 'Median points/site'))}: {int(np.nanmedian(counts)):,}",
+                f"{str(panel.get('stats_mean_label', 'Mean points/site'))}: {float(np.nanmean(counts)):,.1f}",
             ]
             stats_text_zorder = 10000
             stats_text = ax.text(
-                0.985,
-                0.98,
+                float(panel.get("stats_x", 0.985)),
+                float(panel.get("stats_y", 0.98)),
                 "\n".join(stats_lines),
                 transform=ax.transAxes,
-                ha="right",
-                va="top",
+                ha=str(panel.get("stats_ha", "right")),
+                va=str(panel.get("stats_va", "top")),
                 bbox={
-                    "boxstyle": "round",
+                    "boxstyle": "round,pad=0.25",
                     "facecolor": "white",
                     "alpha": 0.8,
                     "edgecolor": "0.55",
@@ -985,13 +1042,27 @@ def plot_training_location_maps(
             stats_bbox = stats_text.get_bbox_patch()
             if stats_bbox is not None:
                 stats_bbox.set_zorder(stats_text_zorder)
+            panel_label = panel.get("panel_label")
+            if panel_label not in {None, ""}:
+                ax.text(
+                    -0.04,
+                    1.01,
+                    str(panel_label),
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="bottom",
+                    fontsize=fontsize + 2,
+                    fontweight="bold",
+                    clip_on=False,
+                )
             ax.set_title(
                 str(panel["title"]),
-                loc="left",
-                pad=4,
-                fontweight=str(panel.get("title_fontweight", "normal")),
+                loc=str(panel.get("title_loc", "center")),
+                pad=float(panel.get("title_pad", 10)),
+                fontweight=str(panel.get("title_fontweight", "bold")),
+                fontsize=fontsize + int(panel.get("title_fontsize_offset", 2)),
             )
-        fig.subplots_adjust(left=0.03, right=0.98, bottom=0.06, top=0.94, wspace=0.16)
+        fig.subplots_adjust(left=0.03, right=0.98, bottom=0.06, top=0.90, wspace=0.16)
         _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
@@ -1290,6 +1361,17 @@ def plot_training_sample_landcover_comparison(
     text_scale: float = 1.0,
     x_label_rotation: float = 25.0,
     counts_below_axis: bool = False,
+    count_label_y: float = -0.12,
+    value_label_fontsize: Optional[float] = None,
+    count_label_fontsize: Optional[float] = None,
+    value_label_rotation: float = 0.0,
+    y_tick_fontsize: Optional[float] = None,
+    category_label_fontsize: Optional[float] = None,
+    y_label_fontsize: Optional[float] = None,
+    legend_fontsize: Optional[float] = None,
+    legend_bbox_y: float = 0.02,
+    legend_bottom: Optional[float] = None,
+    x_tick_pad: Optional[float] = None,
 ) -> None:
     if len(categories) == 0:
         raise ValueError("No landcover categories provided for training-sample comparison plot")
@@ -1306,6 +1388,24 @@ def plot_training_sample_landcover_comparison(
         width = 0.82 / float(len(dataset_labels))
         ymax = 0.0
         label_fontsize = max(int(round((fontsize - 5) * float(text_scale))), 7)
+        resolved_value_label_fontsize = label_fontsize if value_label_fontsize is None else float(value_label_fontsize)
+        resolved_count_label_fontsize = label_fontsize if count_label_fontsize is None else float(count_label_fontsize)
+        resolved_y_tick_fontsize = (
+            max(int(round((fontsize - 1) * float(text_scale))), 8)
+            if y_tick_fontsize is None else float(y_tick_fontsize)
+        )
+        resolved_category_label_fontsize = (
+            max(int(round((fontsize - 1) * float(text_scale))), 8)
+            if category_label_fontsize is None else float(category_label_fontsize)
+        )
+        resolved_y_label_fontsize = (
+            int(round(fontsize * float(text_scale)))
+            if y_label_fontsize is None else float(y_label_fontsize)
+        )
+        resolved_legend_fontsize = (
+            max(int(round((fontsize - 1) * float(text_scale))), 8)
+            if legend_fontsize is None else float(legend_fontsize)
+        )
         for dataset_idx, dataset_label in enumerate(dataset_labels):
             offset = (dataset_idx - ((len(dataset_labels) - 1) / 2.0)) * width
             yerr = None if err_arr is None else err_arr[:, dataset_idx]
@@ -1349,8 +1449,15 @@ def plot_training_sample_landcover_comparison(
                         values=val_arr[:, dataset_idx],
                         counts=count_col,
                         fontsize=label_fontsize,
+                        value_fontsize=resolved_value_label_fontsize,
+                        count_fontsize=resolved_count_label_fontsize,
+                        value_rotation=float(value_label_rotation),
+                        value_ha="center",
                         tops=top_positions,
-                        count_y=-0.12,
+                        count_y=float(count_label_y),
+                        count_transform=ax.get_xaxis_transform(),
+                        count_ha="center",
+                        count_va="top",
                     )
                 else:
                     labels = []
@@ -1372,26 +1479,33 @@ def plot_training_sample_landcover_comparison(
                         tops=top_positions,
                     )
         ax.set_xticks(x, _format_landcover_labels(categories))
-        ax.tick_params(axis="x", rotation=float(x_label_rotation), labelsize=max(int(round((fontsize - 1) * float(text_scale))), 8))
+        x_tick_kwargs = {
+            "axis": "x",
+            "rotation": float(x_label_rotation),
+            "labelsize": resolved_category_label_fontsize,
+        }
+        if x_tick_pad is not None:
+            x_tick_kwargs["pad"] = float(x_tick_pad)
+        ax.tick_params(**x_tick_kwargs)
         for tick in ax.get_xticklabels():
             tick.set_horizontalalignment("right" if float(x_label_rotation) != 0.0 else "center")
-        ax.set_xlabel("Land cover", fontsize=int(round(fontsize * float(text_scale))))
-        ax.set_ylabel("Fraction of training samples", fontsize=int(round(fontsize * float(text_scale))))
+        ax.set_xlabel("Land cover", fontsize=resolved_y_label_fontsize)
+        ax.set_ylabel("Fraction of training samples", fontsize=resolved_y_label_fontsize)
         ax.set_ylim(0.0, min(1.0, ymax * 1.2 if ymax > 0 else 1.0))
-        ax.tick_params(axis="y", labelsize=max(int(round((fontsize - 1) * float(text_scale))), 8))
+        ax.tick_params(axis="y", labelsize=resolved_y_tick_fontsize)
         if legend_below:
             fig.legend(
                 loc="lower center",
                 ncol=max(1, min(len(dataset_labels), 4)),
                 frameon=False,
-                bbox_to_anchor=(0.5, 0.02),
-                fontsize=max(int(round((fontsize - 1) * float(text_scale))), 8),
+                bbox_to_anchor=(0.5, float(legend_bbox_y)),
+                fontsize=resolved_legend_fontsize,
             )
         else:
             legend = ax.legend(
                 frameon=True,
                 loc="upper right",
-                fontsize=max(int(round((fontsize - 1) * float(text_scale))), 8),
+                fontsize=resolved_legend_fontsize,
             )
             legend.get_frame().set_alpha(1.0)
             legend.get_frame().set_edgecolor("0.4")
@@ -1412,7 +1526,10 @@ def plot_training_sample_landcover_comparison(
                 fontsize=max(int(round((fontsize - 3) * float(text_scale))), 8),
             )
         if legend_below:
-            bottom = 0.22 if counts_below_axis else 0.16
+            bottom = (
+                float(legend_bottom)
+                if legend_bottom is not None else (0.22 if counts_below_axis else 0.16)
+            )
             fig.subplots_adjust(left=0.09, right=0.985, bottom=bottom, top=0.95)
         else:
             fig.tight_layout()
@@ -1468,12 +1585,16 @@ def plot_placeholder_figure(
 def _scatter_stats_text(metrics: Dict[str, float]) -> str:
     r2 = metrics.get("r2", np.nan)
     rmse = metrics.get("rmse", np.nan)
+    bias = metrics.get("bias", np.nan)
     n = metrics.get("n", 0)
     parts = [
         f"R² = {r2:.2f}" if np.isfinite(r2) else "R² = nan",
-        f"RMSE = {rmse:.2f}" if np.isfinite(rmse) else "RMSE = nan",
-        f"N = {int(n)}",
+        f"RMSE = {rmse:.2f}%" if np.isfinite(rmse) else "RMSE = nan%",
     ]
+    if np.isfinite(bias):
+        parts.append(f"Bias = {bias:.2f}%")
+    else:
+        parts.append(f"N = {int(n)}")
     return "\n".join(parts)
 
 
@@ -1490,11 +1611,21 @@ def plot_scatter_triptych(
     fontsize: int,
     figsize: Sequence[float],
     dpi: int,
+    title_fontsize: Optional[int] = None,
+    axis_label_fontsize: Optional[int] = None,
+    tick_label_fontsize: Optional[int] = None,
+    colorbar_label_fontsize: Optional[int] = None,
+    colorbar_tick_fontsize: Optional[int] = None,
+    stats_fontsize: Optional[int] = None,
+    panel_label_fontsize: Optional[int] = None,
 ) -> None:
-    if len(panels) not in {2, 3, 4}:
-        raise ValueError("Scatter layout expects exactly 2, 3, or 4 panels")
+    if len(panels) not in {2, 3, 4, 5}:
+        raise ValueError("Scatter layout expects exactly 2, 3, 4, or 5 panels")
     with plt.rc_context(_paper_rc_params(fontsize)):
-        if len(panels) == 4:
+        if len(panels) == 5:
+            fig, axes = plt.subplots(3, 2, figsize=tuple(figsize), constrained_layout=False)
+            axes = np.asarray(axes).reshape(-1)
+        elif len(panels) == 4:
             fig, axes = plt.subplots(2, 2, figsize=tuple(figsize), constrained_layout=False)
             axes = np.asarray(axes).reshape(-1)
         elif len(panels) == 2:
@@ -1503,9 +1634,26 @@ def plot_scatter_triptych(
         else:
             fig, axes = plt.subplots(1, 3, figsize=tuple(figsize), constrained_layout=False)
             axes = np.asarray(axes).reshape(-1)
-        panel_title_fontsize = fontsize + 4
-        panel_label_fontsize = fontsize + 6
-        for ax, panel in zip(axes, panels):
+        panel_title_fontsize = int(title_fontsize) if title_fontsize is not None else fontsize + 4
+        panel_label_fontsize = (
+            int(panel_label_fontsize) if panel_label_fontsize is not None else fontsize + 6
+        )
+        axis_label_fontsize = (
+            int(axis_label_fontsize) if axis_label_fontsize is not None else fontsize
+        )
+        tick_label_fontsize = (
+            int(tick_label_fontsize) if tick_label_fontsize is not None else max(fontsize - 1, 8)
+        )
+        colorbar_label_fontsize = (
+            int(colorbar_label_fontsize) if colorbar_label_fontsize is not None else fontsize
+        )
+        colorbar_tick_fontsize = (
+            int(colorbar_tick_fontsize) if colorbar_tick_fontsize is not None else max(fontsize - 1, 8)
+        )
+        stats_fontsize = int(stats_fontsize) if stats_fontsize is not None else max(fontsize - 2, 8)
+
+        for panel_idx, (ax, panel) in enumerate(zip(axes, panels), start=1):
+            print(f"Rendering scatter panel {panel_idx}/{len(panels)}: {panel['title']}", flush=True)
             x = np.asarray(panel["x"], dtype=float)
             y = np.asarray(panel["y"], dtype=float)
             mask = np.isfinite(x) & np.isfinite(y)
@@ -1551,7 +1699,8 @@ def plot_scatter_triptych(
                     pad=0.03,
                     extend=panel.get("cbar_extend", "neither"),
                 )
-                cbar.set_label(panel.get("cbar_label", "Count"))
+                cbar.set_label(panel.get("cbar_label", "Count"), fontsize=colorbar_label_fontsize)
+                cbar.ax.tick_params(labelsize=colorbar_tick_fontsize)
             else:
                 norm = None
                 if color_array is not None and panel.get("cbar_scale") == "log":
@@ -1590,7 +1739,8 @@ def plot_scatter_triptych(
                         pad=0.03,
                         extend=panel.get("cbar_extend", "neither"),
                     )
-                    cbar.set_label(panel.get("cbar_label", "Color"))
+                    cbar.set_label(panel.get("cbar_label", "Color"), fontsize=colorbar_label_fontsize)
+                    cbar.ax.tick_params(labelsize=colorbar_tick_fontsize)
             if draw_identity:
                 ax.plot(
                     [line_min, line_max],
@@ -1608,8 +1758,9 @@ def plot_scatter_triptych(
                 ax.set_ylim(*ylim)
             else:
                 ax.set_ylim(default_y_min, default_y_max)
-            ax.set_xlabel(panel["xlabel"])
-            ax.set_ylabel(panel["ylabel"])
+            ax.set_xlabel(panel["xlabel"], fontsize=axis_label_fontsize, labelpad=10)
+            ax.set_ylabel(panel["ylabel"], fontsize=axis_label_fontsize, labelpad=10)
+            ax.tick_params(axis="both", labelsize=tick_label_fontsize)
             ax.set_title(panel["title"], pad=10, fontsize=panel_title_fontsize)
             if panel.get("panel_label") not in {None, ""}:
                 ax.text(
@@ -1636,11 +1787,13 @@ def plot_scatter_triptych(
                     "alpha": 0.9,
                     "edgecolor": "0.5",
                 },
-                fontsize=max(fontsize - 2, 8),
+                fontsize=stats_fontsize,
             )
         for ax in axes[len(panels):]:
             ax.set_visible(False)
-        if len(panels) == 4:
+        if len(panels) == 5:
+            fig.subplots_adjust(left=0.095, right=0.985, bottom=0.065, top=0.955, wspace=0.78, hspace=0.56)
+        elif len(panels) == 4:
             fig.subplots_adjust(left=0.08, right=0.985, bottom=0.09, top=0.94, wspace=0.42, hspace=0.34)
         elif len(panels) == 2:
             fig.subplots_adjust(left=0.08, right=0.985, bottom=0.14, top=0.92, wspace=0.34)
@@ -1690,12 +1843,33 @@ def plot_landcover_metric_grouped(
     dpi: int,
     colors: Sequence[str],
     legend_below: bool = False,
+    group_gap_scale: float = 1.0,
+    count_label_rotation: float = 0.0,
+    count_values_only: bool = False,
+    n_label: Optional[str] = None,
+    count_label_y: float = -0.035,
+    x_tick_pad: float = 36.0,
+    y_tick_fontsize: Optional[float] = None,
+    category_label_fontsize: Optional[float] = None,
+    annotation_fontsize: Optional[float] = None,
+    value_label_fontsize: Optional[float] = None,
+    count_label_fontsize: Optional[float] = None,
+    n_label_fontsize: Optional[float] = None,
+    y_label_fontsize: Optional[float] = None,
+    legend_fontsize: Optional[float] = None,
+    legend_ncol: Optional[int] = None,
+    legend_bbox_y: float = 0.015,
+    legend_bottom: float = 0.31,
+    value_label_rotation: float = 0.0,
+    wrap_landcover_labels: bool = False,
 ) -> None:
     with plt.rc_context(_paper_rc_params(fontsize)):
-        fig, ax = plt.subplots(figsize=tuple(figsize), constrained_layout=True)
-        x = np.arange(len(categories))
+        fig, ax = plt.subplots(figsize=tuple(figsize), constrained_layout=False)
         n_metrics = values.shape[1]
-        width = 0.92 / float(n_metrics)
+        total_bar_width = 0.92
+        group_spacing = total_bar_width + ((1.0 - total_bar_width) * float(group_gap_scale))
+        x = np.arange(len(categories), dtype=float) * group_spacing
+        width = total_bar_width / float(n_metrics)
         err_arr = None if errors is None else np.asarray(errors, dtype=float)
         all_bars = []
         for metric_idx in range(n_metrics):
@@ -1712,19 +1886,66 @@ def plot_landcover_metric_grouped(
                 capsize=2.5,
                 error_kw={"elinewidth": 1.2, "capthick": 1.1, "zorder": 4},
                 zorder=2,
-                )
+            )
             all_bars.append(bars)
-        ax.set_xticks(x, _format_landcover_labels(categories))
-        ax.set_xlabel("Land cover")
-        ax.set_ylabel("R²")
+        ax.set_xticks(x)
+        category_labels = (
+            _format_landcover_labels_wrapped(categories)
+            if wrap_landcover_labels
+            else _format_landcover_labels(categories)
+        )
+        ax.set_xticklabels(
+            category_labels,
+            fontsize=category_label_fontsize,
+        )
+        resolved_y_label_fontsize = (
+            fontsize + 10
+            if y_label_fontsize is None
+            else float(y_label_fontsize)
+        )
+        ax.set_ylabel("R²", fontsize=resolved_y_label_fontsize, labelpad=12)
         finite_vals = values[np.isfinite(values)]
         ymax = float(np.max(finite_vals)) if finite_vals.size > 0 else 1.0
         if err_arr is not None:
             finite_combined = (values + err_arr)[np.isfinite(values + err_arr)]
             if finite_combined.size > 0:
                 ymax = max(ymax, float(np.max(finite_combined)))
-        ax.set_ylim(-0.1, max(ymax + 0.12, 0.35))
-        count_y = float(ax.get_ylim()[0] + 0.02)
+        y_min = -0.045
+        y_max = max(ymax + 0.12, 0.35)
+        ax.set_ylim(y_min, y_max)
+        ax.set_yticks(np.arange(0.0, y_max + 0.001, 0.2))
+        ax.tick_params(
+            axis="y",
+            which="major",
+            length=5,
+            width=1.0,
+            labelleft=True,
+            labelsize=y_tick_fontsize,
+        )
+        ax.tick_params(axis="x", which="major", length=5, width=1.0, pad=float(x_tick_pad))
+        count_y = float(count_label_y)
+        count_transform = ax.get_xaxis_transform()
+        count_prefix = "" if count_values_only else "N="
+        resolved_annotation_fontsize = (
+            max(fontsize - 5, 7)
+            if annotation_fontsize is None
+            else float(annotation_fontsize)
+        )
+        resolved_value_label_fontsize = (
+            resolved_annotation_fontsize
+            if value_label_fontsize is None
+            else float(value_label_fontsize)
+        )
+        resolved_count_label_fontsize = (
+            resolved_annotation_fontsize
+            if count_label_fontsize is None
+            else float(count_label_fontsize)
+        )
+        resolved_n_label_fontsize = (
+            resolved_count_label_fontsize
+            if n_label_fontsize is None
+            else float(n_label_fontsize)
+        )
         for metric_idx, bars in enumerate(all_bars):
             top_positions = []
             for row_idx, value in enumerate(values[:, metric_idx]):
@@ -1741,18 +1962,46 @@ def plot_landcover_metric_grouped(
                 bars,
                 values=values[:, metric_idx],
                 counts=counts[:, metric_idx],
-                fontsize=max(fontsize - 5, 7),
+                fontsize=resolved_annotation_fontsize,
                 tops=top_positions,
+                value_fontsize=resolved_value_label_fontsize,
+                count_fontsize=resolved_count_label_fontsize,
+                value_rotation=float(value_label_rotation),
+                value_ha="center",
+                value_va="bottom",
                 count_y=count_y,
+                count_transform=count_transform,
+                count_prefix=count_prefix,
+                count_rotation=count_label_rotation,
+                count_ha="center",
+                count_va="top",
+                value_y_min=y_min + 0.01,
             )
+        if n_label is not None:
+            left_bar_edge = x[0] - (total_bar_width / 2.0)
+            ax.text(
+                left_bar_edge - (0.12 * group_spacing),
+                count_y,
+                n_label,
+                ha="right",
+                va="top",
+                fontsize=resolved_n_label_fontsize,
+                transform=count_transform,
+                clip_on=False,
+            )
+        ax.set_xlim(
+            x[0] - (total_bar_width / 2.0) - (0.35 * group_spacing),
+            x[-1] + (total_bar_width / 2.0) + (0.20 * group_spacing),
+        )
         if legend_below:
             fig.legend(
                 loc="lower center",
-                ncol=max(1, min(len(metric_labels), 4)),
+                ncol=legend_ncol if legend_ncol is not None else max(1, min(len(metric_labels), 4)),
                 frameon=False,
-                bbox_to_anchor=(0.5, 0.01),
+                bbox_to_anchor=(0.5, float(legend_bbox_y)),
+                fontsize=legend_fontsize,
             )
-            fig.subplots_adjust(left=0.08, right=0.985, bottom=0.20, top=0.95)
+            fig.subplots_adjust(left=0.08, right=0.985, bottom=float(legend_bottom), top=0.94)
         else:
             legend = ax.legend(frameon=True, ncol=2)
             legend.get_frame().set_alpha(1.0)
@@ -1770,6 +2019,22 @@ def plot_landcover_comparison_panels(
     fontsize: int,
     figsize: Sequence[float],
     dpi: int,
+    group_gap_scale: float = 1.0,
+    count_label_y: float = -0.06,
+    count_values_only: bool = False,
+    n_label: Optional[str] = None,
+    x_tick_pad: float = 28.0,
+    value_label_fontsize: Optional[float] = None,
+    count_label_fontsize: Optional[float] = None,
+    n_label_fontsize: Optional[float] = None,
+    y_tick_fontsize: Optional[float] = None,
+    category_label_fontsize: Optional[float] = None,
+    y_label_fontsize: Optional[float] = None,
+    legend_fontsize: Optional[float] = None,
+    legend_bbox_y: float = 0.005,
+    legend_bottom: float = 0.27,
+    value_label_rotation: float = 0.0,
+    count_label_rotation: float = 0.0,
 ) -> None:
     if len(panels) == 0:
         raise ValueError("Landcover comparison plot expects at least 1 panel")
@@ -1783,8 +2048,26 @@ def plot_landcover_comparison_panels(
         )
         if len(panels) == 1:
             axes = [axes]
-        x = np.arange(len(categories))
-        width = 0.9 / float(len(model_labels))
+        total_bar_width = 0.9
+        group_spacing = total_bar_width + ((1.0 - total_bar_width) * float(group_gap_scale))
+        x = np.arange(len(categories), dtype=float) * group_spacing
+        width = total_bar_width / float(len(model_labels))
+        count_transform = axes[-1].get_xaxis_transform()
+        count_prefix = "" if count_values_only else "N="
+        annotation_fontsize = max(fontsize - 5, 7)
+        resolved_value_label_fontsize = (
+            annotation_fontsize if value_label_fontsize is None else float(value_label_fontsize)
+        )
+        resolved_count_label_fontsize = (
+            annotation_fontsize if count_label_fontsize is None else float(count_label_fontsize)
+        )
+        resolved_n_label_fontsize = fontsize if n_label_fontsize is None else float(n_label_fontsize)
+        resolved_y_tick_fontsize = max(fontsize - 1, 8) if y_tick_fontsize is None else float(y_tick_fontsize)
+        resolved_category_label_fontsize = (
+            max(fontsize - 1, 8) if category_label_fontsize is None else float(category_label_fontsize)
+        )
+        resolved_y_label_fontsize = fontsize + 10 if y_label_fontsize is None else float(y_label_fontsize)
+        resolved_legend_fontsize = fontsize if legend_fontsize is None else float(legend_fontsize)
         for ax, panel in zip(axes, panels):
             values = np.asarray(panel["values"], dtype=float)
             counts = np.asarray(panel.get("counts"), dtype=float) if panel.get("counts") is not None else None
@@ -1824,9 +2107,18 @@ def plot_landcover_comparison_panels(
                     bars,
                     values=values[:, model_idx],
                     counts=count_col,
-                    fontsize=max(fontsize - 5, 7),
+                    fontsize=annotation_fontsize,
+                    value_fontsize=resolved_value_label_fontsize,
+                    count_fontsize=resolved_count_label_fontsize,
+                    value_rotation=float(value_label_rotation),
+                    value_ha="center",
                     tops=top_positions,
-                    count_y=-0.08,
+                    count_y=count_label_y,
+                    count_transform=ax.get_xaxis_transform(),
+                    count_prefix=count_prefix,
+                    count_rotation=float(count_label_rotation),
+                    count_ha="center",
+                    count_va="top",
                 )
             finite_vals = values[np.isfinite(values)]
             if finite_vals.size > 0:
@@ -1835,9 +2127,38 @@ def plot_landcover_comparison_panels(
                 finite_combined = (values + errors)[np.isfinite(values + errors)]
                 if finite_combined.size > 0:
                     ymax = max(ymax, float(np.max(finite_combined)) + 0.12)
-            ax.set_ylim(-0.1, ymax)
-            ax.set_ylabel(panel["ylabel"])
-            ax.set_title(panel["title"], loc="left", pad=4)
+            y_min = -0.035
+            ax.set_ylim(y_min, ymax)
+            ax.set_yticks(np.arange(0.0, ymax + 0.001, 0.2))
+            ax.tick_params(
+                axis="y",
+                which="major",
+                length=5,
+                width=1.0,
+                labelleft=True,
+                labelsize=resolved_y_tick_fontsize,
+            )
+            ax.tick_params(axis="x", which="major", length=5, width=1.0, pad=float(x_tick_pad))
+            ax.set_ylabel(panel["ylabel"], fontsize=resolved_y_label_fontsize, labelpad=12)
+            title = str(panel.get("title", ""))
+            if title != "":
+                ax.set_title(title, loc="left", pad=4)
+        if n_label is not None:
+            left_bar_edge = x[0] - (total_bar_width / 2.0)
+            axes[-1].text(
+                left_bar_edge - (0.12 * group_spacing),
+                count_label_y,
+                n_label,
+                ha="right",
+                va="top",
+                fontsize=resolved_n_label_fontsize,
+                transform=count_transform,
+                clip_on=False,
+            )
+        axes[-1].set_xlim(
+            x[0] - (total_bar_width / 2.0) - (0.35 * group_spacing),
+            x[-1] + (total_bar_width / 2.0) + (0.20 * group_spacing),
+        )
         handles, _ = axes[0].get_legend_handles_labels()
         fig.legend(
             handles,
@@ -1845,10 +2166,11 @@ def plot_landcover_comparison_panels(
             frameon=False,
             ncol=max(1, min(len(model_labels), 4)),
             loc="lower center",
-            bbox_to_anchor=(0.5, 0.005),
+            bbox_to_anchor=(0.5, float(legend_bbox_y)),
+            fontsize=resolved_legend_fontsize,
         )
         axes[-1].set_xticks(x, _format_landcover_labels(categories))
-        axes[-1].set_xlabel("Land cover")
-        fig.subplots_adjust(left=0.09, right=0.985, bottom=0.16, top=0.93, hspace=0.34)
+        axes[-1].tick_params(axis="x", labelsize=resolved_category_label_fontsize)
+        fig.subplots_adjust(left=0.08, right=0.985, bottom=float(legend_bottom), top=0.94, hspace=0.34)
         _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
