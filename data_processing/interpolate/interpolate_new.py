@@ -13,7 +13,6 @@ import pandas as pd
 import xarray as xr
 import zarr
 from tqdm import tqdm
-from dask.diagnostics import ProgressBar
 
 DATE_PATTERN = re.compile(r"(\d{8})")
 ZARR_VERSION = 3
@@ -616,6 +615,34 @@ def iter_spatial_slices_with_index(y_size, x_size, xy_chunk_size):
         chunk_index += 1
 
 
+def chunk_status_dir(output_zarr):
+    return Path(f"{output_zarr}.chunk_status")
+
+
+def legacy_chunk_status_dir(output_zarr):
+    return Path(output_zarr) / "_chunk_status"
+
+
+def chunk_done_path(output_zarr, chunk_number):
+    return chunk_status_dir(output_zarr) / f"chunk_{chunk_number:06d}.done"
+
+
+def chunk_is_done(output_zarr, chunk_number):
+    return (
+        chunk_done_path(output_zarr, chunk_number).exists()
+        or (legacy_chunk_status_dir(output_zarr) / f"chunk_{chunk_number:06d}.done").exists()
+    )
+
+
+def mark_chunk_done(output_zarr, chunk_number):
+    status_dir = chunk_status_dir(output_zarr)
+    status_dir.mkdir(parents=True, exist_ok=True)
+    final_path = chunk_done_path(output_zarr, chunk_number)
+    tmp_path = final_path.with_suffix(f".done.tmp.{os.getpid()}")
+    tmp_path.write_text(f"chunk={chunk_number}\ncompleted_utc={datetime.utcnow().isoformat()}Z\n")
+    tmp_path.replace(final_path)
+
+
 def get_processing_context(
     start_date,
     end_date,
@@ -696,11 +723,14 @@ def process_interpolation_to_zarr(
     dry_run_chunk_plan=False,
     max_chunks_per_worker=None,
     zero_fill_skipped_chunks=False,
+    start_chunk_index=1,
 ):
     if num_workers < 1:
         raise ValueError("num_workers must be >= 1")
     if worker_id < 0 or worker_id >= num_workers:
         raise ValueError("worker_id must satisfy 0 <= worker_id < num_workers")
+    if start_chunk_index < 1:
+        raise ValueError("start_chunk_index must be >= 1")
 
     ctx = get_processing_context(
         start_date=start_date,
@@ -731,6 +761,7 @@ def process_interpolation_to_zarr(
     print(f"interp vars ({len(interp_vars)}): {interp_vars}")
     total_chunks = print_chunk_plan(y_size, x_size, xy_chunk_size, num_workers)
     print(f"mode={mode}")
+    print(f"start_chunk_index={start_chunk_index}")
     if mode == "worker":
         print(f"worker_id={worker_id}, num_workers={num_workers}")
         if max_chunks_per_worker is not None:
@@ -753,6 +784,7 @@ def process_interpolation_to_zarr(
             overwrite=overwrite,
         )
         print(f"initialized zarr store: {output_zarr}")
+        chunk_status_dir(output_zarr).mkdir(parents=True, exist_ok=True)
         if mode == "init":
             return
 
@@ -769,17 +801,40 @@ def process_interpolation_to_zarr(
             f"Output zarr store not found for worker mode: {output_zarr}. Run --mode init first."
         )
 
-    if mode == "worker":
-        remainder = total_chunks % num_workers
-        assigned_total = (total_chunks // num_workers) + (1 if worker_id < remainder else 0)
-    else:
-        assigned_total = total_chunks
+    output_zarr = Path(output_zarr)
+    chunk_status_dir(output_zarr).mkdir(parents=True, exist_ok=True)
+    root = zarr.open_group(str(output_zarr), mode="a", zarr_format=ZARR_VERSION)
+
+    assigned_total = 0
+    skipped_done_total = 0
+    for chunk_index in range(total_chunks):
+        chunk_number = chunk_index + 1
+        if chunk_number < start_chunk_index:
+            continue
+        if mode == "worker" and (chunk_index % num_workers) != worker_id:
+            continue
+        if chunk_is_done(output_zarr, chunk_number):
+            skipped_done_total += 1
+            continue
+        assigned_total += 1
+    print(f"chunks already marked complete for this worker/run: {skipped_done_total}")
+    if assigned_total == 0:
+        print("no incomplete chunks assigned to this worker")
+        if finalize_metadata:
+            zarr.consolidate_metadata(str(output_zarr))
+            print(f"finished writing zarr store: {output_zarr}")
+        return
 
     assigned_chunks = 0
     processed_chunks = 0
     worker_start_time = time.monotonic()
     for chunk_index, ys, xs in iter_spatial_slices_with_index(y_size, x_size, xy_chunk_size):
+        chunk_number = chunk_index + 1
+        if chunk_number < start_chunk_index:
+            continue
         if mode == "worker" and (chunk_index % num_workers) != worker_id:
+            continue
+        if chunk_is_done(output_zarr, chunk_number):
             continue
         assigned_chunks += 1
         y_len = ys.stop - ys.start
@@ -794,13 +849,13 @@ def process_interpolation_to_zarr(
 
         elapsed_before = time.monotonic() - worker_start_time
         print(
-            f"chunk {chunk_index + 1}/{total_chunks} "
+            f"chunk {chunk_number}/{total_chunks} "
             f"(worker chunk {assigned_chunks}/{assigned_total}): "
             f"{y_dim}[{ys.start}:{ys.stop}] {x_dim}[{xs.start}:{xs.stop}] "
             f"| elapsed={format_elapsed(elapsed_before)}"
         )
 
-        region = {"time": slice(0, len(target_dates)), y_dim: ys, x_dim: xs}
+        region_tuple = (slice(0, len(target_dates)), ys, xs)
         chunk_write_bytes = 0
         chunk_write_elapsed = 0.0
         if should_process_chunk:
@@ -845,18 +900,6 @@ def process_interpolation_to_zarr(
                 filled_flat, status_flat = _interpolate_2d_time_gap(flat, max_interpolation_days)
                 filled_target = filled_flat[target_indices, :].reshape(len(target_dates), y_len, x_len)
                 status_target = status_flat[target_indices, :].reshape(len(target_dates), y_len, x_len)
-                write_ds_var = xr.Dataset(
-                    {
-                        f"{var}_interp": (
-                            ("time", y_dim, x_dim),
-                            filled_target.astype(np.float32),
-                        ),
-                        f"fill_status_{var}": (
-                            ("time", y_dim, x_dim),
-                            status_target.astype(np.uint8),
-                        ),
-                    }
-                )
                 n_filled = int(np.sum(status_target == 1))
                 interp_elapsed = time.monotonic() - var_start
                 print(
@@ -865,17 +908,13 @@ def process_interpolation_to_zarr(
                 )
                 print(f"    writing {var} + fill_status_{var} to zarr")
                 write_start = time.monotonic()
-                with ProgressBar():
-                    write_ds_var.to_zarr(
-                        output_zarr,
-                        mode="a",
-                        region=region,
-                        zarr_format=ZARR_VERSION,
-                    )
+                interp_values = filled_target.astype(np.float32)
+                status_values = status_target.astype(np.uint8)
+                root[f"{var}_interp"][region_tuple] = interp_values
+                root[f"fill_status_{var}"][region_tuple] = status_values
                 write_elapsed = time.monotonic() - write_start
-                pair_bytes = 0
-                for da in write_ds_var.data_vars.values():
-                    pair_bytes += da.size * da.dtype.itemsize
+                pair_bytes = interp_values.size * interp_values.dtype.itemsize
+                pair_bytes += status_values.size * status_values.dtype.itemsize
                 chunk_write_bytes += pair_bytes
                 chunk_write_elapsed += write_elapsed
                 pair_gib = pair_bytes / (1024 ** 3)
@@ -901,24 +940,12 @@ def process_interpolation_to_zarr(
             )
             for v, var in zero_iter:
                 print(f"  zero-write variable {v}/{len(interp_vars)}: {var}")
-                write_ds_var = xr.Dataset(
-                    {
-                        f"{var}_interp": (("time", y_dim, x_dim), zero_interp),
-                        f"fill_status_{var}": (("time", y_dim, x_dim), zero_status),
-                    }
-                )
                 write_start = time.monotonic()
-                with ProgressBar():
-                    write_ds_var.to_zarr(
-                        output_zarr,
-                        mode="a",
-                        region=region,
-                        zarr_format=ZARR_VERSION,
-                    )
+                root[f"{var}_interp"][region_tuple] = zero_interp
+                root[f"fill_status_{var}"][region_tuple] = zero_status
                 write_elapsed = time.monotonic() - write_start
-                pair_bytes = 0
-                for da in write_ds_var.data_vars.values():
-                    pair_bytes += da.size * da.dtype.itemsize
+                pair_bytes = zero_interp.size * zero_interp.dtype.itemsize
+                pair_bytes += zero_status.size * zero_status.dtype.itemsize
                 chunk_write_bytes += pair_bytes
                 chunk_write_elapsed += write_elapsed
                 pair_gib = pair_bytes / (1024 ** 3)
@@ -950,6 +977,9 @@ def process_interpolation_to_zarr(
         if should_process_chunk:
             chunk_total_elapsed = time.monotonic() - chunk_process_start
             print(f"  chunk processing total (interp+write)={format_elapsed(chunk_total_elapsed)}")
+        if should_process_chunk or zero_fill_skipped_chunks:
+            mark_chunk_done(output_zarr, chunk_number)
+            print(f"  marked chunk {chunk_number}/{total_chunks} complete")
         elapsed_after = time.monotonic() - worker_start_time
         avg_time = elapsed_after / assigned_chunks
         eta = avg_time * max(assigned_total - assigned_chunks, 0)
@@ -1047,6 +1077,12 @@ def parse_args():
         "--zero_fill_skipped_chunks",
         action="store_true",
         help="When using --max_chunks_per_worker, write zeros for remaining assigned chunks.",
+    )
+    parser.add_argument(
+        "--start_chunk_index",
+        type=int,
+        default=1,
+        help="1-based chunk index to start from when resuming an existing interpolation store.",
     )
     parser.add_argument(
         "--check_interpolation",
@@ -1190,6 +1226,7 @@ def main():
         dry_run_chunk_plan=args.dry_run_chunk_plan,
         max_chunks_per_worker=args.max_chunks_per_worker,
         zero_fill_skipped_chunks=args.zero_fill_skipped_chunks,
+        start_chunk_index=args.start_chunk_index,
     )
 
     # Always generate final diagnostic plots after a completed full/finalize run.

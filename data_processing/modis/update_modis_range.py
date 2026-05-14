@@ -80,6 +80,11 @@ def apply_registry_defaults(args):
     args.buffer_days = args.buffer_days or int(proc["interpolation_buffer_days"])
     args.xy_chunk_size = args.xy_chunk_size or int(proc["interpolation_xy_chunk_size"])
     args.time_chunk_size = args.time_chunk_size or int(proc["interpolation_time_chunk_size"])
+    args.interpolation_num_workers = int(proc.get("interpolation_num_workers", 32))
+    args.interpolation_worker_cpus = int(proc.get("interpolation_worker_cpus", 4))
+    args.interpolation_worker_mem = str(proc.get("interpolation_worker_mem", "16G"))
+    args.interpolation_worker_time = str(proc.get("interpolation_worker_time", "08:00:00"))
+    args.interpolation_array_max_retries = int(proc.get("interpolation_array_max_retries", 3))
     args.quality_flag = args.quality_flag if args.quality_flag is not None else int(proc["quality_flag"])
     return args
 
@@ -259,15 +264,13 @@ def main():
     ensure_regridded_range(refresh_start, source_end, args.raw_root, args.regrid_root, args.quality_flag)
 
     staging_zarr = build_staging_zarr(args, refresh_start, source_end)
-    try:
-        result = promote_staging_window(staging_zarr, args.canonical_zarr, refresh_start, source_end)
-        print(f"MODIS range update complete: {result}")
-        print(f"  staging_zarr={staging_zarr}")
-        print(f"  canonical_zarr={args.canonical_zarr}")
-    finally:
-        if staging_zarr.exists():
-            shutil.rmtree(staging_zarr)
-            print(f"Removed staging zarr {staging_zarr}")
+    result = promote_staging_window(staging_zarr, args.canonical_zarr, refresh_start, source_end)
+    print(f"MODIS range update complete: {result}")
+    print(f"  staging_zarr={staging_zarr}")
+    print(f"  canonical_zarr={args.canonical_zarr}")
+    if staging_zarr.exists():
+        shutil.rmtree(staging_zarr)
+        print(f"Removed staging zarr {staging_zarr}")
 
 
 if __name__ == "__main__":

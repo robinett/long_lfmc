@@ -342,12 +342,14 @@ def truncate_store_before_date(out_zarr: Path, start_date: pd.Timestamp, info: d
         f'{start_date.date()}; keeping {prefix_count} time steps'
     )
     root = zarr.open_group(str(out_zarr), mode='a')
-    root['time'].resize(prefix_count)
+    root['time'].resize((prefix_count,))
     root['data'].resize(
-        prefix_count,
-        root['data'].shape[1],
-        root['data'].shape[2],
-        root['data'].shape[3],
+        (
+            prefix_count,
+            root['data'].shape[1],
+            root['data'].shape[2],
+            root['data'].shape[3],
+        )
     )
 
 
@@ -357,11 +359,18 @@ def append_range(args, start_date: pd.Timestamp, end_date: pd.Timestamp):
         info = ensure_compatible_store(args.out_zarr)
         existing_dates = set()
         max_existing_date = None
+        requested_dates = {pd.Timestamp(ts).normalize() for ts in pd.date_range(start_date, end_date, freq='D')}
         if info is not None:
             existing_dates = {pd.Timestamp(ts).normalize() for ts in info['times']}
             if existing_dates:
                 max_existing_date = max(existing_dates)
                 print(f'Existing low-latency climate store max date: {max_existing_date.date()}')
+                if requested_dates.issubset(existing_dates):
+                    print(
+                        'Requested low-latency climate range is already fully present in the '
+                        f'combined store; skipping rebuild for {start_date.date()} -> {end_date.date()}'
+                    )
+                    return
                 if max_existing_date > end_date:
                     raise ValueError(
                         'Requested low-latency climate rebuild does not reach the current store tail; '

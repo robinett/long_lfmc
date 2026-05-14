@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import argparse
+import math
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import earthaccess
@@ -18,6 +20,7 @@ from get_modis import DEFAULT_GRID_PATH, TILES_V, collect_links
 
 REPO_ROOT = Path('/home/users/trobinet/long_lfmc')
 DEFAULT_REGISTRY_PATH = REPO_ROOT / 'lfmc_model/scripts/inference/source_registry.yaml'
+INTERPOLATION_WORKER_SCRIPT = REPO_ROOT / 'data_processing/interpolate/run_interpolation_worker.sbatch'
 
 
 def parse_args():
@@ -59,6 +62,11 @@ def apply_registry_defaults(args):
     args.buffer_days = args.buffer_days or int(proc['interpolation_buffer_days'])
     args.xy_chunk_size = args.xy_chunk_size or int(proc['interpolation_xy_chunk_size'])
     args.time_chunk_size = args.time_chunk_size or int(proc['interpolation_time_chunk_size'])
+    args.interpolation_num_workers = int(proc.get('interpolation_num_workers', 32))
+    args.interpolation_worker_cpus = int(proc.get('interpolation_worker_cpus', 4))
+    args.interpolation_worker_mem = str(proc.get('interpolation_worker_mem', '16G'))
+    args.interpolation_worker_time = str(proc.get('interpolation_worker_time', '08:00:00'))
+    args.interpolation_array_max_retries = int(proc.get('interpolation_array_max_retries', 3))
     args.quality_flag = args.quality_flag if args.quality_flag is not None else int(proc['quality_flag'])
     return args
 
@@ -149,6 +157,56 @@ def run_cmd(cmd):
     subprocess.run([str(part) for part in cmd], check=True)
 
 
+def _run_capture(cmd):
+    result = subprocess.run(
+        [str(part) for part in cmd],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return result.stdout.strip()
+
+
+def _wait_for_slurm_job(job_id: str, label: str) -> bool:
+    while True:
+        active = subprocess.run(
+            ['squeue', '-h', '-j', str(job_id)],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        if active:
+            print(f'  {label} job={job_id} state=ACTIVE; sleeping 60s')
+            time.sleep(60)
+            continue
+
+        states = subprocess.run(
+            ['sacct', '-j', str(job_id), '--format=State', '-n'],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.splitlines()
+        clean_states = [line.strip().split()[0] for line in states if line.strip()]
+        bad_states = {
+            'BOOT_FAIL',
+            'CANCELLED',
+            'DEADLINE',
+            'FAILED',
+            'NODE_FAIL',
+            'OUT_OF_MEMORY',
+            'PREEMPTED',
+            'TIMEOUT',
+        }
+        if any(state in bad_states for state in clean_states):
+            print(f'  {label} job={job_id} failed with states={clean_states}')
+            return False
+        if any(state == 'COMPLETED' for state in clean_states):
+            print(f'  {label} job={job_id} completed with states={clean_states}')
+            return True
+        print(f'  {label} job={job_id} ended with unexpected states={clean_states}')
+        return False
+
+
 def ensure_raw_downloads(month_start: pd.Timestamp, month_end: pd.Timestamp, raw_root: Path, grid_path: Path):
     run_cmd([
         sys.executable,
@@ -205,11 +263,9 @@ def build_staging_zarr(args, refresh_start: pd.Timestamp, month_end: pd.Timestam
     args.plots_dir.mkdir(parents=True, exist_ok=True)
     month_stamp = month_end.strftime('%Y%m')
     staging_zarr = args.staging_root / f'modis_interp_update_{month_stamp}.zarr'
-    if staging_zarr.exists():
-        shutil.rmtree(staging_zarr)
     diagnostic_plot = args.plots_dir / f'modis_interp_update_{month_stamp}_diagnostic.png'
     diagnostic_map = args.plots_dir / f'modis_interp_update_{month_stamp}_diagnostic_map.png'
-    run_cmd([
+    base_cmd = [
         sys.executable,
         REPO_ROOT / 'data_processing/interpolate/interpolate_new.py',
         '--base_path', args.regrid_root,
@@ -220,11 +276,140 @@ def build_staging_zarr(args, refresh_start: pd.Timestamp, month_end: pd.Timestam
         '--buffer_days', str(args.buffer_days),
         '--xy_chunk_size', str(args.xy_chunk_size),
         '--time_chunk_size', str(args.time_chunk_size),
-        '--overwrite_zarr',
         '--diagnostic_plot_path', diagnostic_plot,
         '--diagnostic_map_plot_path', diagnostic_map,
+    ]
+    if staging_zarr.exists():
+        _ensure_staging_matches_request(staging_zarr, refresh_start, month_end)
+        print(f'Resuming existing MODIS interpolation staging zarr: {staging_zarr}')
+    else:
+        run_cmd([
+            *base_cmd,
+            '--mode', 'init',
+            '--overwrite_zarr',
+        ])
+
+    total_chunks = _staging_total_chunks(staging_zarr, args.xy_chunk_size)
+    completed = _completed_chunk_count(staging_zarr)
+    print(f'MODIS interpolation chunk markers: {completed}/{total_chunks}')
+
+    attempt = 1
+    while completed < total_chunks and attempt <= int(args.interpolation_array_max_retries):
+        job_id = _submit_interpolation_array(args, base_cmd)
+        ok = _wait_for_slurm_job(job_id, f'modis_interp_attempt_{attempt}')
+        previous = completed
+        completed = _completed_chunk_count(staging_zarr)
+        print(f'MODIS interpolation chunk markers after attempt {attempt}: {completed}/{total_chunks}')
+        if completed >= total_chunks:
+            break
+        if not ok and completed == previous:
+            print(f'MODIS interpolation attempt {attempt} failed without marker progress')
+        attempt += 1
+
+    if completed < total_chunks:
+        raise RuntimeError(
+            f'MODIS interpolation incomplete after {args.interpolation_array_max_retries} attempts: '
+            f'{completed}/{total_chunks} chunks complete'
+        )
+
+    run_cmd([
+        *base_cmd,
+        '--mode', 'finalize',
+    ])
+    run_cmd([
+        *base_cmd,
+        '--plot-only',
     ])
     return staging_zarr
+
+
+def _ensure_staging_matches_request(
+    staging_zarr: Path,
+    refresh_start: pd.Timestamp,
+    refresh_end: pd.Timestamp,
+):
+    ds = xr.open_zarr(staging_zarr, consolidated=False)
+    try:
+        expected = pd.date_range(refresh_start, refresh_end, freq='D')
+        actual = pd.to_datetime(ds['time'].values).normalize()
+        if len(actual) != len(expected) or not np.array_equal(
+            actual.values.astype('datetime64[ns]'),
+            expected.values.astype('datetime64[ns]'),
+        ):
+            raise ValueError(
+                f'Existing staging zarr has incompatible time coordinates: {staging_zarr}'
+            )
+        interp_vars = [name for name in ds.data_vars if name.endswith('_interp')]
+        if not interp_vars:
+            raise ValueError(f'Existing staging zarr has no *_interp variables: {staging_zarr}')
+    finally:
+        ds.close()
+
+
+def _staging_total_chunks(staging_zarr: Path, xy_chunk_size: int) -> int:
+    ds = xr.open_zarr(staging_zarr, consolidated=False)
+    try:
+        y_size = int(ds.sizes['y'])
+        x_size = int(ds.sizes['x'])
+    finally:
+        ds.close()
+    return math.ceil(y_size / int(xy_chunk_size)) * math.ceil(x_size / int(xy_chunk_size))
+
+
+def _chunk_status_dir(staging_zarr: Path) -> Path:
+    return Path(f'{staging_zarr}.chunk_status')
+
+
+def _legacy_chunk_status_dir(staging_zarr: Path) -> Path:
+    return staging_zarr / '_chunk_status'
+
+
+def _completed_chunk_count(staging_zarr: Path) -> int:
+    marker_names = set()
+    for status_dir in (_chunk_status_dir(staging_zarr), _legacy_chunk_status_dir(staging_zarr)):
+        if status_dir.exists():
+            marker_names.update(path.name for path in status_dir.glob('chunk_*.done'))
+    return len(marker_names)
+
+
+def _submit_interpolation_array(args, base_cmd) -> str:
+    workers = int(args.interpolation_num_workers)
+    if workers < 1:
+        raise ValueError('interpolation_num_workers must be >= 1')
+    export_items = {
+        'INTERP_BASE_PATH': args.regrid_root,
+        'INTERP_START_DATE': _cmd_value(base_cmd, '--start_date'),
+        'INTERP_END_DATE': _cmd_value(base_cmd, '--end_date'),
+        'INTERP_OUTPUT_ZARR': _cmd_value(base_cmd, '--output_zarr'),
+        'INTERP_MAX_DAYS': args.max_interpolation_days,
+        'INTERP_BUFFER_DAYS': args.buffer_days,
+        'INTERP_XY_CHUNK_SIZE': args.xy_chunk_size,
+        'INTERP_TIME_CHUNK_SIZE': args.time_chunk_size,
+        'INTERP_NUM_WORKERS': workers,
+    }
+    export_arg = 'ALL,' + ','.join(f'{key}={value}' for key, value in export_items.items())
+    cmd = [
+        'sbatch',
+        '--parsable',
+        '--array', f'0-{workers - 1}',
+        '--cpus-per-task', str(args.interpolation_worker_cpus),
+        '--mem', str(args.interpolation_worker_mem),
+        '--time', str(args.interpolation_worker_time),
+        '--export', export_arg,
+        INTERPOLATION_WORKER_SCRIPT,
+    ]
+    print('Submitting MODIS interpolation worker array:')
+    print('  ' + ' '.join(str(part) for part in cmd))
+    job_id = _run_capture(cmd)
+    print(f'Submitted MODIS interpolation worker array {job_id}')
+    return job_id
+
+
+def _cmd_value(cmd, flag: str):
+    for idx, value in enumerate(cmd):
+        if str(value) == flag:
+            return cmd[idx + 1]
+    raise KeyError(f'{flag} not found in interpolation command')
 
 
 def _array_dimensions(array):
@@ -346,15 +531,13 @@ def main():
     refresh_start = compute_refresh_start(args.canonical_zarr, month_start, args.max_interpolation_days)
     print(f'Refreshing canonical MODIS from {refresh_start.date()} through {month_end.date()} to preserve interpolation consistency')
     staging_zarr = build_staging_zarr(args, refresh_start, month_end)
-    try:
-        result = promote_staging_window(staging_zarr, args.canonical_zarr, refresh_start, month_end)
-        print(f'MODIS monthly update complete for {args.month}: {result}')
-        print(f'  staging_zarr={staging_zarr}')
-        print(f'  canonical_zarr={args.canonical_zarr}')
-    finally:
-        if staging_zarr.exists():
-            shutil.rmtree(staging_zarr)
-            print(f'Removed staging zarr {staging_zarr}')
+    result = promote_staging_window(staging_zarr, args.canonical_zarr, refresh_start, month_end)
+    print(f'MODIS monthly update complete for {args.month}: {result}')
+    print(f'  staging_zarr={staging_zarr}')
+    print(f'  canonical_zarr={args.canonical_zarr}')
+    if staging_zarr.exists():
+        shutil.rmtree(staging_zarr)
+        print(f'Removed staging zarr {staging_zarr}')
 
 
 if __name__ == '__main__':
