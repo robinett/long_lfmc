@@ -7,7 +7,7 @@
 #SBATCH --partition=serc
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=256G
+#SBATCH --mem=160G
 
 set -euo pipefail
 

@@ -38,6 +38,11 @@ processing:
     interpolation_buffer_days: 15
     interpolation_xy_chunk_size: 128
     interpolation_time_chunk_size: 1
+    interpolation_num_workers: 32
+    interpolation_worker_cpus: 4
+    interpolation_worker_mem: 16G
+    interpolation_worker_time: 08:00:00
+    interpolation_array_max_retries: 3
     quality_flag: 0
   daymet:
     earthaccess_root: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_earthaccess

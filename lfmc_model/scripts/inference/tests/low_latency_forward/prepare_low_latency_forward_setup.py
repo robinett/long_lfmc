@@ -61,6 +61,7 @@ SCRATCH_MAP_RUN_ROOT = SCRATCH_DIR / "map_runs/low_latency_2024"
 TEST_SOURCE_REGISTRY = LOG_DIR / "source_registry_test.yaml"
 TEST_MAP_CONFIG = LOG_DIR / "map_configs_low_latency_test.yaml"
 TEST_MANIFEST = LOG_DIR / "low_latency_forward_setup_manifest.json"
+RESET_PROCESSING_ROOTS = False
 
 
 def ensure_parent(path: Path) -> None:
@@ -203,6 +204,32 @@ def reset_processing_roots() -> None:
                 path.unlink()
 
 
+def prepare_processing_roots() -> None:
+    paths = [
+        SCRATCH_MODIS_RAW_ROOT,
+        SCRATCH_MODIS_REGRID_ROOT,
+        SCRATCH_MODIS_STAGING_ROOT,
+        SCRATCH_MODIS_PLOTS_DIR,
+        SCRATCH_LL_REGRID_ROOT,
+        SCRATCH_LL_APPEND_COORD_DIR,
+        SCRATCH_PRISM_RAW_ROOT,
+        SCRATCH_PRISM_EXTRACTED_ROOT,
+        SCRATCH_PRISM_TARGET_ROOT,
+        SCRATCH_PRISM_PLOTS_DIR,
+        SCRATCH_SNODAS_RAW_ROOT,
+        SCRATCH_SNODAS_TARGET_ROOT,
+        SCRATCH_SNODAS_PLOTS_DIR,
+        SCRATCH_MAP_RUN_ROOT,
+        SCRATCH_PRODUCTION_METADATA,
+    ]
+    for path in paths:
+        if path.exists():
+            print(f"Reusing existing test processing path: {path}")
+            continue
+        path.mkdir(parents=True, exist_ok=True)
+        print(f"Creating missing test processing path: {path}")
+
+
 def write_yaml(path: Path, payload: dict) -> None:
     ensure_parent(path)
     path.write_text(yaml.safe_dump(payload, sort_keys=False))
@@ -219,7 +246,12 @@ def main() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
 
-    reset_processing_roots()
+    if RESET_PROCESSING_ROOTS:
+        print("RESET_PROCESSING_ROOTS=true; removing prior low-latency processing paths")
+        reset_processing_roots()
+    else:
+        print("RESET_PROCESSING_ROOTS=false; preserving prior low-latency processing paths")
+    prepare_processing_roots()
 
     lfmc_source = require_scratch_source(SRC_LFMC_TARGET, "LFMC scientific target zarr")
     modis_source = choose_stage_source(SRC_MODIS_CANONICAL, "canonical MODIS zarr")
@@ -317,6 +349,12 @@ def main() -> None:
             map_submission[key] = multiyear_submission[key]
     map_submission["owners_gpu_max_jobs"] = 100
     map_submission["owners_gpu_constraint"] = ""
+    map_submission["dynamic_gpu_work_queue"] = True
+    map_submission["gpu_fine_tasks_per_job"] = 1
+    map_submission["gpu_max_jobs"] = 0
+    map_submission["max_prepared_ahead_of_completed_shards"] = 1000
+    map_submission["prepare_failure_threshold"] = 3
+    print("Configuring low-latency test for owners-only GPU workers (gpu_max_jobs=0, prepare_failure_threshold=3)")
     map_cfg["sources"]["registry_path"] = str(TEST_SOURCE_REGISTRY)
     map_cfg["data"]["requested_start_date"] = f"{TEST_YEAR}-01-01"
     map_cfg["data"]["requested_end_date"] = f"{TEST_YEAR}-12-31"

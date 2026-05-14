@@ -162,21 +162,35 @@ def scientific_year_is_scrambled(zarr_path: Path, year: int) -> bool:
         return False
 
 
-def subset_matches_end_value(dst_path: Path, selector_dim: str, expected_end_value) -> bool:
+def classify_subset_state(dst_path: Path, selector_dim: str, allowed_end_values: dict[str, object], label: str) -> str:
     if not dst_path.exists():
-        return False
+        print(f"{label} is missing at {dst_path}")
+        return "missing"
     try:
         ds = open_zarr_nonconsolidated(dst_path)
         coord = ds[selector_dim]
         if int(coord.sizes.get(selector_dim, 0)) == 0:
             ds.close()
-            return False
-        last_value = coord.values[-1]
+            print(f"{label} has empty {selector_dim} coordinate at {dst_path}")
+            return "bad"
+        last_value = pd.Timestamp(coord.values[-1])
         ds.close()
-        return pd.Timestamp(last_value) == pd.Timestamp(expected_end_value)
+        for state_name, expected_end_value in allowed_end_values.items():
+            if last_value == pd.Timestamp(expected_end_value):
+                print(f"{label} state={state_name} last_{selector_dim}={last_value.date()}")
+                return state_name
+        allowed_labels = ", ".join(
+            f"{state_name}={pd.Timestamp(expected_end_value).date()}"
+            for state_name, expected_end_value in allowed_end_values.items()
+        )
+        print(
+            f"{label} has unexpected last_{selector_dim}={last_value.date()} "
+            f"(expected one of: {allowed_labels})"
+        )
+        return "bad"
     except Exception as exc:
-        print(f"Subset state check failed for {dst_path}: {exc}")
-        return False
+        print(f"{label} state check failed for {dst_path}: {exc}")
+        return "bad"
 
 
 def copy_is_usable(dst_path: Path) -> bool:
@@ -240,8 +254,19 @@ def main() -> None:
         copy_tree(SRC_SCIENTIFIC, SCRATCH_PRODUCTION_ZARR, "scientific zarr", reset_existing=False)
         scramble_scientific_year(SCRATCH_PRODUCTION_ZARR, TEST_YEAR)
 
-    if subset_matches_end_value(SCRATCH_NLCD_ANNUAL_ZARR, "year", "2023-12-31"):
+    nlcd_state = classify_subset_state(
+        SCRATCH_NLCD_ANNUAL_ZARR,
+        "year",
+        {
+            "baseline_ready": "2023-01-01",
+            "resumable_2024": "2024-01-01",
+        },
+        "Scratch NLCD annual zarr",
+    )
+    if nlcd_state == "baseline_ready":
         print("Scratch NLCD annual zarr already stops at 2023; skipping rebuild")
+    elif nlcd_state == "resumable_2024":
+        print("Scratch NLCD annual zarr already includes 2024; skipping rebuild and resuming from advanced state")
     else:
         print("Preparing scratch NLCD annual zarr through 2023")
         subset_zarr_time(
@@ -251,8 +276,19 @@ def main() -> None:
             end_value=np.datetime64("2023-12-31"),
         )
 
-    if subset_matches_end_value(SCRATCH_DAYMET_CLIM20_ZARR, "time", PREP_END_DATE):
+    daymet_state = classify_subset_state(
+        SCRATCH_DAYMET_CLIM20_ZARR,
+        "time",
+        {
+            "baseline_ready": PREP_END_DATE,
+            "resumable_2024": "2024-12-31",
+        },
+        "Scratch Daymet clim20 zarr",
+    )
+    if daymet_state == "baseline_ready":
         print("Scratch Daymet clim20 zarr already stops at 2023-12-31; skipping rebuild")
+    elif daymet_state == "resumable_2024":
+        print("Scratch Daymet clim20 zarr already includes 2024; skipping rebuild and resuming from advanced state")
     else:
         print("Preparing scratch Daymet clim20 zarr through 2023")
         subset_zarr_time(
@@ -291,8 +327,21 @@ def main() -> None:
     for key in ["owners_partition", "owners_gpu_time_limit", "owners_gpu_cpus_per_task", "owners_gpu_mem"]:
         if key in multiyear_submission:
             map_submission[key] = multiyear_submission[key]
+    for key in [
+        "dynamic_gpu_work_queue",
+        "gpu_fine_tasks_per_job",
+        "max_prepared_ahead_of_completed_shards",
+    ]:
+        if key in multiyear_submission:
+            map_submission[key] = multiyear_submission[key]
     map_submission["owners_gpu_max_jobs"] = 100
     map_submission["owners_gpu_constraint"] = ""
+    map_submission["dynamic_gpu_work_queue"] = True
+    map_submission["gpu_fine_tasks_per_job"] = 1
+    map_submission["gpu_max_jobs"] = 0
+    map_submission["max_prepared_ahead_of_completed_shards"] = 1000
+    map_submission["prepare_failure_threshold"] = 3
+    print("Configuring archive-forward test for owners-only GPU workers (gpu_max_jobs=0, prepare_failure_threshold=3)")
     map_cfg["sources"]["registry_path"] = str(TEST_SOURCE_REGISTRY)
     map_cfg["data"]["requested_start_date"] = f"{TEST_YEAR}-01-01"
     map_cfg["data"]["requested_end_date"] = f"{TEST_YEAR}-12-31"

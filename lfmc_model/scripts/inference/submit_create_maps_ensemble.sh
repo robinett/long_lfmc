@@ -409,6 +409,7 @@ prepare_time_limit="${PREPARE_TIME_LIMIT:-$(cfg_value submission prepare_time_li
 prepare_cpus_per_task="${PREPARE_CPUS_PER_TASK:-$(cfg_value submission prepare_cpus_per_task 8)}"
 prepare_mem="${PREPARE_MEM:-$(cfg_value submission prepare_mem 128G)}"
 prepare_max_retries="${PREPARE_MAX_RETRIES:-$(cfg_value submission prepare_max_retries 8)}"
+prepare_failure_threshold="${PREPARE_FAILURE_THRESHOLD:-$(cfg_value submission prepare_failure_threshold 3)}"
 prepare_retry_states="${PREPARE_RETRY_STATES:-$(cfg_value submission prepare_retry_states PREEMPTED,REVOKED,BOOT_FAIL,NODE_FAIL,TIMEOUT,OUT_OF_MEMORY)}"
 merge_blocks_per_job="${MERGE_BLOCKS_PER_JOB:-$(cfg_value submission merge_blocks_per_job 1)}"
 model_type="${MODEL_TYPE:-$(cfg_value ensemble model_type standard)}"
@@ -435,6 +436,7 @@ find_resumable_run_dir() {
 import csv
 import json
 import os
+import sys
 from pathlib import Path
 
 run_root = Path(os.environ["RUN_ROOT_FOR_RESUME"])
@@ -475,8 +477,16 @@ completed_count = sum(1 for _ in completed_log.open("r", encoding="utf-8")) if c
 
 if task_count <= 0:
     raise SystemExit(1)
-if shard_count != task_count or completed_count != task_count:
+if shard_count != task_count:
     raise SystemExit(1)
+
+if completed_count != task_count:
+    print(
+        f"[submit_create_maps_ensemble] warning: completed_tasks.tsv count "
+        f"{completed_count} does not match manifest task_count {task_count} for {run_dir}; "
+        "trusting shard_count for completed-run resume",
+        file=sys.stderr,
+    )
 
 print(str(run_dir))
 PYRESUME
@@ -973,6 +983,7 @@ if [[ "${use_gpu_forward}" == "true" ]]; then
         declare -a gpu_endgame_cancelled
         declare -a prepare_job_ids
         declare -a prepare_completed_flags
+        declare -a prepare_failure_counts
         declare -a prepare_retry_counts
         declare -a prepare_submission_counts
         next_prepare_task_id=0
@@ -1059,6 +1070,12 @@ PYRESUME_PREP
                         continue
                     fi
                     if job_failed "${prepare_job_state}"; then
+                        failure_count=$(( ${prepare_failure_counts[$prepare_task_id]:-0} + 1 ))
+                        prepare_failure_counts[$prepare_task_id]="${failure_count}"
+                        if [[ "${failure_count}" -ge "${prepare_failure_threshold}" ]]; then
+                            echo "Prepare worker job ${prepare_job_id} for prepare_task_id=${prepare_task_id} exceeded failure threshold ${prepare_failure_threshold} after state ${prepare_job_state}" >&2
+                            exit 1
+                        fi
                         if prepare_retryable "${prepare_job_state}"; then
                             retry_count=$(( ${prepare_retry_counts[$prepare_task_id]:-0} + 1 ))
                             prepare_retry_counts[$prepare_task_id]="${retry_count}"
@@ -1068,11 +1085,13 @@ PYRESUME_PREP
                             fi
                             prepare_job_ids[$prepare_task_id]=""
                             progress_made=1
-                            echo "Prepare worker job ${prepare_job_id} for prepare_task_id=${prepare_task_id} ended with retryable state ${prepare_job_state}; retry ${retry_count}/${prepare_max_retries} queued"
+                            echo "Prepare worker job ${prepare_job_id} for prepare_task_id=${prepare_task_id} ended with retryable state ${prepare_job_state}; failure ${failure_count}/${prepare_failure_threshold}; retry ${retry_count}/${prepare_max_retries} queued"
                             continue
                         fi
-                        echo "Prepare worker job ${prepare_job_id} for prepare_task_id=${prepare_task_id} failed with non-retryable state ${prepare_job_state}; aborting GPU submission monitor." >&2
-                        exit 1
+                        prepare_job_ids[$prepare_task_id]=""
+                        progress_made=1
+                        echo "Prepare worker job ${prepare_job_id} for prepare_task_id=${prepare_task_id} failed with non-retryable state ${prepare_job_state}; failure ${failure_count}/${prepare_failure_threshold}; resubmitting same prepare task"
+                        continue
                     fi
                     active_prepare_jobs=$(( active_prepare_jobs + 1 ))
                     if [[ "${prepare_job_state}" == "PENDING" || "${prepare_job_state}" == "CONFIGURING" ]]; then
@@ -1084,6 +1103,9 @@ PYRESUME_PREP
             fi
             prepare_complete=0
             if [[ "${start_from_gpu}" == "true" ]]; then
+                prepare_complete=1
+            elif [[ "${completed_shards}" -ge "${num_fine_tasks}" ]]; then
+                # Once all shards exist, do not keep prepare work alive on resume.
                 prepare_complete=1
             elif [[ "${next_prepare_task_id}" -ge "${num_job_tasks}" && "${active_prepare_jobs}" -eq 0 ]]; then
                 prepare_complete=1
@@ -1273,7 +1295,7 @@ PYELAPSED
             fi
 
             effective_prepare_backlog="${prepared_reference_count}"
-            if [[ "${start_from_gpu}" != "true" ]]; then
+            if [[ "${start_from_gpu}" != "true" && "${completed_shards}" -lt "${num_fine_tasks}" ]]; then
                 while [[ "${next_prepare_task_id}" -lt "${num_job_tasks}" && "${prepare_completed_flags[$next_prepare_task_id]:-0}" == "1" ]]; do
                     next_prepare_task_id=$(( next_prepare_task_id + 1 ))
                 done
@@ -1327,6 +1349,9 @@ PYELAPSED
             fi
 
             ready_unsharded="${prepared_reference_count}"
+            if [[ "${ready_unsharded}" -gt "${remaining_shards}" ]]; then
+                ready_unsharded="${remaining_shards}"
+            fi
 
             while [[ "${ready_unsharded}" -gt "${active_gpu_jobs}" ]]; do
                 target_pool=""
@@ -1357,14 +1382,14 @@ PYELAPSED
                 if [[ "${target_pool}" == "owners" ]]; then
                     active_owner_jobs=$(( active_owner_jobs + 1 ))
                 fi
-                echo "Submitted GPU worker job ${gpu_job_id} for worker_id=${gpu_task_id} on pool=${target_pool}; ready_unsharded=${ready_unsharded}; shards=${completed_shards}/${num_fine_tasks}; prepared_refs=${prepared_reference_count}; serc_locks=$(lock_count)/${gpu_max_jobs}; owners_active=${active_owner_jobs}/${owners_gpu_max_jobs}; attempts=${gpu_submission_counts[$gpu_task_id]}"
+                echo "Submitted GPU worker job ${gpu_job_id} for worker_id=${gpu_task_id} on pool=${target_pool}; remaining_shards=${remaining_shards}; ready_unsharded=${ready_unsharded}; shards=${completed_shards}/${num_fine_tasks}; prepared_refs=${prepared_reference_count}; serc_locks=$(lock_count)/${gpu_max_jobs}; owners_active=${active_owner_jobs}/${owners_gpu_max_jobs}; attempts=${gpu_submission_counts[$gpu_task_id]}"
             done
 
             if [[ "${prepare_complete}" -ne 1 && "${ready_unsharded}" -le 0 ]]; then
                 blocked_by_prepare=$(( blocked_by_prepare + 1 ))
             fi
 
-            echo "GPU scheduler: iteration=${scheduler_iteration}; current_year=${multiyear_current_year}; year_ordinal=${multiyear_year_ordinal:-NA}/${multiyear_total_years:-NA}; year_eta=${year_eta_dhms}; overall_eta=${overall_eta_dhms}; shards=${completed_shards}/${num_fine_tasks}; prepared_refs=${prepared_reference_count}/${num_fine_tasks}; effective_prepare_backlog=${effective_prepare_backlog}/${max_prepared_ahead_of_completed_shards}; prepare_running=${running_prepare_jobs}; prepare_pending=${pending_prepare_jobs}; prepare_submitted=${next_prepare_task_id}/${num_job_tasks}; running=${running_gpu_jobs}; pending=${pending_gpu_jobs}; total_retries=${retry_waiting_total}; serc_retry_events=${serc_retry_events_total}/50; owners_failure_events=${owners_failure_events_total}; blocked_by_prepare=${blocked_by_prepare}; blocked_by_capacity=${blocked_by_capacity}; serc_locks=$(lock_count)/${gpu_max_jobs}; serc_running=${running_serc_jobs}; owners_active=${active_owner_jobs}/${owners_gpu_max_jobs}; serc_only_endgame=${serc_only_endgame_active}; serc_estimated_task_seconds=${serc_estimated_task_seconds:-NA}; serc_estimated_finish_seconds=${serc_estimated_finish_seconds:-NA}; sleeping ${gpu_submit_sleep_seconds}s"
+            echo "GPU scheduler: iteration=${scheduler_iteration}; current_year=${multiyear_current_year}; year_ordinal=${multiyear_year_ordinal:-NA}/${multiyear_total_years:-NA}; year_eta=${year_eta_dhms}; overall_eta=${overall_eta_dhms}; shards=${completed_shards}/${num_fine_tasks}; remaining_shards=${remaining_shards}; prepared_refs=${prepared_reference_count}/${num_fine_tasks}; ready_unsharded=${ready_unsharded}; effective_prepare_backlog=${effective_prepare_backlog}/${max_prepared_ahead_of_completed_shards}; prepare_running=${running_prepare_jobs}; prepare_pending=${pending_prepare_jobs}; prepare_submitted=${next_prepare_task_id}/${num_job_tasks}; running=${running_gpu_jobs}; pending=${pending_gpu_jobs}; total_retries=${retry_waiting_total}; serc_retry_events=${serc_retry_events_total}/50; owners_failure_events=${owners_failure_events_total}; blocked_by_prepare=${blocked_by_prepare}; blocked_by_capacity=${blocked_by_capacity}; serc_locks=$(lock_count)/${gpu_max_jobs}; serc_running=${running_serc_jobs}; owners_active=${active_owner_jobs}/${owners_gpu_max_jobs}; serc_only_endgame=${serc_only_endgame_active}; serc_estimated_task_seconds=${serc_estimated_task_seconds:-NA}; serc_estimated_finish_seconds=${serc_estimated_finish_seconds:-NA}; sleeping ${gpu_submit_sleep_seconds}s"
             sleep "${gpu_submit_sleep_seconds}"
         done
         echo "All GPU work completed."
@@ -1388,11 +1413,18 @@ PYELAPSED
                 gpu_submission_counts[${gpu_task_id}]=0
             done
         else
+            declare -a prepare_monitor_job_ids
+            declare -a prepare_failure_counts
+            declare -a prepare_submission_counts
             prepare_job_id="$({
                 sbatch --parsable --array="0-$(( num_job_tasks - 1 ))%${array_concurrency}" --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/prepare_maps_ensemble.sbatch"
             })"
             echo "Submitted CPU prepare array job ${prepare_job_id}"
             echo "Monitoring prepare tasks and submitting GPU jobs under shared lock budget ${gpu_max_jobs} from ${gpu_lock_dir}"
+            for (( prepare_task_id=0; prepare_task_id<num_job_tasks; prepare_task_id++ )); do
+                prepare_monitor_job_ids[$prepare_task_id]="${prepare_job_id}_${prepare_task_id}"
+                prepare_submission_counts[$prepare_task_id]=1
+            done
 
             mapfile -t gpu_dependency_lines < <(python3 - <<PYMAP
 import pandas as pd
@@ -1514,10 +1546,25 @@ PYMAP
                 if [[ "${start_from_gpu}" != "true" ]]; then
                     IFS=',' read -r -a prepare_task_ids <<< "${prepare_task_csv}"
                     for prepare_task_id in "${prepare_task_ids[@]}"; do
-                        prepare_task_state="$(job_state "${prepare_job_id}_${prepare_task_id}")"
+                        prepare_task_job_ref="${prepare_monitor_job_ids[$prepare_task_id]:-${prepare_job_id}_${prepare_task_id}}"
+                        prepare_task_state="$(job_state "${prepare_task_job_ref}")"
                         if job_failed "${prepare_task_state}"; then
-                            echo "Prepare array task ${prepare_job_id}_${prepare_task_id} failed with state ${prepare_task_state}; aborting GPU submission monitor." >&2
-                            exit 1
+                            failure_count=$(( ${prepare_failure_counts[$prepare_task_id]:-0} + 1 ))
+                            prepare_failure_counts[$prepare_task_id]="${failure_count}"
+                            if [[ "${failure_count}" -ge "${prepare_failure_threshold}" ]]; then
+                                echo "Prepare task ${prepare_task_job_ref} for prepare_task_id=${prepare_task_id} exceeded failure threshold ${prepare_failure_threshold} after state ${prepare_task_state}" >&2
+                                exit 1
+                            fi
+                            if ! replacement_prepare_job_id="$(submit_prepare_job "${prepare_task_id}")"; then
+                                echo "Failed to resubmit prepare worker for prepare_task_id=${prepare_task_id} after state ${prepare_task_state}" >&2
+                                exit 1
+                            fi
+                            prepare_monitor_job_ids[$prepare_task_id]="${replacement_prepare_job_id}"
+                            prepare_submission_counts[$prepare_task_id]=$(( ${prepare_submission_counts[$prepare_task_id]:-1} + 1 ))
+                            progress_made=1
+                            prereqs_ready=0
+                            echo "Prepare task ${prepare_task_job_ref} for prepare_task_id=${prepare_task_id} failed with state ${prepare_task_state}; failure ${failure_count}/${prepare_failure_threshold}; resubmitted as standalone prepare worker ${replacement_prepare_job_id}; attempts=${prepare_submission_counts[$prepare_task_id]}"
+                            break
                         fi
                         if [[ "${prepare_task_state}" != "COMPLETED" ]]; then
                             prereqs_ready=0

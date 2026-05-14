@@ -5,6 +5,7 @@ Files here:
 - `prepare_archive_forward_setup.py`: stage job payload; requires the needed OAK baselines to already exist and then stages `OAK -> scratch` only.
   It stages a full scratch scientific zarr through `2024`, then intentionally corrupts only `2024` and sets `quality_flag=1` for that year so the yearly coordinator sees it as low-latency output that needs replacement.
   It stages the annual/model-resolution NLCD baseline through `2023`, the Daymet clim20 baseline through `2023`, and the Daymet climatology store.
+  If the scratch Daymet/NLCD test stores are already valid, the stage job now reuses them in either of two cases: a clean `2000-2023` baseline or a clean store already advanced through `2024`. It rebuilds only when those stores are missing, unreadable, or in an unexpected partial state.
 - `stage_archive_forward_setup.sbatch`: stages baseline assets from OAK to scratch and writes test configs.
 - `run_archive_forward_inference_test.sbatch`: runs the real yearly final coordinator against the scratch registry/config.
   The coordinator detects that `2024` is fully present but low-latency quality, confirms Daymet/NLCD availability, updates the scratch Daymet/NLCD stores for `2024`, runs final inference on `owners` GPUs only, and overwrites `2024` in the scratch scientific zarr.

@@ -54,7 +54,12 @@ bash "${map_submit_script}"
 
 readarray -t promotion_values < <(CONFIG_PATH="${config_path}" REGISTRY_PATH="${registry_path}" python3 - <<'PY2'
 import os
+import sys
 from pathlib import Path
+
+script_dir = Path("/home/users/trobinet/long_lfmc/lfmc_model/scripts/inference")
+sys.path.insert(0, str(script_dir))
+
 from map_config import get_cfg, load_map_config
 from input_source_resolver import load_source_registry
 from map_runtime_utils import latest_run_dir
@@ -73,6 +78,10 @@ print(production_path)
 print(metadata_dir)
 PY2
 )
+if [[ "${#promotion_values[@]}" -ne 3 ]]; then
+    echo "Failed to resolve final-year promotion paths from config=${config_path} registry=${registry_path}" >&2
+    exit 1
+fi
 
 staging_zarr="${promotion_values[0]}"
 production_zarr="${promotion_values[1]}"

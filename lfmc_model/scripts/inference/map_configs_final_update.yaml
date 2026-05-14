@@ -41,7 +41,8 @@ submission:
   tasks_per_job: 40
   merge_blocks_per_job: 2
   use_gpu_forward: true
-  gpu_fine_tasks_per_job: 20
+  dynamic_gpu_work_queue: true
+  gpu_fine_tasks_per_job: 1
   gpu_max_jobs: 8
   gpu_lock_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/gpu_locks
   gpu_submit_sleep_seconds: 60
@@ -49,6 +50,8 @@ submission:
   gpu_cpus_per_task: 16
   gpu_mem: 128G
   gpu_constraint: GPU_MEM:80GB
+  max_prepared_ahead_of_completed_shards: 1000
+  prepare_failure_threshold: 3
 
 product:
   tier: final
