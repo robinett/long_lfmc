@@ -4,7 +4,7 @@ set -euo pipefail
 
 script_dir="/home/users/trobinet/long_lfmc/lfmc_model/scripts/transfer_out"
 config_path="${script_dir}/source_coop_transfer_configs.yaml"
-api_refresh_url="https://long-lfmc-api.onrender.com/api/refresh"
+api_refresh_url="${LONG_LFMC_API_REFRESH_URL:-https://long-lfmc-api.onrender.com/api/refresh}"
 
 log() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1"
