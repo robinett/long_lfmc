@@ -95,6 +95,6 @@ Edit `viewer_config.yaml` to change:
 
 ## Notes
 
-- This viewer is intentionally local-first so we can validate exact 500 m cell behavior before moving anything to Source.
+- This viewer is intentionally local-first so we can validate exact 500m cell behavior before moving anything to Source.
 - The frontend now renders native `EPSG:5070` static tiles rather than reprojected Web Mercator tiles or full-scene images.
 - Once the local exact-grid workflow is solid, the static tile assets can be moved to Source while the click API remains separate.
