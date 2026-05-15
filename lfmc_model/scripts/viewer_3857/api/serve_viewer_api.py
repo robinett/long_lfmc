@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import csv
-import functools
 import hmac
 import io
 import json
@@ -33,6 +32,8 @@ here = Path(__file__).resolve().parent
 viewer_root = here.parent
 config_path = viewer_root / "viewer_config.yaml"
 DATASET_LOAD_WAIT_SECONDS = 45.0
+DEFAULT_POINT_TIMESERIES_DAYS = 365
+MAX_POINT_TIMESERIES_DAYS = 366
 
 dask = None
 np = None
@@ -285,18 +286,16 @@ class ViewerDataset:
             self.ds[variable_name].isel(time=time_idx, y=y_idx, x=x_idx).values
         ).item()
 
-    @functools.lru_cache(maxsize=512)
-    def _mean_series_for_cell(self, y_idx: int, x_idx: int) -> Tuple[float, ...]:
+    def _series_for_cell(
+        self,
+        variable_name: str,
+        start_idx: int,
+        end_idx: int,
+        y_idx: int,
+        x_idx: int,
+    ) -> Tuple[float, ...]:
         values = np.asarray(
-            self.ds[self.display_variable].isel(y=y_idx, x=x_idx).values,
-            dtype=np.float32,
-        )
-        return tuple(float(value) for value in values)
-
-    @functools.lru_cache(maxsize=512)
-    def _uncertainty_series_for_cell(self, y_idx: int, x_idx: int) -> Tuple[float, ...]:
-        values = np.asarray(
-            self.ds[self.uncertainty_variable].isel(y=y_idx, x=x_idx).values,
+            self.ds[variable_name].isel(time=slice(start_idx, end_idx), y=y_idx, x=x_idx).values,
             dtype=np.float32,
         )
         return tuple(float(value) for value in values)
@@ -304,9 +303,8 @@ class ViewerDataset:
     def _quality_value(self, time_idx: int) -> int:
         return int(np.asarray(self.ds[self.quality_variable].isel(time=time_idx).values).item())
 
-    @functools.lru_cache(maxsize=1)
-    def _quality_series(self) -> Tuple[int, ...]:
-        values = np.asarray(self.ds[self.quality_variable].values)
+    def _quality_series_for_window(self, start_idx: int, end_idx: int) -> Tuple[int, ...]:
+        values = np.asarray(self.ds[self.quality_variable].isel(time=slice(start_idx, end_idx)).values)
         if values.ndim != 1:
             raise ValueError(
                 f"Expected viewer quality variable {self.quality_variable!r} to be 1D over time; "
@@ -353,6 +351,7 @@ class ViewerDataset:
         lat: float = None,
         lon: float = None,
         include_timeseries: bool = False,
+        timeseries_days: int = DEFAULT_POINT_TIMESERIES_DAYS,
     ) -> Dict[str, object]:
         time_idx = self._date_index(date_str)
         if grid_x is None or grid_y is None:
@@ -411,14 +410,30 @@ class ViewerDataset:
         }
 
         if include_timeseries:
-            mean_series = self._mean_series_for_cell(y_idx=y_idx, x_idx=x_idx)
-            uncertainty_series = self._uncertainty_series_for_cell(y_idx=y_idx, x_idx=x_idx)
-            quality_series = self._quality_series()
+            bounded_days = min(max(int(timeseries_days), 1), MAX_POINT_TIMESERIES_DAYS)
+            start_idx = max(0, time_idx - bounded_days + 1)
+            end_idx = time_idx + 1
+            mean_series = self._series_for_cell(
+                self.display_variable,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                y_idx=y_idx,
+                x_idx=x_idx,
+            )
+            uncertainty_series = self._series_for_cell(
+                self.uncertainty_variable,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                y_idx=y_idx,
+                x_idx=x_idx,
+            )
+            quality_series = self._quality_series_for_window(start_idx=start_idx, end_idx=end_idx)
             payload["timeseries"] = {
-                "dates": self.dates,
+                "dates": self.dates[start_idx:end_idx],
                 "lfmc_ens_mean": [safe_float(value) for value in mean_series],
                 "lfmc_ens_std": [safe_float(value) for value in uncertainty_series],
                 "quality_flag": [int(value) for value in quality_series],
+                "window_days": bounded_days,
             }
 
         return payload
@@ -431,9 +446,6 @@ class ViewerDataset:
         return candidate
 
     def close(self) -> None:
-        self._mean_series_for_cell.cache_clear()
-        self._uncertainty_series_for_cell.cache_clear()
-        self._quality_series.cache_clear()
         self.ds.close()
 
 
@@ -793,6 +805,7 @@ def viewer_point_payload_with_refresh(
     lat: float = None,
     lon: float = None,
     include_timeseries: bool = False,
+    timeseries_days: int = DEFAULT_POINT_TIMESERIES_DAYS,
 ) -> Dict[str, object]:
     try:
         loaded_viewer_dataset = wait_for_viewer_dataset()
@@ -804,6 +817,7 @@ def viewer_point_payload_with_refresh(
                 lat=lat,
                 lon=lon,
                 include_timeseries=include_timeseries,
+                timeseries_days=timeseries_days,
             )
     except ValueError as exc:
         if not should_refresh_for_date_error(exc):
@@ -819,6 +833,7 @@ def viewer_point_payload_with_refresh(
             lat=lat,
             lon=lon,
             include_timeseries=include_timeseries,
+            timeseries_days=timeseries_days,
         )
 
 
@@ -911,6 +926,13 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 lat = self._optional_float(query, "lat")
                 lon = self._optional_float(query, "lon")
                 include_timeseries = self._optional_bool(query, "include_timeseries", default=False)
+                timeseries_days = self._optional_int(
+                    query,
+                    "timeseries_days",
+                    default=DEFAULT_POINT_TIMESERIES_DAYS,
+                    minimum=1,
+                    maximum=MAX_POINT_TIMESERIES_DAYS,
+                )
                 payload = viewer_point_payload_with_refresh(
                     date_str=date_str,
                     grid_x=grid_x,
@@ -918,6 +940,7 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                     lat=lat,
                     lon=lon,
                     include_timeseries=include_timeseries,
+                    timeseries_days=timeseries_days,
                 )
                 self._json_response(payload)
                 return
@@ -996,6 +1019,24 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
         if value in {"0", "false", "no", "n"}:
             return False
         raise ValueError(f"Invalid boolean query parameter {name}: {values[0]!r}")
+
+    def _optional_int(
+        self,
+        query: Dict[str, List[str]],
+        name: str,
+        default: int,
+        minimum: int = None,
+        maximum: int = None,
+    ) -> int:
+        values = query.get(name)
+        if not values or values[0] == "":
+            return default
+        value = int(values[0])
+        if minimum is not None and value < minimum:
+            raise ValueError(f"{name} must be at least {minimum}")
+        if maximum is not None and value > maximum:
+            raise ValueError(f"{name} must be at most {maximum}")
+        return value
 
     def _json_response(self, payload: Dict[str, object], status: int = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")

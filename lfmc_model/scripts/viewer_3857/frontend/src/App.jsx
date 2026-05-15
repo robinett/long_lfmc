@@ -242,7 +242,7 @@ function TimeseriesChart({ pointInfo, selectedDate }) {
   const geometry = buildTimeseriesGeometry(pointInfo, selectedDate);
 
   if (!geometry) {
-    return <p className="panel-note">Full time series is not loaded in the web viewer.</p>;
+    return <p className="panel-note">Click the map to load the previous year of daily values.</p>;
   }
 
   return (
@@ -413,6 +413,8 @@ function App() {
       date: dateStr,
       x: String(x),
       y: String(y),
+      include_timeseries: "true",
+      timeseries_days: "365",
     });
     const maxAttempts = 30;
     const retryDelayMs = 2000;
