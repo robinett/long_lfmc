@@ -414,12 +414,26 @@ function App() {
       x: String(x),
       y: String(y),
     });
-    const response = await fetch(apiUrl(`/api/point?${query.toString()}`));
-    const payload = await response.json();
-    if (payload.error) {
-      throw new Error(payload.error);
+    const maxAttempts = 30;
+    const retryDelayMs = 2000;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const response = await fetch(apiUrl(`/api/point?${query.toString()}`), { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok || payload.error) {
+        const errorMessage = payload.error || `Point HTTP ${response.status}`;
+        const isLoading = response.status === 503 && errorMessage.toLowerCase().includes("loading");
+        if (isLoading && attempt < maxAttempts) {
+          setStatusText(`Waiting for clicked cell data... (${attempt}/${maxAttempts})`);
+          await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
+          continue;
+        }
+        throw new Error(errorMessage);
+      }
+      return payload;
     }
-    return payload;
+
+    throw new Error("Point query timed out while viewer dataset was loading");
   }
 
   async function loadPointAtCoordinate(x, y, dateStr, options = {}) {

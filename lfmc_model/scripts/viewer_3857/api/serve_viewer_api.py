@@ -25,9 +25,14 @@ except ImportError:
         daemon_threads = True
 
 
+class DatasetLoadingError(RuntimeError):
+    pass
+
+
 here = Path(__file__).resolve().parent
 viewer_root = here.parent
 config_path = viewer_root / "viewer_config.yaml"
+DATASET_LOAD_WAIT_SECONDS = 45.0
 
 dask = None
 np = None
@@ -539,62 +544,106 @@ cfg: Dict[str, object] = {}
 viewer_dataset: Optional[ViewerDataset] = None
 scientific_dataset: Optional[ScientificDataset] = None
 dataset_lock = threading.RLock()
+dataset_condition = threading.Condition(dataset_lock)
+viewer_dataset_loading = False
+scientific_dataset_loading = False
 last_refresh_time = 0.0
 last_refresh_error: Optional[str] = None
 
 
 def refresh_datasets(reason: str = "manual") -> Dict[str, object]:
-    global cfg, viewer_dataset, scientific_dataset, last_refresh_time, last_refresh_error
+    global cfg, viewer_dataset, scientific_dataset
+    global viewer_dataset_loading, scientific_dataset_loading
+    global last_refresh_time, last_refresh_error
 
     log(f"Refreshing datasets reason={reason}")
-    fresh_cfg = load_config()
-    fresh_viewer_dataset = build_viewer_dataset(fresh_cfg)
-    with dataset_lock:
-        old_viewer_dataset = viewer_dataset
-        cfg = fresh_cfg
-        viewer_dataset = fresh_viewer_dataset
+    with dataset_condition:
+        viewer_dataset_loading = True
+        scientific_dataset_loading = True
         last_refresh_error = None
+        dataset_condition.notify_all()
 
-    if old_viewer_dataset is not None:
-        old_viewer_dataset.close()
-    log(f"Viewer dataset refresh complete viewer_dates={len(fresh_viewer_dataset.dates)}")
+    old_viewer_dataset = None
+    old_scientific_dataset = None
+    try:
+        fresh_cfg = load_config()
+        fresh_viewer_dataset = build_viewer_dataset(fresh_cfg)
+        with dataset_condition:
+            old_viewer_dataset = viewer_dataset
+            cfg = fresh_cfg
+            viewer_dataset = fresh_viewer_dataset
+            viewer_dataset_loading = False
+            last_refresh_error = None
+            dataset_condition.notify_all()
 
-    fresh_scientific_dataset = build_scientific_dataset(fresh_cfg)
-    with dataset_lock:
-        old_scientific_dataset = scientific_dataset
-        scientific_dataset = fresh_scientific_dataset
-        last_refresh_time = time.time()
-        last_refresh_error = None
-        payload = {
-            "status": "refreshed",
-            "reason": reason,
-            "refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_refresh_time)),
-            "viewer_dates": len(viewer_dataset.dates),
-            "viewer_first_date": viewer_dataset.dates[0] if viewer_dataset.dates else None,
-            "viewer_last_date": viewer_dataset.dates[-1] if viewer_dataset.dates else None,
-            "scientific_dates": len(scientific_dataset.dates),
-            "scientific_first_date": scientific_dataset.dates[0] if scientific_dataset.dates else None,
-            "scientific_last_date": scientific_dataset.dates[-1] if scientific_dataset.dates else None,
-        }
+        if old_viewer_dataset is not None:
+            old_viewer_dataset.close()
+        log(f"Viewer dataset refresh complete viewer_dates={len(fresh_viewer_dataset.dates)}")
 
-    if old_scientific_dataset is not None:
-        old_scientific_dataset.close()
-    log(
-        "Dataset refresh complete "
-        f"viewer_dates={payload['viewer_dates']} "
-        f"scientific_dates={payload['scientific_dates']}"
-    )
-    return payload
+        fresh_scientific_dataset = build_scientific_dataset(fresh_cfg)
+        with dataset_condition:
+            old_scientific_dataset = scientific_dataset
+            scientific_dataset = fresh_scientific_dataset
+            scientific_dataset_loading = False
+            last_refresh_time = time.time()
+            last_refresh_error = None
+            payload = {
+                "status": "refreshed",
+                "reason": reason,
+                "refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_refresh_time)),
+                "viewer_dates": len(viewer_dataset.dates),
+                "viewer_first_date": viewer_dataset.dates[0] if viewer_dataset.dates else None,
+                "viewer_last_date": viewer_dataset.dates[-1] if viewer_dataset.dates else None,
+                "scientific_dates": len(scientific_dataset.dates),
+                "scientific_first_date": scientific_dataset.dates[0] if scientific_dataset.dates else None,
+                "scientific_last_date": scientific_dataset.dates[-1] if scientific_dataset.dates else None,
+            }
+            dataset_condition.notify_all()
+
+        if old_scientific_dataset is not None:
+            old_scientific_dataset.close()
+        log(
+            "Dataset refresh complete "
+            f"viewer_dates={payload['viewer_dates']} "
+            f"scientific_dates={payload['scientific_dates']}"
+        )
+        return payload
+    except Exception as exc:
+        with dataset_condition:
+            viewer_dataset_loading = False
+            scientific_dataset_loading = False
+            last_refresh_error = str(exc)
+            dataset_condition.notify_all()
+        raise
 
 
 def refresh_datasets_in_background(reason: str) -> None:
-    global last_refresh_error
+    global last_refresh_error, viewer_dataset_loading, scientific_dataset_loading
 
     try:
         refresh_datasets(reason=reason)
     except Exception as exc:
-        last_refresh_error = str(exc)
+        with dataset_condition:
+            viewer_dataset_loading = False
+            scientific_dataset_loading = False
+            last_refresh_error = str(exc)
+            dataset_condition.notify_all()
         log(f"Dataset refresh failed reason={reason}: {exc}")
+
+
+def start_dataset_refresh_in_background(reason: str) -> None:
+    global viewer_dataset_loading, scientific_dataset_loading, last_refresh_error
+
+    with dataset_condition:
+        if viewer_dataset_loading or scientific_dataset_loading:
+            return
+        viewer_dataset_loading = True
+        scientific_dataset_loading = True
+        last_refresh_error = None
+        dataset_condition.notify_all()
+
+    thread = threading.Thread(target=refresh_datasets_in_background, args=(reason,), daemon=True)
+    thread.start()
 
 
 def require_loaded_viewer_dataset() -> ViewerDataset:
@@ -612,6 +661,38 @@ def require_loaded_scientific_dataset() -> ScientificDataset:
             if last_refresh_error:
                 raise RuntimeError(f"Scientific dataset is not loaded; last refresh error: {last_refresh_error}")
             raise RuntimeError("Scientific dataset is still loading")
+        return scientific_dataset
+
+
+def wait_for_viewer_dataset(timeout_seconds: float = DATASET_LOAD_WAIT_SECONDS) -> ViewerDataset:
+    if viewer_dataset is None and not viewer_dataset_loading:
+        start_dataset_refresh_in_background(reason="on_demand_viewer")
+
+    deadline = time.time() + timeout_seconds
+    with dataset_condition:
+        while viewer_dataset is None:
+            if last_refresh_error and not viewer_dataset_loading:
+                raise RuntimeError(f"Viewer dataset is not loaded; last refresh error: {last_refresh_error}")
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise DatasetLoadingError("Viewer dataset is still loading")
+            dataset_condition.wait(timeout=remaining)
+        return viewer_dataset
+
+
+def wait_for_scientific_dataset(timeout_seconds: float = DATASET_LOAD_WAIT_SECONDS) -> ScientificDataset:
+    if scientific_dataset is None and not scientific_dataset_loading:
+        start_dataset_refresh_in_background(reason="on_demand_scientific")
+
+    deadline = time.time() + timeout_seconds
+    with dataset_condition:
+        while scientific_dataset is None:
+            if last_refresh_error and not scientific_dataset_loading:
+                raise RuntimeError(f"Scientific dataset is not loaded; last refresh error: {last_refresh_error}")
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise DatasetLoadingError("Scientific dataset is still loading")
+            dataset_condition.wait(timeout=remaining)
         return scientific_dataset
 
 
@@ -673,8 +754,8 @@ def viewer_point_payload_with_refresh(
     lon: float = None,
 ) -> Dict[str, object]:
     try:
+        loaded_viewer_dataset = wait_for_viewer_dataset()
         with dataset_lock:
-            loaded_viewer_dataset = require_loaded_viewer_dataset()
             return loaded_viewer_dataset.point_payload(
                 date_str=date_str,
                 grid_x=grid_x,
@@ -688,7 +769,7 @@ def viewer_point_payload_with_refresh(
 
     refresh_datasets(reason=f"point_date_miss:{date_str}")
     with dataset_lock:
-        loaded_viewer_dataset = require_loaded_viewer_dataset()
+        loaded_viewer_dataset = wait_for_viewer_dataset()
         return loaded_viewer_dataset.point_payload(
             date_str=date_str,
             grid_x=grid_x,
@@ -704,8 +785,8 @@ def scientific_csv_with_refresh(
     end_date: str,
 ) -> Tuple[bytes, str]:
     try:
+        loaded_scientific_dataset = wait_for_scientific_dataset()
         with dataset_lock:
-            loaded_scientific_dataset = require_loaded_scientific_dataset()
             return loaded_scientific_dataset.download_csv_bytes_for_sites(
                 sites=sites,
                 start_date=start_date,
@@ -717,7 +798,7 @@ def scientific_csv_with_refresh(
 
     refresh_datasets(reason=f"csv_date_miss:{start_date}:{end_date}")
     with dataset_lock:
-        loaded_scientific_dataset = require_loaded_scientific_dataset()
+        loaded_scientific_dataset = wait_for_scientific_dataset()
         return loaded_scientific_dataset.download_csv_bytes_for_sites(
             sites=sites,
             start_date=start_date,
@@ -763,13 +844,15 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         try:
             if parsed.path == "/api/health":
-                with dataset_lock:
+                with dataset_condition:
                     datasets_loaded = viewer_dataset is not None and scientific_dataset is not None
                     payload = {
                         "status": "ok",
                         "datasets_loaded": datasets_loaded,
                         "viewer_dataset_loaded": viewer_dataset is not None,
                         "scientific_dataset_loaded": scientific_dataset is not None,
+                        "viewer_dataset_loading": viewer_dataset_loading,
+                        "scientific_dataset_loading": scientific_dataset_loading,
                         "last_refresh_epoch": last_refresh_time,
                         "last_refresh_error": last_refresh_error,
                     }
@@ -818,6 +901,8 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 self._static_response(loaded_viewer_dataset.resolve_asset_path(parsed.path))
                 return
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
+        except DatasetLoadingError as exc:
+            self._json_response({"error": str(exc)}, status=HTTPStatus.SERVICE_UNAVAILABLE)
         except Exception as exc:
             self._json_response({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
@@ -895,7 +980,7 @@ def main() -> None:
     port = int(str(os.environ.get("PORT", "8001")).strip())
     server = ThreadingHTTPServer((host, port), ViewerRequestHandler)
     print(timestamped_message(f"Serving viewer API at http://{host}:{port}"), flush=True)
-    threading.Thread(target=refresh_datasets_in_background, args=("startup",), daemon=True).start()
+    start_dataset_refresh_in_background(reason="startup")
     server.serve_forever()
 
 
