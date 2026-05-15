@@ -32,8 +32,8 @@ here = Path(__file__).resolve().parent
 viewer_root = here.parent
 config_path = viewer_root / "viewer_config.yaml"
 DATASET_LOAD_WAIT_SECONDS = 45.0
-DEFAULT_POINT_TIMESERIES_DAYS = 365
-MAX_POINT_TIMESERIES_DAYS = 366
+DEFAULT_POINT_TIMESERIES_DAYS = 30
+MAX_POINT_TIMESERIES_DAYS = 31
 
 dask = None
 np = None

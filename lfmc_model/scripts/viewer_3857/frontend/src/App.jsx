@@ -242,7 +242,7 @@ function TimeseriesChart({ pointInfo, selectedDate }) {
   const geometry = buildTimeseriesGeometry(pointInfo, selectedDate);
 
   if (!geometry) {
-    return <p className="panel-note">Click the map to load the previous year of daily values.</p>;
+    return <p className="panel-note">Click the map to load the previous 30 days of daily values.</p>;
   }
 
   return (
@@ -414,7 +414,7 @@ function App() {
       x: String(x),
       y: String(y),
       include_timeseries: "true",
-      timeseries_days: "365",
+      timeseries_days: "30",
     });
     const maxAttempts = 30;
     const retryDelayMs = 2000;
