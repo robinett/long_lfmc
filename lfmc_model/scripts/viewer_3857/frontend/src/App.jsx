@@ -242,7 +242,7 @@ function TimeseriesChart({ pointInfo, selectedDate }) {
   const geometry = buildTimeseriesGeometry(pointInfo, selectedDate);
 
   if (!geometry) {
-    return <p className="panel-note">Click the map to load a full time series.</p>;
+    return <p className="panel-note">Full time series is not loaded in the web viewer.</p>;
   }
 
   return (

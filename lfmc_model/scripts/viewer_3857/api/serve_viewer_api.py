@@ -280,7 +280,12 @@ class ViewerDataset:
         except ValueError as exc:
             raise ValueError(f"Date not available: {date_str}") from exc
 
-    @functools.lru_cache(maxsize=4096)
+    def _value_for_cell(self, variable_name: str, time_idx: int, y_idx: int, x_idx: int):
+        return np.asarray(
+            self.ds[variable_name].isel(time=time_idx, y=y_idx, x=x_idx).values
+        ).item()
+
+    @functools.lru_cache(maxsize=512)
     def _mean_series_for_cell(self, y_idx: int, x_idx: int) -> Tuple[float, ...]:
         values = np.asarray(
             self.ds[self.display_variable].isel(y=y_idx, x=x_idx).values,
@@ -288,13 +293,16 @@ class ViewerDataset:
         )
         return tuple(float(value) for value in values)
 
-    @functools.lru_cache(maxsize=4096)
+    @functools.lru_cache(maxsize=512)
     def _uncertainty_series_for_cell(self, y_idx: int, x_idx: int) -> Tuple[float, ...]:
         values = np.asarray(
             self.ds[self.uncertainty_variable].isel(y=y_idx, x=x_idx).values,
             dtype=np.float32,
         )
         return tuple(float(value) for value in values)
+
+    def _quality_value(self, time_idx: int) -> int:
+        return int(np.asarray(self.ds[self.quality_variable].isel(time=time_idx).values).item())
 
     @functools.lru_cache(maxsize=1)
     def _quality_series(self) -> Tuple[int, ...]:
@@ -337,7 +345,15 @@ class ViewerDataset:
             "north": center_y + self.pixel_height / 2.0,
         }
 
-    def point_payload(self, date_str: str, grid_x: float = None, grid_y: float = None, lat: float = None, lon: float = None) -> Dict[str, object]:
+    def point_payload(
+        self,
+        date_str: str,
+        grid_x: float = None,
+        grid_y: float = None,
+        lat: float = None,
+        lon: float = None,
+        include_timeseries: bool = False,
+    ) -> Dict[str, object]:
         time_idx = self._date_index(date_str)
         if grid_x is None or grid_y is None:
             if lat is None or lon is None:
@@ -346,8 +362,8 @@ class ViewerDataset:
         requested_lon, requested_lat = self.grid_to_wgs84.transform(grid_x, grid_y)
         x_idx, y_idx = self._cell_index_for_grid_xy(grid_x=float(grid_x), grid_y=float(grid_y))
         cell_bounds = self._cell_bounds(x_idx=x_idx, y_idx=y_idx)
-        mean_series = self._mean_series_for_cell(y_idx=y_idx, x_idx=x_idx)
-        uncertainty_series = self._uncertainty_series_for_cell(y_idx=y_idx, x_idx=x_idx)
+        mean_value = safe_float(self._value_for_cell(self.display_variable, time_idx, y_idx, x_idx))
+        uncertainty_value = safe_float(self._value_for_cell(self.uncertainty_variable, time_idx, y_idx, x_idx))
         landcover_year_idx = self._landcover_year_index(date_str)
         raw_landcover_value = np.asarray(
             self.landcover_da.isel(landcover_year=landcover_year_idx, y=y_idx, x=x_idx).values
@@ -358,7 +374,7 @@ class ViewerDataset:
                 "Warning: missing landcover for point query "
                 f"date={date_str} x_idx={x_idx} y_idx={y_idx} "
                 f"grid_x={float(grid_x):.2f} grid_y={float(grid_y):.2f} "
-                f"lfmc={safe_float(mean_series[time_idx])}"
+                f"lfmc={mean_value}"
             )
         else:
             landcover_code = int(landcover_code)
@@ -366,10 +382,9 @@ class ViewerDataset:
         center_x = float(self.x_values[x_idx])
         center_y = float(self.y_values[y_idx])
         center_lon, center_lat = self.grid_to_wgs84.transform(center_x, center_y)
-        quality_series = self._quality_series()
-        quality_value = int(quality_series[time_idx])
+        quality_value = self._quality_value(time_idx)
 
-        return {
+        payload = {
             "date": date_str,
             "requested_grid_x": float(grid_x),
             "requested_grid_y": float(grid_y),
@@ -386,19 +401,27 @@ class ViewerDataset:
                 "x": int(x_idx),
                 "y": int(y_idx),
             },
-            "lfmc_ens_mean": safe_float(mean_series[time_idx]),
-            "lfmc_ens_std": safe_float(uncertainty_series[time_idx]),
+            "lfmc_ens_mean": mean_value,
+            "lfmc_ens_std": uncertainty_value,
             "quality_flag": quality_value,
             "data_product_level": self.quality_labels.get(quality_value, "unknown"),
             "landcover_code": landcover_code,
             "landcover_name": self.landcover_labels.get(landcover_code, "unknown") if landcover_code is not None else "unknown",
-            "timeseries": {
+            "timeseries": None,
+        }
+
+        if include_timeseries:
+            mean_series = self._mean_series_for_cell(y_idx=y_idx, x_idx=x_idx)
+            uncertainty_series = self._uncertainty_series_for_cell(y_idx=y_idx, x_idx=x_idx)
+            quality_series = self._quality_series()
+            payload["timeseries"] = {
                 "dates": self.dates,
                 "lfmc_ens_mean": [safe_float(value) for value in mean_series],
                 "lfmc_ens_std": [safe_float(value) for value in uncertainty_series],
                 "quality_flag": [int(value) for value in quality_series],
-            },
-        }
+            }
+
+        return payload
 
     def resolve_asset_path(self, request_path: str) -> Path:
         relpath = request_path.removeprefix("/viewer-assets/").strip("/")
@@ -556,16 +579,40 @@ def refresh_datasets(reason: str = "manual") -> Dict[str, object]:
     global viewer_dataset_loading, scientific_dataset_loading
     global last_refresh_time, last_refresh_error
 
-    log(f"Refreshing datasets reason={reason}")
+    log(f"Unloading datasets reason={reason}")
     with dataset_condition:
-        viewer_dataset_loading = True
-        scientific_dataset_loading = True
+        old_viewer_dataset = viewer_dataset
+        old_scientific_dataset = scientific_dataset
+        cfg = load_config()
+        viewer_dataset = None
+        scientific_dataset = None
+        viewer_dataset_loading = False
+        scientific_dataset_loading = False
+        last_refresh_time = time.time()
         last_refresh_error = None
         dataset_condition.notify_all()
 
-    old_viewer_dataset = None
-    old_scientific_dataset = None
+    if old_viewer_dataset is not None:
+        old_viewer_dataset.close()
+    if old_scientific_dataset is not None:
+        old_scientific_dataset.close()
+
+    payload = {
+        "status": "refreshed",
+        "reason": reason,
+        "refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_refresh_time)),
+        "viewer_dataset_loaded": False,
+        "scientific_dataset_loaded": False,
+    }
+    log("Dataset handles unloaded; zarrs will reopen on demand")
+    return payload
+
+
+def load_viewer_dataset(reason: str) -> None:
+    global cfg, viewer_dataset, viewer_dataset_loading, last_refresh_error
+
     try:
+        log(f"Opening viewer dataset reason={reason}")
         fresh_cfg = load_config()
         fresh_viewer_dataset = build_viewer_dataset(fresh_cfg)
         with dataset_condition:
@@ -575,74 +622,67 @@ def refresh_datasets(reason: str = "manual") -> Dict[str, object]:
             viewer_dataset_loading = False
             last_refresh_error = None
             dataset_condition.notify_all()
-
         if old_viewer_dataset is not None:
             old_viewer_dataset.close()
-        log(f"Viewer dataset refresh complete viewer_dates={len(fresh_viewer_dataset.dates)}")
+        log(f"Viewer dataset open complete viewer_dates={len(fresh_viewer_dataset.dates)}")
+    except Exception as exc:
+        with dataset_condition:
+            viewer_dataset_loading = False
+            last_refresh_error = str(exc)
+            dataset_condition.notify_all()
+        log(f"Viewer dataset open failed reason={reason}: {exc}")
 
+
+def load_scientific_dataset(reason: str) -> None:
+    global cfg, scientific_dataset, scientific_dataset_loading, last_refresh_error
+
+    try:
+        log(f"Opening scientific dataset reason={reason}")
+        fresh_cfg = load_config()
         fresh_scientific_dataset = build_scientific_dataset(fresh_cfg)
         with dataset_condition:
             old_scientific_dataset = scientific_dataset
+            cfg = fresh_cfg
             scientific_dataset = fresh_scientific_dataset
             scientific_dataset_loading = False
-            last_refresh_time = time.time()
             last_refresh_error = None
-            payload = {
-                "status": "refreshed",
-                "reason": reason,
-                "refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_refresh_time)),
-                "viewer_dates": len(viewer_dataset.dates),
-                "viewer_first_date": viewer_dataset.dates[0] if viewer_dataset.dates else None,
-                "viewer_last_date": viewer_dataset.dates[-1] if viewer_dataset.dates else None,
-                "scientific_dates": len(scientific_dataset.dates),
-                "scientific_first_date": scientific_dataset.dates[0] if scientific_dataset.dates else None,
-                "scientific_last_date": scientific_dataset.dates[-1] if scientific_dataset.dates else None,
-            }
             dataset_condition.notify_all()
-
         if old_scientific_dataset is not None:
             old_scientific_dataset.close()
-        log(
-            "Dataset refresh complete "
-            f"viewer_dates={payload['viewer_dates']} "
-            f"scientific_dates={payload['scientific_dates']}"
-        )
-        return payload
+        log(f"Scientific dataset open complete scientific_dates={len(fresh_scientific_dataset.dates)}")
     except Exception as exc:
         with dataset_condition:
-            viewer_dataset_loading = False
             scientific_dataset_loading = False
             last_refresh_error = str(exc)
             dataset_condition.notify_all()
-        raise
+        log(f"Scientific dataset open failed reason={reason}: {exc}")
 
 
-def refresh_datasets_in_background(reason: str) -> None:
-    global last_refresh_error, viewer_dataset_loading, scientific_dataset_loading
-
-    try:
-        refresh_datasets(reason=reason)
-    except Exception as exc:
-        with dataset_condition:
-            viewer_dataset_loading = False
-            scientific_dataset_loading = False
-            last_refresh_error = str(exc)
-            dataset_condition.notify_all()
-        log(f"Dataset refresh failed reason={reason}: {exc}")
-
-
-def start_dataset_refresh_in_background(reason: str) -> None:
-    global viewer_dataset_loading, scientific_dataset_loading, last_refresh_error
+def start_viewer_dataset_load(reason: str) -> None:
+    global viewer_dataset_loading, last_refresh_error
 
     with dataset_condition:
-        if viewer_dataset_loading or scientific_dataset_loading:
+        if viewer_dataset is not None or viewer_dataset_loading:
             return
         viewer_dataset_loading = True
+        last_refresh_error = None
+        dataset_condition.notify_all()
+
+    thread = threading.Thread(target=load_viewer_dataset, args=(reason,), daemon=True)
+    thread.start()
+
+
+def start_scientific_dataset_load(reason: str) -> None:
+    global scientific_dataset_loading, last_refresh_error
+
+    with dataset_condition:
+        if scientific_dataset is not None or scientific_dataset_loading:
+            return
         scientific_dataset_loading = True
         last_refresh_error = None
         dataset_condition.notify_all()
 
-    thread = threading.Thread(target=refresh_datasets_in_background, args=(reason,), daemon=True)
+    thread = threading.Thread(target=load_scientific_dataset, args=(reason,), daemon=True)
     thread.start()
 
 
@@ -666,7 +706,7 @@ def require_loaded_scientific_dataset() -> ScientificDataset:
 
 def wait_for_viewer_dataset(timeout_seconds: float = DATASET_LOAD_WAIT_SECONDS) -> ViewerDataset:
     if viewer_dataset is None and not viewer_dataset_loading:
-        start_dataset_refresh_in_background(reason="on_demand_viewer")
+        start_viewer_dataset_load(reason="on_demand_viewer")
 
     deadline = time.time() + timeout_seconds
     with dataset_condition:
@@ -682,7 +722,7 @@ def wait_for_viewer_dataset(timeout_seconds: float = DATASET_LOAD_WAIT_SECONDS) 
 
 def wait_for_scientific_dataset(timeout_seconds: float = DATASET_LOAD_WAIT_SECONDS) -> ScientificDataset:
     if scientific_dataset is None and not scientific_dataset_loading:
-        start_dataset_refresh_in_background(reason="on_demand_scientific")
+        start_scientific_dataset_load(reason="on_demand_scientific")
 
     deadline = time.time() + timeout_seconds
     with dataset_condition:
@@ -752,6 +792,7 @@ def viewer_point_payload_with_refresh(
     grid_y: float = None,
     lat: float = None,
     lon: float = None,
+    include_timeseries: bool = False,
 ) -> Dict[str, object]:
     try:
         loaded_viewer_dataset = wait_for_viewer_dataset()
@@ -762,6 +803,7 @@ def viewer_point_payload_with_refresh(
                 grid_y=grid_y,
                 lat=lat,
                 lon=lon,
+                include_timeseries=include_timeseries,
             )
     except ValueError as exc:
         if not should_refresh_for_date_error(exc):
@@ -776,6 +818,7 @@ def viewer_point_payload_with_refresh(
             grid_y=grid_y,
             lat=lat,
             lon=lon,
+            include_timeseries=include_timeseries,
         )
 
 
@@ -867,12 +910,14 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 grid_y = self._optional_float(query, "y")
                 lat = self._optional_float(query, "lat")
                 lon = self._optional_float(query, "lon")
+                include_timeseries = self._optional_bool(query, "include_timeseries", default=False)
                 payload = viewer_point_payload_with_refresh(
                     date_str=date_str,
                     grid_x=grid_x,
                     grid_y=grid_y,
                     lat=lat,
                     lon=lon,
+                    include_timeseries=include_timeseries,
                 )
                 self._json_response(payload)
                 return
@@ -941,6 +986,17 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
             return None
         return float(values[0])
 
+    def _optional_bool(self, query: Dict[str, List[str]], name: str, default: bool = False) -> bool:
+        values = query.get(name)
+        if not values or values[0] == "":
+            return default
+        value = values[0].strip().lower()
+        if value in {"1", "true", "yes", "y"}:
+            return True
+        if value in {"0", "false", "no", "n"}:
+            return False
+        raise ValueError(f"Invalid boolean query parameter {name}: {values[0]!r}")
+
     def _json_response(self, payload: Dict[str, object], status: int = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -980,7 +1036,6 @@ def main() -> None:
     port = int(str(os.environ.get("PORT", "8001")).strip())
     server = ThreadingHTTPServer((host, port), ViewerRequestHandler)
     print(timestamped_message(f"Serving viewer API at http://{host}:{port}"), flush=True)
-    start_dataset_refresh_in_background(reason="startup")
     server.serve_forever()
 
 
