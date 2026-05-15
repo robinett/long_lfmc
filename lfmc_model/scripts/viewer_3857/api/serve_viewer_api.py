@@ -11,20 +11,56 @@ import threading
 import time
 import urllib.parse
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Dict, List, Tuple
+from socketserver import ThreadingMixIn
+from typing import Dict, List, Optional, Tuple
 
-import dask
-import numpy as np
-import xarray as xr
-import yaml
-from pyproj import Transformer
+try:
+    from http.server import ThreadingHTTPServer
+except ImportError:
+    from http.server import HTTPServer
+
+    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
 
 
 here = Path(__file__).resolve().parent
 viewer_root = here.parent
 config_path = viewer_root / "viewer_config.yaml"
+
+dask = None
+np = None
+xr = None
+yaml = None
+Transformer = None
+runtime_dependencies_loaded = False
+runtime_dependencies_lock = threading.Lock()
+
+
+def load_runtime_dependencies() -> None:
+    global dask, np, xr, yaml, Transformer, runtime_dependencies_loaded
+
+    if runtime_dependencies_loaded:
+        return
+
+    with runtime_dependencies_lock:
+        if runtime_dependencies_loaded:
+            return
+
+        import dask as dask_module
+        import numpy as np_module
+        import xarray as xr_module
+        import yaml as yaml_module
+        from pyproj import Transformer as transformer_class
+
+        dask = dask_module
+        np = np_module
+        xr = xr_module
+        yaml = yaml_module
+        Transformer = transformer_class
+        dask.config.set(scheduler="synchronous")
+        runtime_dependencies_loaded = True
 
 
 def timestamped_message(message: str) -> str:
@@ -32,6 +68,7 @@ def timestamped_message(message: str) -> str:
 
 
 def load_config() -> Dict[str, object]:
+    load_runtime_dependencies()
     with config_path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -52,7 +89,7 @@ def join_url_parts(base_url: str, relpath: str) -> str:
     return f"{base_url.rstrip('/')}/{relpath.lstrip('/')}"
 
 
-def nearest_index(sorted_values: np.ndarray, target_value: float) -> int:
+def nearest_index(sorted_values, target_value: float) -> int:
     values = np.asarray(sorted_values, dtype=np.float64)
     if values.ndim != 1 or values.size == 0:
         raise ValueError("nearest_index requires a non-empty 1D coordinate array")
@@ -77,7 +114,7 @@ def nearest_index(sorted_values: np.ndarray, target_value: float) -> int:
     return values.size - 1 - nearest_work_idx
 
 
-def open_dataset_for_config(data_cfg: Dict[str, object]) -> xr.Dataset:
+def open_dataset_for_config(data_cfg: Dict[str, object]):
     data_source = str(data_cfg.get("data_source", "local")).strip().lower()
     local_dataset_path = str(data_cfg.get("local_dataset_path", "")).strip()
     source_store = str(data_cfg.get("source_store", "")).strip()
@@ -157,7 +194,7 @@ class ViewerDataset:
             return self.local_dataset_path
         raise ValueError(f"Unsupported data_source {self.data_source!r}; expected 'local' or 'source'")
 
-    def _open_dataset(self) -> xr.Dataset:
+    def _open_dataset(self):
         return open_dataset_for_config(
             {
                 "data_source": self.data_source,
@@ -474,14 +511,16 @@ def build_datasets() -> Tuple[Dict[str, object], ViewerDataset, ScientificDatase
     return fresh_cfg, ViewerDataset(fresh_cfg), ScientificDataset(fresh_cfg)
 
 
-dask.config.set(scheduler="synchronous")
-cfg, viewer_dataset, scientific_dataset = build_datasets()
+cfg: Dict[str, object] = {}
+viewer_dataset: Optional[ViewerDataset] = None
+scientific_dataset: Optional[ScientificDataset] = None
 dataset_lock = threading.RLock()
-last_refresh_time = time.time()
+last_refresh_time = 0.0
+last_refresh_error: Optional[str] = None
 
 
 def refresh_datasets(reason: str = "manual") -> Dict[str, object]:
-    global cfg, viewer_dataset, scientific_dataset, last_refresh_time
+    global cfg, viewer_dataset, scientific_dataset, last_refresh_time, last_refresh_error
 
     log(f"Refreshing datasets reason={reason}")
     fresh_cfg, fresh_viewer_dataset, fresh_scientific_dataset = build_datasets()
@@ -492,6 +531,7 @@ def refresh_datasets(reason: str = "manual") -> Dict[str, object]:
         viewer_dataset = fresh_viewer_dataset
         scientific_dataset = fresh_scientific_dataset
         last_refresh_time = time.time()
+        last_refresh_error = None
         payload = {
             "status": "refreshed",
             "reason": reason,
@@ -504,8 +544,10 @@ def refresh_datasets(reason: str = "manual") -> Dict[str, object]:
             "scientific_last_date": scientific_dataset.dates[-1] if scientific_dataset.dates else None,
         }
 
-    old_viewer_dataset.close()
-    old_scientific_dataset.close()
+    if old_viewer_dataset is not None:
+        old_viewer_dataset.close()
+    if old_scientific_dataset is not None:
+        old_scientific_dataset.close()
     log(
         "Dataset refresh complete "
         f"viewer_dates={payload['viewer_dates']} "
@@ -514,13 +556,33 @@ def refresh_datasets(reason: str = "manual") -> Dict[str, object]:
     return payload
 
 
+def refresh_datasets_in_background(reason: str) -> None:
+    global last_refresh_error
+
+    try:
+        refresh_datasets(reason=reason)
+    except Exception as exc:
+        last_refresh_error = str(exc)
+        log(f"Dataset refresh failed reason={reason}: {exc}")
+
+
+def require_loaded_datasets() -> Tuple[ViewerDataset, ScientificDataset]:
+    with dataset_lock:
+        if viewer_dataset is None or scientific_dataset is None:
+            if last_refresh_error:
+                raise RuntimeError(f"Datasets are not loaded; last refresh error: {last_refresh_error}")
+            raise RuntimeError("Datasets are still loading")
+        return viewer_dataset, scientific_dataset
+
+
 def should_refresh_for_date_error(exc: Exception) -> bool:
     return "Date not available" in str(exc)
 
 
 def viewer_metadata_payload() -> Dict[str, object]:
     with dataset_lock:
-        payload = viewer_dataset.metadata()
+        loaded_viewer_dataset, _ = require_loaded_datasets()
+        payload = loaded_viewer_dataset.metadata()
         payload["last_refresh_epoch"] = last_refresh_time
         return payload
 
@@ -534,7 +596,8 @@ def viewer_point_payload_with_refresh(
 ) -> Dict[str, object]:
     try:
         with dataset_lock:
-            return viewer_dataset.point_payload(
+            loaded_viewer_dataset, _ = require_loaded_datasets()
+            return loaded_viewer_dataset.point_payload(
                 date_str=date_str,
                 grid_x=grid_x,
                 grid_y=grid_y,
@@ -547,7 +610,8 @@ def viewer_point_payload_with_refresh(
 
     refresh_datasets(reason=f"point_date_miss:{date_str}")
     with dataset_lock:
-        return viewer_dataset.point_payload(
+        loaded_viewer_dataset, _ = require_loaded_datasets()
+        return loaded_viewer_dataset.point_payload(
             date_str=date_str,
             grid_x=grid_x,
             grid_y=grid_y,
@@ -563,7 +627,8 @@ def scientific_csv_with_refresh(
 ) -> Tuple[bytes, str]:
     try:
         with dataset_lock:
-            return scientific_dataset.download_csv_bytes_for_sites(
+            _, loaded_scientific_dataset = require_loaded_datasets()
+            return loaded_scientific_dataset.download_csv_bytes_for_sites(
                 sites=sites,
                 start_date=start_date,
                 end_date=end_date,
@@ -574,7 +639,8 @@ def scientific_csv_with_refresh(
 
     refresh_datasets(reason=f"csv_date_miss:{start_date}:{end_date}")
     with dataset_lock:
-        return scientific_dataset.download_csv_bytes_for_sites(
+        _, loaded_scientific_dataset = require_loaded_datasets()
+        return loaded_scientific_dataset.download_csv_bytes_for_sites(
             sites=sites,
             start_date=start_date,
             end_date=end_date,
@@ -601,7 +667,8 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         try:
             if parsed.path.startswith("/viewer-assets/"):
-                self._static_response(viewer_dataset.resolve_asset_path(parsed.path), send_body=False)
+                loaded_viewer_dataset, _ = require_loaded_datasets()
+                self._static_response(loaded_viewer_dataset.resolve_asset_path(parsed.path), send_body=False)
                 return
             if parsed.path == "/api/health":
                 self.send_response(HTTPStatus.OK)
@@ -618,7 +685,15 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         try:
             if parsed.path == "/api/health":
-                self._json_response({"status": "ok"})
+                with dataset_lock:
+                    datasets_loaded = viewer_dataset is not None and scientific_dataset is not None
+                    payload = {
+                        "status": "ok",
+                        "datasets_loaded": datasets_loaded,
+                        "last_refresh_epoch": last_refresh_time,
+                        "last_refresh_error": last_refresh_error,
+                    }
+                self._json_response(payload)
                 return
             if parsed.path == "/api/metadata":
                 self._json_response(viewer_metadata_payload())
@@ -659,7 +734,8 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 self._csv_response(csv_bytes, filename=filename)
                 return
             if parsed.path.startswith("/viewer-assets/"):
-                self._static_response(viewer_dataset.resolve_asset_path(parsed.path))
+                loaded_viewer_dataset, _ = require_loaded_datasets()
+                self._static_response(loaded_viewer_dataset.resolve_asset_path(parsed.path))
                 return
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
         except Exception as exc:
@@ -735,13 +811,11 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    server_cfg = cfg["server"]
-    config_host = str(server_cfg["host"])
-    config_port = int(server_cfg["port"])
-    host = str(os.environ.get("HOST", config_host)).strip() or config_host
-    port = int(str(os.environ.get("PORT", config_port)).strip())
+    host = str(os.environ.get("HOST", "0.0.0.0")).strip() or "0.0.0.0"
+    port = int(str(os.environ.get("PORT", "8001")).strip())
     server = ThreadingHTTPServer((host, port), ViewerRequestHandler)
     print(timestamped_message(f"Serving viewer API at http://{host}:{port}"), flush=True)
+    threading.Thread(target=refresh_datasets_in_background, args=("startup",), daemon=True).start()
     server.serve_forever()
 
 
