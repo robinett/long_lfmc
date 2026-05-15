@@ -9,6 +9,7 @@ import os
 import threading
 import time
 import urllib.parse
+import urllib.request
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -36,12 +37,36 @@ DEFAULT_POINT_TIMESERIES_DAYS = 30
 MAX_POINT_TIMESERIES_DAYS = 31
 
 dask = None
+fsspec = None
 np = None
 xr = None
 yaml = None
+zarr = None
 Transformer = None
 runtime_dependencies_loaded = False
 runtime_dependencies_lock = threading.Lock()
+point_dependencies_loaded = False
+point_dependencies_lock = threading.Lock()
+
+
+def load_point_dependencies() -> None:
+    global fsspec, np, zarr, point_dependencies_loaded
+
+    if point_dependencies_loaded:
+        return
+
+    with point_dependencies_lock:
+        if point_dependencies_loaded:
+            return
+
+        import fsspec as fsspec_module
+        import numpy as np_module
+        import zarr as zarr_module
+
+        fsspec = fsspec_module
+        np = np_module
+        zarr = zarr_module
+        point_dependencies_loaded = True
 
 
 def load_runtime_dependencies() -> None:
@@ -55,12 +80,11 @@ def load_runtime_dependencies() -> None:
             return
 
         import dask as dask_module
-        import numpy as np_module
         import xarray as xr_module
         from pyproj import Transformer as transformer_class
 
+        load_point_dependencies()
         dask = dask_module
-        np = np_module
         xr = xr_module
         Transformer = transformer_class
         dask.config.set(scheduler="synchronous")
@@ -149,6 +173,287 @@ def open_dataset_for_config(data_cfg: Dict[str, object]):
         return xr.open_zarr(local_dataset_path, consolidated=consolidated)
 
     raise ValueError(f"Unsupported data_source {data_source!r}; expected 'local' or 'source'")
+
+
+class ViewerPointDataset:
+    def __init__(self, cfg: Dict[str, object]):
+        load_point_dependencies()
+
+        data_cfg = cfg["data"]
+        assets_cfg = cfg["assets"]
+
+        self.dataset_label = str(data_cfg["dataset_label"])
+        self.data_source = str(data_cfg.get("data_source", "local")).strip().lower()
+        self.local_dataset_path = str(data_cfg.get("local_dataset_path", "")).strip()
+        self.source_store = str(data_cfg.get("source_store", "")).strip()
+        self.source_endpoint_url = str(data_cfg.get("source_endpoint_url", "")).strip()
+        self.grid_crs = str(data_cfg["grid_crs"])
+        self.display_variable = str(data_cfg["display_variable"])
+        self.uncertainty_variable = str(data_cfg["uncertainty_variable"])
+        self.quality_variable = str(data_cfg["quality_variable"])
+        self.landcover_variable = str(data_cfg["landcover_variable"])
+        self.initial_date = str(data_cfg["initial_date"])
+
+        self.asset_mode = str(assets_cfg.get("asset_mode", "local")).strip().lower()
+        self.asset_root = Path(str(assets_cfg["local_asset_root"])).resolve()
+        self.source_asset_base_url = str(assets_cfg.get("source_asset_base_url", "")).strip()
+        self.manifest_filename = str(assets_cfg["manifest_filename"])
+
+        self.dataset_path = self._dataset_path_label()
+        self.manifest = self._load_manifest()
+        self.root = self._open_zarr_root()
+        self.mean_array = self.root[self.display_variable]
+        self.uncertainty_array = self.root[self.uncertainty_variable]
+        self.quality_array = self.root[self.quality_variable]
+        self.landcover_array = self.root[self.landcover_variable]
+        self.landcover_year_array = self.root["landcover_year"]
+        self.lat_array = self.root["lat"]
+        self.lon_array = self.root["lon"]
+
+        self.dates = [str(value) for value in self.manifest.get("dates", [])]
+        if not self.dates:
+            self.dates = [datetime64_to_datestr(value) for value in self.root["time"][:]]
+        self.date_to_index = {date_str: idx for idx, date_str in enumerate(self.dates)}
+
+        self.grid_extent = dict(self.manifest["grid_extent"])
+        grid_resolution = self.manifest["grid_resolution"]
+        self.pixel_width = abs(float(grid_resolution["dx"]))
+        self.pixel_height = abs(float(grid_resolution["dy"]))
+        self.x_size = int(self.mean_array.shape[2])
+        self.y_size = int(self.mean_array.shape[1])
+
+        self.landcover_years = np.asarray(self.landcover_year_array[:], dtype=np.int64)
+        self.landcover_labels = self._landcover_mapping()
+        self.quality_labels = self._quality_mapping()
+
+    def _dataset_path_label(self) -> str:
+        if self.data_source == "source":
+            if not self.source_store:
+                raise ValueError("viewer_config data.source_store is required when data_source=source")
+            return self.source_store
+        if self.data_source == "local":
+            if not self.local_dataset_path:
+                raise ValueError("viewer_config data.local_dataset_path is required when data_source=local")
+            return self.local_dataset_path
+        raise ValueError(f"Unsupported data_source {self.data_source!r}; expected 'local' or 'source'")
+
+    def _manifest_url(self) -> str:
+        return join_url_parts(self.source_asset_base_url, self.manifest_filename)
+
+    def _load_manifest(self) -> Dict[str, object]:
+        if self.asset_mode == "source":
+            request = urllib.request.Request(
+                self._manifest_url(),
+                headers={"User-Agent": "LongLFMCViewer/0.3"},
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        with self.manifest_path().open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _open_zarr_root(self):
+        if self.data_source == "source":
+            if not self.source_store.startswith("s3://"):
+                raise ValueError(f"Expected s3:// Source store path, got {self.source_store!r}")
+            source_path = self.source_store.removeprefix("s3://")
+            storage_options = {"anon": True}
+            if self.source_endpoint_url:
+                storage_options["client_kwargs"] = {"endpoint_url": self.source_endpoint_url}
+            fs = fsspec.filesystem("s3", **storage_options)
+            return zarr.open_consolidated(fs.get_mapper(source_path), mode="r")
+        return zarr.open_consolidated(self.local_dataset_path, mode="r")
+
+    def _landcover_mapping(self) -> Dict[int, str]:
+        attrs = self.landcover_array.attrs.asdict()
+        code_to_name = attrs.get("code_to_name", {})
+        nodata_code = attrs.get("nodata_code")
+        if isinstance(code_to_name, dict):
+            mapping = {int(key): str(value) for key, value in code_to_name.items()}
+            if nodata_code is not None:
+                mapping[int(nodata_code)] = "nodata"
+            return mapping
+        dataset_key = self.root.attrs.asdict().get("dominant_landcover_code_key")
+        if isinstance(dataset_key, str):
+            parsed = json.loads(dataset_key)
+            mapping = {int(key): str(value) for key, value in parsed.items()}
+            if nodata_code is not None:
+                mapping[int(nodata_code)] = "nodata"
+            return mapping
+        return {}
+
+    def _quality_mapping(self) -> Dict[int, str]:
+        values = self.root.attrs.asdict().get("quality_flag_values")
+        if isinstance(values, dict):
+            return {int(value): str(key) for key, value in values.items()}
+        attrs = self.quality_array.attrs.asdict()
+        flag_values = attrs.get("flag_values", [])
+        flag_meanings = str(attrs.get("flag_meanings", "")).split()
+        return {int(value): meaning for value, meaning in zip(flag_values, flag_meanings)}
+
+    def manifest_path(self) -> Path:
+        return self.asset_root / self.manifest_filename
+
+    def metadata(self) -> Dict[str, object]:
+        if self.asset_mode == "source":
+            asset_base_url = self.source_asset_base_url
+            manifest_url = self._manifest_url()
+        else:
+            asset_base_url = "/viewer-assets"
+            manifest_url = f"{asset_base_url}/{self.manifest_filename}"
+        return {
+            "dataset_label": self.dataset_label,
+            "data_source": self.data_source,
+            "dataset_path": self.dataset_path,
+            "initial_date": self.initial_date,
+            "asset_mode": self.asset_mode,
+            "asset_root": str(self.asset_root),
+            "manifest_path": str(self.manifest_path()),
+            "asset_base_url": asset_base_url,
+            "asset_manifest_url": manifest_url,
+            "dates": self.dates,
+            "grid_crs": self.grid_crs,
+            "grid_extent": self.grid_extent,
+            "grid_resolution": {
+                "dx": self.pixel_width,
+                "dy": self.pixel_height,
+            },
+        }
+
+    def _date_index(self, date_str: str) -> int:
+        try:
+            return self.date_to_index[date_str]
+        except KeyError as exc:
+            raise ValueError(f"Date not available: {date_str}") from exc
+
+    def _cell_index_for_grid_xy(self, grid_x: float, grid_y: float) -> Tuple[int, int]:
+        west = float(self.grid_extent["west"])
+        east = float(self.grid_extent["east"])
+        north = float(self.grid_extent["north"])
+        south = float(self.grid_extent["south"])
+        if grid_x < west or grid_x > east or grid_y < south or grid_y > north:
+            raise ValueError("Requested point is outside the LFMC grid extent")
+
+        x_idx = int(np.floor((grid_x - west) / self.pixel_width))
+        y_idx = int(np.floor((north - grid_y) / self.pixel_height))
+        x_idx = min(max(x_idx, 0), self.x_size - 1)
+        y_idx = min(max(y_idx, 0), self.y_size - 1)
+        return x_idx, y_idx
+
+    def _cell_center(self, x_idx: int, y_idx: int) -> Tuple[float, float]:
+        center_x = float(self.grid_extent["west"]) + self.pixel_width / 2.0 + x_idx * self.pixel_width
+        center_y = float(self.grid_extent["north"]) - self.pixel_height / 2.0 - y_idx * self.pixel_height
+        return center_x, center_y
+
+    def _cell_bounds(self, x_idx: int, y_idx: int) -> Dict[str, float]:
+        center_x, center_y = self._cell_center(x_idx=x_idx, y_idx=y_idx)
+        return {
+            "west": center_x - self.pixel_width / 2.0,
+            "east": center_x + self.pixel_width / 2.0,
+            "south": center_y - self.pixel_height / 2.0,
+            "north": center_y + self.pixel_height / 2.0,
+        }
+
+    def _landcover_year_index(self, date_str: str) -> int:
+        year = int(date_str[:4])
+        if self.landcover_years.size == 1:
+            return 0
+        diffs = np.abs(self.landcover_years - year)
+        return int(np.argmin(diffs))
+
+    def _series_for_cell(self, array, start_idx: int, end_idx: int, y_idx: int, x_idx: int) -> Tuple[float, ...]:
+        values = np.asarray(array[start_idx:end_idx, y_idx, x_idx], dtype=np.float32)
+        return tuple(float(value) for value in values)
+
+    def point_payload(
+        self,
+        date_str: str,
+        grid_x: float = None,
+        grid_y: float = None,
+        lat: float = None,
+        lon: float = None,
+        include_timeseries: bool = False,
+        timeseries_days: int = DEFAULT_POINT_TIMESERIES_DAYS,
+    ) -> Dict[str, object]:
+        time_idx = self._date_index(date_str)
+        if grid_x is None or grid_y is None:
+            raise ValueError("Direct viewer point queries require grid x/y")
+
+        requested_lon = safe_float(lon) if lon is not None else None
+        requested_lat = safe_float(lat) if lat is not None else None
+        x_idx, y_idx = self._cell_index_for_grid_xy(grid_x=float(grid_x), grid_y=float(grid_y))
+        cell_bounds = self._cell_bounds(x_idx=x_idx, y_idx=y_idx)
+        mean_value = safe_float(np.asarray(self.mean_array[time_idx, y_idx, x_idx]).item())
+        uncertainty_value = safe_float(np.asarray(self.uncertainty_array[time_idx, y_idx, x_idx]).item())
+        landcover_year_idx = self._landcover_year_index(date_str)
+        raw_landcover_value = np.asarray(self.landcover_array[landcover_year_idx, y_idx, x_idx]).item()
+        landcover_code = safe_float(raw_landcover_value)
+        if landcover_code is None:
+            log(
+                "Warning: missing landcover for point query "
+                f"date={date_str} x_idx={x_idx} y_idx={y_idx} "
+                f"grid_x={float(grid_x):.2f} grid_y={float(grid_y):.2f} "
+                f"lfmc={mean_value}"
+            )
+        else:
+            landcover_code = int(landcover_code)
+
+        center_x, center_y = self._cell_center(x_idx=x_idx, y_idx=y_idx)
+        center_lon = safe_float(np.asarray(self.lon_array[y_idx, x_idx]).item())
+        center_lat = safe_float(np.asarray(self.lat_array[y_idx, x_idx]).item())
+        quality_value = int(np.asarray(self.quality_array[time_idx]).item())
+
+        payload = {
+            "date": date_str,
+            "requested_grid_x": float(grid_x),
+            "requested_grid_y": float(grid_y),
+            "requested_lat": requested_lat,
+            "requested_lon": requested_lon,
+            "cell_center_x": center_x,
+            "cell_center_y": center_y,
+            "nearest_lat": center_lat,
+            "nearest_lon": center_lon,
+            "cell_center_lat": center_lat,
+            "cell_center_lon": center_lon,
+            "cell_bounds": cell_bounds,
+            "cell_index": {
+                "x": int(x_idx),
+                "y": int(y_idx),
+            },
+            "lfmc_ens_mean": mean_value,
+            "lfmc_ens_std": uncertainty_value,
+            "quality_flag": quality_value,
+            "data_product_level": self.quality_labels.get(quality_value, "unknown"),
+            "landcover_code": landcover_code,
+            "landcover_name": self.landcover_labels.get(landcover_code, "unknown") if landcover_code is not None else "unknown",
+            "timeseries": None,
+        }
+
+        if include_timeseries:
+            bounded_days = min(max(int(timeseries_days), 1), MAX_POINT_TIMESERIES_DAYS)
+            start_idx = max(0, time_idx - bounded_days + 1)
+            end_idx = time_idx + 1
+            mean_series = self._series_for_cell(self.mean_array, start_idx, end_idx, y_idx, x_idx)
+            uncertainty_series = self._series_for_cell(self.uncertainty_array, start_idx, end_idx, y_idx, x_idx)
+            quality_series = np.asarray(self.quality_array[start_idx:end_idx])
+            payload["timeseries"] = {
+                "dates": self.dates[start_idx:end_idx],
+                "lfmc_ens_mean": [safe_float(value) for value in mean_series],
+                "lfmc_ens_std": [safe_float(value) for value in uncertainty_series],
+                "quality_flag": [int(value) for value in quality_series],
+                "window_days": bounded_days,
+            }
+
+        return payload
+
+    def resolve_asset_path(self, request_path: str) -> Path:
+        relpath = request_path.removeprefix("/viewer-assets/").strip("/")
+        candidate = (self.asset_root / relpath).resolve()
+        if not str(candidate).startswith(str(self.asset_root)):
+            raise ValueError("Attempted path traversal outside asset root")
+        return candidate
+
+    def close(self) -> None:
+        self.root = None
 
 
 class ViewerDataset:
@@ -561,8 +866,7 @@ class ScientificDataset:
 
 
 def build_viewer_dataset(fresh_cfg: Dict[str, object]) -> ViewerDataset:
-    load_runtime_dependencies()
-    return ViewerDataset(fresh_cfg)
+    return ViewerPointDataset(fresh_cfg)
 
 
 def build_scientific_dataset(fresh_cfg: Dict[str, object]) -> ScientificDataset:
