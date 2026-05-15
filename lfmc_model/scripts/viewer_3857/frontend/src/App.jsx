@@ -713,8 +713,8 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const maxAttempts = 8;
-    const retryDelayMs = 1000;
+    const maxAttempts = 120;
+    const retryDelayMs = 2000;
 
     async function loadManifest() {
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -722,7 +722,14 @@ function App() {
           setStatusText("Starting viewer...");
           const metadataResponse = await fetch(apiUrl("/api/metadata"), { cache: "no-store" });
           if (!metadataResponse.ok) {
-            throw new Error(`Metadata HTTP ${metadataResponse.status}`);
+            let metadataError = `Metadata HTTP ${metadataResponse.status}`;
+            try {
+              const metadataErrorPayload = await metadataResponse.json();
+              metadataError = metadataErrorPayload.error || metadataError;
+            } catch {
+              // Keep the HTTP status message if the response is not JSON.
+            }
+            throw new Error(metadataError);
           }
           const metadata = await metadataResponse.json();
           const manifestResponse = await fetch(metadata.asset_manifest_url, { cache: "no-store" });
@@ -757,6 +764,7 @@ function App() {
             setStatusText(`Manifest load failed: ${error.message}`);
             return;
           }
+          setStatusText(`Waiting for viewer data... (${attempt}/${maxAttempts})`);
           await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
         }
       }

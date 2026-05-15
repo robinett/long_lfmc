@@ -51,13 +51,11 @@ def load_runtime_dependencies() -> None:
         import dask as dask_module
         import numpy as np_module
         import xarray as xr_module
-        import yaml as yaml_module
         from pyproj import Transformer as transformer_class
 
         dask = dask_module
         np = np_module
         xr = xr_module
-        yaml = yaml_module
         Transformer = transformer_class
         dask.config.set(scheduler="synchronous")
         runtime_dependencies_loaded = True
@@ -68,7 +66,12 @@ def timestamped_message(message: str) -> str:
 
 
 def load_config() -> Dict[str, object]:
-    load_runtime_dependencies()
+    global yaml
+
+    if yaml is None:
+        import yaml as yaml_module
+
+        yaml = yaml_module
     with config_path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -181,7 +184,6 @@ class ViewerDataset:
         self.landcover_years = np.asarray(self.landcover_da["landcover_year"].values)
         self.landcover_labels = self._landcover_mapping()
         self.quality_labels = self._quality_mapping()
-        self.quality_series = np.asarray(self.ds[self.quality_variable].values)
 
     def _dataset_path_label(self) -> str:
         if self.data_source == "source":
@@ -289,6 +291,16 @@ class ViewerDataset:
         )
         return tuple(float(value) for value in values)
 
+    @functools.lru_cache(maxsize=1)
+    def _quality_series(self) -> Tuple[int, ...]:
+        values = np.asarray(self.ds[self.quality_variable].values)
+        if values.ndim != 1:
+            raise ValueError(
+                f"Expected viewer quality variable {self.quality_variable!r} to be 1D over time; "
+                f"found shape {values.shape}"
+            )
+        return tuple(int(value) for value in values)
+
     def _landcover_year_index(self, date_str: str) -> int:
         year = int(date_str[:4])
         if self.landcover_years.size == 1:
@@ -349,7 +361,8 @@ class ViewerDataset:
         center_x = float(self.x_values[x_idx])
         center_y = float(self.y_values[y_idx])
         center_lon, center_lat = self.grid_to_wgs84.transform(center_x, center_y)
-        quality_value = int(self.quality_series[time_idx])
+        quality_series = self._quality_series()
+        quality_value = int(quality_series[time_idx])
 
         return {
             "date": date_str,
@@ -378,7 +391,7 @@ class ViewerDataset:
                 "dates": self.dates,
                 "lfmc_ens_mean": [safe_float(value) for value in mean_series],
                 "lfmc_ens_std": [safe_float(value) for value in uncertainty_series],
-                "quality_flag": [int(value) for value in self.quality_series],
+                "quality_flag": [int(value) for value in quality_series],
             },
         }
 
@@ -392,6 +405,7 @@ class ViewerDataset:
     def close(self) -> None:
         self._mean_series_for_cell.cache_clear()
         self._uncertainty_series_for_cell.cache_clear()
+        self._quality_series.cache_clear()
         self.ds.close()
 
 
@@ -506,9 +520,19 @@ class ScientificDataset:
         self.ds.close()
 
 
+def build_viewer_dataset(fresh_cfg: Dict[str, object]) -> ViewerDataset:
+    load_runtime_dependencies()
+    return ViewerDataset(fresh_cfg)
+
+
+def build_scientific_dataset(fresh_cfg: Dict[str, object]) -> ScientificDataset:
+    load_runtime_dependencies()
+    return ScientificDataset(fresh_cfg)
+
+
 def build_datasets() -> Tuple[Dict[str, object], ViewerDataset, ScientificDataset]:
     fresh_cfg = load_config()
-    return fresh_cfg, ViewerDataset(fresh_cfg), ScientificDataset(fresh_cfg)
+    return fresh_cfg, build_viewer_dataset(fresh_cfg), build_scientific_dataset(fresh_cfg)
 
 
 cfg: Dict[str, object] = {}
@@ -523,12 +547,21 @@ def refresh_datasets(reason: str = "manual") -> Dict[str, object]:
     global cfg, viewer_dataset, scientific_dataset, last_refresh_time, last_refresh_error
 
     log(f"Refreshing datasets reason={reason}")
-    fresh_cfg, fresh_viewer_dataset, fresh_scientific_dataset = build_datasets()
+    fresh_cfg = load_config()
+    fresh_viewer_dataset = build_viewer_dataset(fresh_cfg)
     with dataset_lock:
         old_viewer_dataset = viewer_dataset
-        old_scientific_dataset = scientific_dataset
         cfg = fresh_cfg
         viewer_dataset = fresh_viewer_dataset
+        last_refresh_error = None
+
+    if old_viewer_dataset is not None:
+        old_viewer_dataset.close()
+    log(f"Viewer dataset refresh complete viewer_dates={len(fresh_viewer_dataset.dates)}")
+
+    fresh_scientific_dataset = build_scientific_dataset(fresh_cfg)
+    with dataset_lock:
+        old_scientific_dataset = scientific_dataset
         scientific_dataset = fresh_scientific_dataset
         last_refresh_time = time.time()
         last_refresh_error = None
@@ -544,8 +577,6 @@ def refresh_datasets(reason: str = "manual") -> Dict[str, object]:
             "scientific_last_date": scientific_dataset.dates[-1] if scientific_dataset.dates else None,
         }
 
-    if old_viewer_dataset is not None:
-        old_viewer_dataset.close()
     if old_scientific_dataset is not None:
         old_scientific_dataset.close()
     log(
@@ -566,24 +597,71 @@ def refresh_datasets_in_background(reason: str) -> None:
         log(f"Dataset refresh failed reason={reason}: {exc}")
 
 
-def require_loaded_datasets() -> Tuple[ViewerDataset, ScientificDataset]:
+def require_loaded_viewer_dataset() -> ViewerDataset:
     with dataset_lock:
-        if viewer_dataset is None or scientific_dataset is None:
+        if viewer_dataset is None:
             if last_refresh_error:
-                raise RuntimeError(f"Datasets are not loaded; last refresh error: {last_refresh_error}")
-            raise RuntimeError("Datasets are still loading")
-        return viewer_dataset, scientific_dataset
+                raise RuntimeError(f"Viewer dataset is not loaded; last refresh error: {last_refresh_error}")
+            raise RuntimeError("Viewer dataset is still loading")
+        return viewer_dataset
+
+
+def require_loaded_scientific_dataset() -> ScientificDataset:
+    with dataset_lock:
+        if scientific_dataset is None:
+            if last_refresh_error:
+                raise RuntimeError(f"Scientific dataset is not loaded; last refresh error: {last_refresh_error}")
+            raise RuntimeError("Scientific dataset is still loading")
+        return scientific_dataset
 
 
 def should_refresh_for_date_error(exc: Exception) -> bool:
     return "Date not available" in str(exc)
 
 
+def config_metadata_payload() -> Dict[str, object]:
+    fresh_cfg = load_config()
+    data_cfg = fresh_cfg["data"]
+    assets_cfg = fresh_cfg["assets"]
+    asset_mode = str(assets_cfg.get("asset_mode", "local")).strip().lower()
+    if asset_mode == "source":
+        asset_base_url = str(assets_cfg.get("source_asset_base_url", "")).strip()
+        manifest_url = join_url_parts(asset_base_url, str(assets_cfg["manifest_filename"]))
+    else:
+        asset_base_url = "/viewer-assets"
+        manifest_url = f"{asset_base_url}/{assets_cfg['manifest_filename']}"
+
+    return {
+        "dataset_label": str(data_cfg["dataset_label"]),
+        "data_source": str(data_cfg.get("data_source", "local")),
+        "dataset_path": str(data_cfg.get("source_store") or data_cfg.get("local_dataset_path", "")),
+        "initial_date": str(data_cfg["initial_date"]),
+        "asset_mode": asset_mode,
+        "asset_root": str(assets_cfg["local_asset_root"]),
+        "manifest_path": str(Path(str(assets_cfg["local_asset_root"])) / str(assets_cfg["manifest_filename"])),
+        "asset_base_url": asset_base_url,
+        "asset_manifest_url": manifest_url,
+        "dates": [],
+        "grid_crs": str(data_cfg["grid_crs"]),
+        "grid_extent": None,
+        "grid_resolution": None,
+        "dataset_loaded": False,
+        "last_refresh_epoch": last_refresh_time,
+    }
+
+
 def viewer_metadata_payload() -> Dict[str, object]:
     with dataset_lock:
-        loaded_viewer_dataset, _ = require_loaded_datasets()
-        payload = loaded_viewer_dataset.metadata()
-        payload["last_refresh_epoch"] = last_refresh_time
+        loaded_viewer_dataset = viewer_dataset
+        if loaded_viewer_dataset is not None:
+            payload = loaded_viewer_dataset.metadata()
+            payload["dataset_loaded"] = True
+            payload["last_refresh_epoch"] = last_refresh_time
+            return payload
+
+    payload = config_metadata_payload()
+    with dataset_lock:
+        payload["last_refresh_error"] = last_refresh_error
         return payload
 
 
@@ -596,7 +674,7 @@ def viewer_point_payload_with_refresh(
 ) -> Dict[str, object]:
     try:
         with dataset_lock:
-            loaded_viewer_dataset, _ = require_loaded_datasets()
+            loaded_viewer_dataset = require_loaded_viewer_dataset()
             return loaded_viewer_dataset.point_payload(
                 date_str=date_str,
                 grid_x=grid_x,
@@ -610,7 +688,7 @@ def viewer_point_payload_with_refresh(
 
     refresh_datasets(reason=f"point_date_miss:{date_str}")
     with dataset_lock:
-        loaded_viewer_dataset, _ = require_loaded_datasets()
+        loaded_viewer_dataset = require_loaded_viewer_dataset()
         return loaded_viewer_dataset.point_payload(
             date_str=date_str,
             grid_x=grid_x,
@@ -627,7 +705,7 @@ def scientific_csv_with_refresh(
 ) -> Tuple[bytes, str]:
     try:
         with dataset_lock:
-            _, loaded_scientific_dataset = require_loaded_datasets()
+            loaded_scientific_dataset = require_loaded_scientific_dataset()
             return loaded_scientific_dataset.download_csv_bytes_for_sites(
                 sites=sites,
                 start_date=start_date,
@@ -639,7 +717,7 @@ def scientific_csv_with_refresh(
 
     refresh_datasets(reason=f"csv_date_miss:{start_date}:{end_date}")
     with dataset_lock:
-        _, loaded_scientific_dataset = require_loaded_datasets()
+        loaded_scientific_dataset = require_loaded_scientific_dataset()
         return loaded_scientific_dataset.download_csv_bytes_for_sites(
             sites=sites,
             start_date=start_date,
@@ -667,7 +745,7 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         try:
             if parsed.path.startswith("/viewer-assets/"):
-                loaded_viewer_dataset, _ = require_loaded_datasets()
+                loaded_viewer_dataset = require_loaded_viewer_dataset()
                 self._static_response(loaded_viewer_dataset.resolve_asset_path(parsed.path), send_body=False)
                 return
             if parsed.path == "/api/health":
@@ -690,6 +768,8 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                     payload = {
                         "status": "ok",
                         "datasets_loaded": datasets_loaded,
+                        "viewer_dataset_loaded": viewer_dataset is not None,
+                        "scientific_dataset_loaded": scientific_dataset is not None,
                         "last_refresh_epoch": last_refresh_time,
                         "last_refresh_error": last_refresh_error,
                     }
@@ -734,7 +814,7 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 self._csv_response(csv_bytes, filename=filename)
                 return
             if parsed.path.startswith("/viewer-assets/"):
-                loaded_viewer_dataset, _ = require_loaded_datasets()
+                loaded_viewer_dataset = require_loaded_viewer_dataset()
                 self._static_response(loaded_viewer_dataset.resolve_asset_path(parsed.path))
                 return
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
