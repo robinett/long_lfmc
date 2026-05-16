@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - "old/viewer/**"
+      - "lfmc_model/scripts/viewer_3857/**"
   workflow_dispatch:
 
 jobs:
@@ -23,14 +23,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: old/viewer/frontend/package-lock.json
+          cache-dependency-path: lfmc_model/scripts/viewer_3857/frontend/package-lock.json
 
       - name: Install dependencies
-        working-directory: old/viewer/frontend
+        working-directory: lfmc_model/scripts/viewer_3857/frontend
         run: npm ci
 
       - name: Build
-        working-directory: old/viewer/frontend
+        working-directory: lfmc_model/scripts/viewer_3857/frontend
         run: npm run build
 
       - name: Authenticate to Google Cloud
@@ -41,7 +41,7 @@ jobs:
       - name: Upload to GCS
         uses: google-github-actions/upload-cloud-storage@v2
         with:
-          path: old/viewer/frontend/dist
+          path: lfmc_model/scripts/viewer_3857/frontend/dist
           destination: frontend-long-lfmc
           parent: false
           process_gcloudignore: false
