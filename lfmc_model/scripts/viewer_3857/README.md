@@ -21,3 +21,4 @@ Recommended frontend deployment settings:
 The included
 [frontend/vercel.json](/home/users/trobinet/long_lfmc/lfmc_model/scripts/viewer_3857/frontend/vercel.json)
 provides a simple SPA rewrite for static hosting.
+
