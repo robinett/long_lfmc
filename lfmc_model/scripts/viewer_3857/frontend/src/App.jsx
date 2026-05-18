@@ -499,6 +499,7 @@ function App() {
   const [pointInfo, setPointInfo] = useState(null);
   const [statusText, setStatusText] = useState("Loading viewer manifest...");
   const [isMapLoading, setIsMapLoading] = useState(false);
+  const [isPointLoading, setIsPointLoading] = useState(false);
   const dates = manifest?.dates ?? [];
   const selectedDate = dates[dateIndex] ?? "NA";
   const activeLayer = manifest?.layers?.mean ?? null;
@@ -521,7 +522,6 @@ function App() {
         const errorMessage = payload.error || `Point HTTP ${response.status}`;
         const isLoading = response.status === 503 && errorMessage.toLowerCase().includes("loading");
         if (isLoading && attempt < maxAttempts) {
-          setStatusText(`Waiting for clicked cell data... (${attempt}/${maxAttempts})`);
           await new Promise((resolve) => window.setTimeout(resolve, retryDelayMs));
           continue;
         }
@@ -535,34 +535,37 @@ function App() {
 
   async function loadPointAtCoordinate(x, y, dateStr, options = {}) {
     const { recenter = false, updateDownloadSite = true } = options;
-    setStatusText("Loading clicked cell and time series...");
-    const payload = await queryPoint(x, y, dateStr);
-    setPointInfo(payload);
-    pointRef.current = {
-      x: payload.requested_grid_x,
-      y: payload.requested_grid_y,
-    };
-    if (updateDownloadSite) {
-      setDownloadSites((currentSites) =>
-        currentSites.map((site, siteIndex) =>
-          siteIndex === activeDownloadSiteIndexRef.current
-            ? {
-                lat: formatCoordinateInput(payload.cell_center_lat),
-                lon: formatCoordinateInput(payload.cell_center_lon),
-              }
-            : site,
-        ),
-      );
+    setIsPointLoading(true);
+    try {
+      const payload = await queryPoint(x, y, dateStr);
+      setPointInfo(payload);
+      pointRef.current = {
+        x: payload.requested_grid_x,
+        y: payload.requested_grid_y,
+      };
+      if (updateDownloadSite) {
+        setDownloadSites((currentSites) =>
+          currentSites.map((site, siteIndex) =>
+            siteIndex === activeDownloadSiteIndexRef.current
+              ? {
+                  lat: formatCoordinateInput(payload.cell_center_lat),
+                  lon: formatCoordinateInput(payload.cell_center_lon),
+                }
+              : site,
+          ),
+        );
+      }
+      updateSelectionFeatures(payload, manifestRef.current);
+      if (recenter && mapRef.current) {
+        mapRef.current.getView().animate({
+          center: [payload.requested_grid_x, payload.requested_grid_y],
+          duration: 250,
+        });
+      }
+      return payload;
+    } finally {
+      setIsPointLoading(false);
     }
-    updateSelectionFeatures(payload, manifestRef.current);
-    if (recenter && mapRef.current) {
-      mapRef.current.getView().animate({
-        center: [payload.requested_grid_x, payload.requested_grid_y],
-        duration: 250,
-      });
-    }
-    setStatusText(`Loaded clicked cell for ${dateStr}`);
-    return payload;
   }
 
   function buildTileGrid(manifestPayload) {
@@ -1273,11 +1276,12 @@ function App() {
         <div className="date-bar-main">
           <div className="viewer-title-block">
             <h1>Viewer for long-term LFMC dataset</h1>
-            <div className="viewer-subtitle">{statusText}</div>
           </div>
-          <div className="date-slider-block">
-            <div className="date-slider-main-row">
-              <div className="date-value">{selectedDate}</div>
+        </div>
+        <div className="date-bar-controls">
+          <div className="date-slider-control">
+            <div className="date-value">{selectedDate}</div>
+            <div className="date-slider-stack">
               <input
                 className="date-slider"
                 type="range"
@@ -1291,14 +1295,12 @@ function App() {
                   requestDateTransition(Number(event.target.value));
                 }}
               />
-            </div>
-            <div className="slider-extents date-slider-extents">
-              <span>{dates[0] ?? "--"}</span>
-              <span>{dates[dates.length - 1] ?? "--"}</span>
+              <div className="slider-extents date-slider-extents">
+                <span>{dates[0] ?? "--"}</span>
+                <span>{dates[dates.length - 1] ?? "--"}</span>
+              </div>
             </div>
           </div>
-        </div>
-        <div className="date-bar-controls">
           <button
             type="button"
             className={`toggle-button play-button ${isPlaying ? "toggle-button-active" : ""}`}
@@ -1445,7 +1447,10 @@ function App() {
           <div className="panel-label">Time Series</div>
           <div className="timeseries-shell">
             <TimeseriesChart pointInfo={pointInfo} selectedDate={selectedDate} />
-            {isPlaying ? <div className="timeseries-play-overlay">will update after play</div> : null}
+            {isPointLoading ? <div className="timeseries-play-overlay">loading</div> : null}
+            {!isPointLoading && isPlaying ? (
+              <div className="timeseries-play-overlay">will update after play</div>
+            ) : null}
           </div>
         </section>
 
