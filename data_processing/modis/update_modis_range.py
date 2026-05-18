@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import shutil
 import sys
 from pathlib import Path
 
@@ -27,10 +26,14 @@ from update_modis_month import (
     build_staging_zarr,
     candidate_regrid_paths,
     canonical_time_bounds,
+    ensure_daily_mosaics,
+    ensure_regridded_files,
     ensure_raw_downloads,
     modis_bounding_box,
+    prune_source_artifacts,
     promote_staging_window,
     run_cmd,
+    validate_regridded_grid,
 )
 
 
@@ -46,6 +49,7 @@ def parse_args():
     parser.add_argument("--registry_path", type=Path, default=Path(DEFAULT_REGISTRY_PATH))
     parser.add_argument("--grid_path", type=Path, default=None)
     parser.add_argument("--raw_root", type=Path, default=None)
+    parser.add_argument("--mosaic_root", type=Path, default=None)
     parser.add_argument("--regrid_root", type=Path, default=None)
     parser.add_argument("--canonical_zarr", type=Path, default=None)
     parser.add_argument("--staging_root", type=Path, default=None)
@@ -71,6 +75,7 @@ def apply_registry_defaults(args):
     sources = registry.get("sources", {})
     args.grid_path = args.grid_path or Path(DEFAULT_GRID_PATH)
     args.raw_root = args.raw_root or Path(proc["raw_root"])
+    args.mosaic_root = args.mosaic_root or Path(proc["mosaic_root"])
     args.regrid_root = args.regrid_root or Path(proc["regrid_root"])
     args.canonical_zarr = args.canonical_zarr or Path(sources["modis"]["path"])
     args.staging_root = args.staging_root or Path(proc["staging_root"])
@@ -85,6 +90,9 @@ def apply_registry_defaults(args):
     args.interpolation_worker_mem = str(proc.get("interpolation_worker_mem", "16G"))
     args.interpolation_worker_time = str(proc.get("interpolation_worker_time", "08:00:00"))
     args.interpolation_array_max_retries = int(proc.get("interpolation_array_max_retries", 3))
+    args.regrid_chunk_buffer = int(proc.get("regrid_chunk_buffer", 100))
+    args.regrid_chunk_size = int(proc.get("regrid_chunk_size", 2000))
+    args.retain_staging_after_success = bool(proc.get("retain_staging_after_success", True))
     args.quality_flag = args.quality_flag if args.quality_flag is not None else int(proc["quality_flag"])
     return args
 
@@ -180,34 +188,6 @@ def remote_range_available(start_date: pd.Timestamp, end_date: pd.Timestamp, gri
     return available, reason
 
 
-def ensure_regridded_range(
-    start_date: pd.Timestamp,
-    end_date: pd.Timestamp,
-    raw_root: Path,
-    regrid_root: Path,
-    quality_flag: int,
-):
-    if regridded_range_complete(regrid_root, start_date, end_date):
-        print(f"Regridded MODIS files already cover {start_date.date()} -> {end_date.date()}")
-        return
-    run_cmd(
-        [
-            "python3",
-            "/home/users/trobinet/long_lfmc/data_processing/modis/main.py",
-            "--start_date",
-            str(start_date.date()),
-            "--end_date",
-            str(end_date.date()),
-            "--raw_root",
-            raw_root,
-            "--out_dir",
-            regrid_root,
-            "--quality_flag",
-            str(quality_flag),
-        ]
-    )
-
-
 def compute_refresh_start(canonical_zarr: Path, requested_start_date: pd.Timestamp, max_interpolation_days: int):
     current_min, current_max = canonical_time_bounds(canonical_zarr)
     if current_max is None:
@@ -224,6 +204,8 @@ def main():
     requested_start, requested_end = parse_date_range(args.start_date, args.end_date)
     source_end = requested_end + pd.Timedelta(days=int(args.tail_context_days))
     refresh_start = compute_refresh_start(args.canonical_zarr, requested_start, args.max_interpolation_days)
+    source_context_start = refresh_start - pd.Timedelta(days=int(args.buffer_days))
+    source_context_end = source_end + pd.Timedelta(days=int(args.buffer_days))
 
     print(
         "Updating MODIS for range "
@@ -231,7 +213,9 @@ def main():
         f"with tail context through {source_end.date()}"
     )
     print(f"  refresh_start={refresh_start.date()}")
+    print(f"  source_context={source_context_start.date()} -> {source_context_end.date()}")
     print(f"  raw_root={args.raw_root}")
+    print(f"  mosaic_root={args.mosaic_root}")
     print(f"  regrid_root={args.regrid_root}")
     print(f"  canonical_zarr={args.canonical_zarr}")
 
@@ -242,7 +226,7 @@ def main():
                 "reason=canonical_zarr_already_contains_requested_range_with_tail_context"
             )
             raise SystemExit(0)
-        available, reason = remote_range_available(refresh_start, source_end, args.grid_path)
+        available, reason = remote_range_available(source_context_start, source_context_end, args.grid_path)
         print(f"MODIS availability check: available={available} reason={reason}")
         raise SystemExit(0 if available else 1)
 
@@ -253,24 +237,46 @@ def main():
         )
         return
 
-    ensure_raw_downloads(refresh_start, source_end, args.raw_root, args.grid_path)
-    raw_complete, missing_raw = raw_downloads_cover_range(args.raw_root, refresh_start, source_end)
+    ensure_raw_downloads(source_context_start, source_context_end, args.raw_root, args.grid_path)
+    raw_complete, missing_raw = raw_downloads_cover_range(args.raw_root, source_context_start, source_context_end)
     if not raw_complete:
         raise FileNotFoundError(
             f"Raw MODIS download did not produce the expected HDF files for "
-            f"{refresh_start.date()} -> {source_end.date()}; "
+            f"{source_context_start.date()} -> {source_context_end.date()}; "
             f"missing_count={len(missing_raw)} sample_missing={missing_raw[:10]}"
         )
-    ensure_regridded_range(refresh_start, source_end, args.raw_root, args.regrid_root, args.quality_flag)
+    ensure_daily_mosaics(
+        source_context_start,
+        source_context_end,
+        args.raw_root,
+        args.mosaic_root,
+        args.quality_flag,
+    )
+    ensure_regridded_files(
+        source_context_start,
+        source_context_end,
+        args.grid_path,
+        args.mosaic_root,
+        args.regrid_root,
+        args.regrid_chunk_size,
+        args.regrid_chunk_buffer,
+    )
+    validate_regridded_grid(args.regrid_root, args.canonical_zarr, source_context_start, source_context_end)
 
     staging_zarr = build_staging_zarr(args, refresh_start, source_end)
     result = promote_staging_window(staging_zarr, args.canonical_zarr, refresh_start, source_end)
     print(f"MODIS range update complete: {result}")
     print(f"  staging_zarr={staging_zarr}")
     print(f"  canonical_zarr={args.canonical_zarr}")
-    if staging_zarr.exists():
-        shutil.rmtree(staging_zarr)
-        print(f"Removed staging zarr {staging_zarr}")
+    prune_source_artifacts(
+        args.raw_root,
+        args.mosaic_root,
+        args.regrid_root,
+        source_context_start,
+        source_context_end,
+    )
+    if args.retain_staging_after_success:
+        print(f"Retaining staging zarr after success: {staging_zarr}")
 
 
 if __name__ == "__main__":

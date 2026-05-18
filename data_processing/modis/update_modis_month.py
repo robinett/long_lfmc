@@ -2,6 +2,8 @@
 
 import argparse
 import math
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +23,8 @@ from get_modis import DEFAULT_GRID_PATH, TILES_V, collect_links
 REPO_ROOT = Path('/home/users/trobinet/long_lfmc')
 DEFAULT_REGISTRY_PATH = REPO_ROOT / 'lfmc_model/scripts/inference/source_registry.yaml'
 INTERPOLATION_WORKER_SCRIPT = REPO_ROOT / 'data_processing/interpolate/run_interpolation_worker.sbatch'
+MODIS_SINUSOIDAL_CRS = '+proj=sinu +R=6371007.181 +lon_0=0 +x_0=0 +y_0=0 +units=m +no_defs'
+DAILY_DATE_PATTERN = re.compile(r'(\d{8})')
 
 
 def parse_args():
@@ -31,6 +35,7 @@ def parse_args():
     parser.add_argument('--registry_path', type=Path, default=DEFAULT_REGISTRY_PATH)
     parser.add_argument('--grid_path', type=Path, default=Path(DEFAULT_GRID_PATH))
     parser.add_argument('--raw_root', type=Path, default=None)
+    parser.add_argument('--mosaic_root', type=Path, default=None)
     parser.add_argument('--regrid_root', type=Path, default=None)
     parser.add_argument('--canonical_zarr', type=Path, default=None)
     parser.add_argument('--staging_root', type=Path, default=None)
@@ -54,6 +59,7 @@ def apply_registry_defaults(args):
     proc = registry.get('processing', {}).get('modis', {})
     sources = registry.get('sources', {})
     args.raw_root = args.raw_root or Path(proc['raw_root'])
+    args.mosaic_root = args.mosaic_root or Path(proc['mosaic_root'])
     args.regrid_root = args.regrid_root or Path(proc['regrid_root'])
     args.canonical_zarr = args.canonical_zarr or Path(sources['modis']['path'])
     args.staging_root = args.staging_root or Path(proc['staging_root'])
@@ -67,6 +73,9 @@ def apply_registry_defaults(args):
     args.interpolation_worker_mem = str(proc.get('interpolation_worker_mem', '16G'))
     args.interpolation_worker_time = str(proc.get('interpolation_worker_time', '08:00:00'))
     args.interpolation_array_max_retries = int(proc.get('interpolation_array_max_retries', 3))
+    args.regrid_chunk_buffer = int(proc.get('regrid_chunk_buffer', 100))
+    args.regrid_chunk_size = int(proc.get('regrid_chunk_size', 2000))
+    args.retain_staging_after_success = bool(proc.get('retain_staging_after_success', True))
     args.quality_flag = args.quality_flag if args.quality_flag is not None else int(proc['quality_flag'])
     return args
 
@@ -84,13 +93,20 @@ def month_dates(month_start: pd.Timestamp, month_end: pd.Timestamp) -> pd.Dateti
     return pd.date_range(month_start, month_end, freq='D')
 
 
-def candidate_regrid_paths(regrid_root: Path, dt_value: pd.Timestamp) -> list[Path]:
+def daily_mosaic_path(mosaic_root: Path, dt_value: pd.Timestamp) -> Path:
+    base_dir = mosaic_root / dt_value.strftime('%Y') / dt_value.strftime('%m')
+    date_tag = dt_value.strftime('%Y%m%d')
+    return base_dir / f'modis_reflectance_{date_tag}.nc4'
+
+
+def daily_regrid_path(regrid_root: Path, dt_value: pd.Timestamp) -> Path:
     base_dir = regrid_root / dt_value.strftime('%Y') / dt_value.strftime('%m')
     date_tag = dt_value.strftime('%Y%m%d')
-    return [
-        base_dir / f'modis_reflectance_{date_tag}.nc4',
-        base_dir / f'modis_reflectance_{date_tag}_regridded.nc4',
-    ]
+    return base_dir / f'modis_reflectance_{date_tag}_regridded.nc4'
+
+
+def candidate_regrid_paths(regrid_root: Path, dt_value: pd.Timestamp) -> list[Path]:
+    return [daily_regrid_path(regrid_root, dt_value)]
 
 
 def _load_time_index_from_zarr(zarr_path: Path) -> pd.DatetimeIndex:
@@ -111,6 +127,13 @@ def regridded_month_complete(regrid_root: Path, month_start: pd.Timestamp, month
     return all(
         any(path.exists() for path in candidate_regrid_paths(regrid_root, ts))
         for ts in month_dates(month_start, month_end)
+    )
+
+
+def mosaics_complete(mosaic_root: Path, start_date: pd.Timestamp, end_date: pd.Timestamp) -> bool:
+    return all(
+        daily_mosaic_path(mosaic_root, ts).exists()
+        for ts in pd.date_range(start_date, end_date, freq='D')
     )
 
 
@@ -169,17 +192,6 @@ def _run_capture(cmd):
 
 def _wait_for_slurm_job(job_id: str, label: str) -> bool:
     while True:
-        active = subprocess.run(
-            ['squeue', '-h', '-j', str(job_id)],
-            text=True,
-            capture_output=True,
-            check=True,
-        ).stdout.strip()
-        if active:
-            print(f'  {label} job={job_id} state=ACTIVE; sleeping 60s')
-            time.sleep(60)
-            continue
-
         states = subprocess.run(
             ['sacct', '-j', str(job_id), '--format=State', '-n'],
             text=True,
@@ -203,6 +215,16 @@ def _wait_for_slurm_job(job_id: str, label: str) -> bool:
         if any(state == 'COMPLETED' for state in clean_states):
             print(f'  {label} job={job_id} completed with states={clean_states}')
             return True
+        active = subprocess.run(
+            ['squeue', '-h', '-j', str(job_id)],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        if active:
+            print(f'  {label} job={job_id} state=ACTIVE; sleeping 60s')
+            time.sleep(60)
+            continue
         print(f'  {label} job={job_id} ended with unexpected states={clean_states}')
         return False
 
@@ -219,23 +241,165 @@ def ensure_raw_downloads(month_start: pd.Timestamp, month_end: pd.Timestamp, raw
     ])
 
 
-def ensure_regridded_month(
-    month_start: pd.Timestamp,
-    month_end: pd.Timestamp,
-    regrid_root: Path,
+def ensure_daily_mosaics(
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    raw_root: Path,
+    mosaic_root: Path,
     quality_flag: int,
-):
-    if regridded_month_complete(regrid_root, month_start, month_end):
-        print(f'Regridded MODIS files already cover {month_start:%Y-%m}')
+) -> None:
+    if mosaics_complete(mosaic_root, start_date, end_date):
+        print(f'Native MODIS mosaics already cover {start_date.date()} -> {end_date.date()}')
         return
     run_cmd([
         sys.executable,
         REPO_ROOT / 'data_processing/modis/main.py',
-        '--start_date', str(month_start.date()),
-        '--end_date', str(month_end.date()),
-        '--out_dir', regrid_root,
+        '--start_date', str(start_date.date()),
+        '--end_date', str(end_date.date()),
+        '--raw_root', raw_root,
+        '--out_dir', mosaic_root,
         '--quality_flag', str(quality_flag),
     ])
+
+
+def ensure_regridded_files(
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    grid_path: Path,
+    mosaic_root: Path,
+    regrid_root: Path,
+    chunk_size: int,
+    chunk_buffer: int,
+) -> None:
+    wanted = pd.date_range(start_date, end_date, freq='D')
+    if all(daily_regrid_path(regrid_root, ts).exists() for ts in wanted):
+        print(f'Regridded MODIS files already cover {start_date.date()} -> {end_date.date()}')
+        return
+    run_cmd([
+        sys.executable,
+        REPO_ROOT / 'data_processing/regrid/main.py',
+        '--target_grid', grid_path,
+        '--src_dir', mosaic_root,
+        '--target_dir', regrid_root,
+        '--src_crs', MODIS_SINUSOIDAL_CRS,
+        '--target_crs', 'EPSG:5070',
+        '--chunk_size', str(chunk_size),
+        '--chunk_buffer', str(chunk_buffer),
+        '--start_date', str(start_date.date()),
+        '--end_date', str(end_date.date()),
+        '--skip_existing',
+    ])
+
+
+def validate_regridded_grid(
+    regrid_root: Path,
+    canonical_zarr: Path,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> None:
+    expected_paths = [daily_regrid_path(regrid_root, ts) for ts in pd.date_range(start_date, end_date, freq='D')]
+    missing = [path for path in expected_paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f'Missing regridded MODIS files: sample={missing[:10]}')
+
+    sample_path = expected_paths[0]
+    with xr.open_dataset(sample_path, engine='netcdf4') as sample_ds:
+        sample_x = sample_ds['x'].values
+        sample_y = sample_ds['y'].values
+    with xr.open_zarr(canonical_zarr, consolidated=False) as canonical_ds:
+        canonical_x = canonical_ds['x'].values
+        canonical_y = canonical_ds['y'].values
+    if not np.array_equal(sample_x, canonical_x):
+        raise ValueError(f'Regridded MODIS x coordinates do not match canonical zarr: {sample_path}')
+    if not np.array_equal(sample_y, canonical_y):
+        raise ValueError(f'Regridded MODIS y coordinates do not match canonical zarr: {sample_path}')
+    print(f'Validated MODIS regrid coordinates against canonical zarr using {sample_path}')
+
+
+def parse_daily_file_date(path: Path) -> pd.Timestamp | None:
+    match = DAILY_DATE_PATTERN.search(path.name)
+    if match is None:
+        return None
+    return pd.to_datetime(match.group(1), format='%Y%m%d').normalize()
+
+
+def parse_raw_file_date(path: Path) -> pd.Timestamp | None:
+    parts = path.name.split('.')
+    if len(parts) < 2 or not parts[1].startswith('A'):
+        return None
+    try:
+        return pd.to_datetime(parts[1][1:], format='%Y%j').normalize()
+    except ValueError:
+        return None
+
+
+def prune_empty_dirs(root: Path) -> None:
+    if not root.exists():
+        return
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+        path = Path(dirpath)
+        if path == root:
+            continue
+        if not dirnames and not filenames:
+            path.rmdir()
+
+
+def prune_files_outside_window(root: Path, parser, retain_start: pd.Timestamp, retain_end: pd.Timestamp) -> int:
+    if not root.exists():
+        return 0
+    removed = 0
+    for path in root.rglob('*'):
+        if not path.is_file():
+            continue
+        date_value = parser(path)
+        if date_value is None:
+            continue
+        if retain_start <= date_value <= retain_end:
+            continue
+        path.unlink()
+        removed += 1
+    prune_empty_dirs(root)
+    return removed
+
+
+def prune_source_artifacts(
+    raw_root: Path,
+    mosaic_root: Path,
+    regrid_root: Path,
+    retain_start: pd.Timestamp,
+    retain_end: pd.Timestamp,
+) -> None:
+    raw_removed = prune_files_outside_window(raw_root, parse_raw_file_date, retain_start, retain_end)
+    mosaic_removed = prune_files_outside_window(mosaic_root, parse_daily_file_date, retain_start, retain_end)
+    regrid_removed = prune_files_outside_window(regrid_root, parse_daily_file_date, retain_start, retain_end)
+    print(
+        'Pruned MODIS source-side artifacts outside '
+        f'{retain_start.date()} -> {retain_end.date()}: '
+        f'raw={raw_removed}, mosaics={mosaic_removed}, regridded={regrid_removed}'
+    )
+
+
+def ensure_regridded_month(
+    month_start: pd.Timestamp,
+    month_end: pd.Timestamp,
+    grid_path: Path,
+    raw_root: Path,
+    mosaic_root: Path,
+    regrid_root: Path,
+    quality_flag: int,
+    chunk_size: int,
+    chunk_buffer: int,
+):
+    ensure_daily_mosaics(month_start, month_end, raw_root, mosaic_root, quality_flag)
+    ensure_regridded_files(
+        month_start,
+        month_end,
+        grid_path,
+        mosaic_root,
+        regrid_root,
+        chunk_size,
+        chunk_buffer,
+    )
 
 
 def canonical_time_bounds(canonical_zarr: Path):
@@ -280,7 +444,12 @@ def build_staging_zarr(args, refresh_start: pd.Timestamp, month_end: pd.Timestam
         '--diagnostic_map_plot_path', diagnostic_map,
     ]
     if staging_zarr.exists():
-        _ensure_staging_matches_request(staging_zarr, refresh_start, month_end)
+        _ensure_staging_matches_request(
+            staging_zarr,
+            refresh_start,
+            month_end,
+            args.canonical_zarr,
+        )
         print(f'Resuming existing MODIS interpolation staging zarr: {staging_zarr}')
     else:
         run_cmd([
@@ -327,6 +496,7 @@ def _ensure_staging_matches_request(
     staging_zarr: Path,
     refresh_start: pd.Timestamp,
     refresh_end: pd.Timestamp,
+    canonical_zarr: Path,
 ):
     ds = xr.open_zarr(staging_zarr, consolidated=False)
     try:
@@ -342,6 +512,14 @@ def _ensure_staging_matches_request(
         interp_vars = [name for name in ds.data_vars if name.endswith('_interp')]
         if not interp_vars:
             raise ValueError(f'Existing staging zarr has no *_interp variables: {staging_zarr}')
+        with xr.open_zarr(canonical_zarr, consolidated=False) as canonical_ds:
+            for coord_name in ['x', 'y']:
+                if coord_name in ds.coords and coord_name in canonical_ds.coords:
+                    if not np.array_equal(ds[coord_name].values, canonical_ds[coord_name].values):
+                        raise ValueError(
+                            f'Existing staging zarr has incompatible {coord_name} coordinates: '
+                            f'{staging_zarr}'
+                        )
     finally:
         ds.close()
 
@@ -434,7 +612,7 @@ def _time_array_names(root):
 
 
 def _ensure_static_coords_match(staging_root, canonical_root):
-    for coord_name in ['x', 'y', 'lat', 'lon']:
+    for coord_name in ['x', 'y']:
         if coord_name in staging_root and coord_name in canonical_root:
             if not np.array_equal(staging_root[coord_name][:], canonical_root[coord_name][:]):
                 raise ValueError(f'Coordinate mismatch for {coord_name}')
@@ -450,6 +628,46 @@ def _time_slice(index: pd.DatetimeIndex, start_date: pd.Timestamp, end_date: pd.
     return slice(int(positions[0]), int(positions[-1]) + 1)
 
 
+def _decoded_zarr_time_index(zarr_path: Path) -> pd.DatetimeIndex:
+    ds = xr.open_zarr(zarr_path, consolidated=False)
+    try:
+        return pd.DatetimeIndex(ds['time'].values).normalize()
+    finally:
+        ds.close()
+
+
+def _encode_time_for_array(times: pd.DatetimeIndex, time_array):
+    units = time_array.attrs.get('units')
+    if not units:
+        return times.values.astype(time_array.dtype, copy=False)
+    match = re.match(r'^(\w+) since (.+)$', units)
+    if match is None:
+        raise ValueError(f'Unsupported time units for canonical MODIS zarr: {units}')
+    unit_name, origin_text = match.groups()
+    origin = pd.Timestamp(origin_text)
+    deltas = times - origin
+    unit_seconds = {
+        'day': 86400,
+        'days': 86400,
+        'hour': 3600,
+        'hours': 3600,
+        'minute': 60,
+        'minutes': 60,
+        'second': 1,
+        'seconds': 1,
+    }
+    if unit_name not in unit_seconds:
+        raise ValueError(f'Unsupported time unit for canonical MODIS zarr: {unit_name}')
+    encoded = deltas / pd.Timedelta(seconds=unit_seconds[unit_name])
+    encoded = np.asarray(encoded, dtype=np.float64)
+    if np.issubdtype(time_array.dtype, np.integer):
+        rounded = np.rint(encoded)
+        if not np.allclose(encoded, rounded, rtol=0, atol=1e-9):
+            raise ValueError(f'Time values are not integral in canonical units: {units}')
+        encoded = rounded
+    return encoded.astype(time_array.dtype, copy=False)
+
+
 def promote_staging_window(staging_zarr: Path, canonical_zarr: Path, refresh_start: pd.Timestamp, refresh_end: pd.Timestamp):
     if not canonical_zarr.exists():
         print(f'Canonical MODIS zarr missing; initializing from staging {staging_zarr}')
@@ -460,8 +678,8 @@ def promote_staging_window(staging_zarr: Path, canonical_zarr: Path, refresh_sta
     canonical_root = zarr.open_group(str(canonical_zarr), mode='a')
     _ensure_static_coords_match(staging_root, canonical_root)
 
-    staging_time = pd.to_datetime(np.asarray(staging_root['time'][:], dtype=np.int64)).normalize()
-    canonical_time = pd.to_datetime(np.asarray(canonical_root['time'][:], dtype=np.int64)).normalize()
+    staging_time = _decoded_zarr_time_index(staging_zarr)
+    canonical_time = _decoded_zarr_time_index(canonical_zarr)
     staging_slice = _time_slice(staging_time, refresh_start, refresh_end)
     staging_window = staging_time[staging_slice]
     canonical_end = canonical_time.max() if len(canonical_time) > 0 else None
@@ -484,7 +702,10 @@ def promote_staging_window(staging_zarr: Path, canonical_zarr: Path, refresh_sta
         staging_overlap_slice = slice(staging_slice.start + overlap_start, staging_slice.start + overlap_stop)
         print(f'Overwriting canonical MODIS overlap window {overlap_times[0].date()} -> {overlap_times[-1].date()}')
         for name in time_names:
-            canonical_root[name][production_slice] = staging_root[name][staging_overlap_slice]
+            if name == 'time':
+                canonical_root[name][production_slice] = _encode_time_for_array(overlap_times, canonical_root[name])
+            else:
+                canonical_root[name][production_slice] = staging_root[name][staging_overlap_slice]
 
     if append_mask.any():
         append_times = staging_window[append_mask]
@@ -497,10 +718,10 @@ def promote_staging_window(staging_zarr: Path, canonical_zarr: Path, refresh_sta
         for name in time_names:
             arr = canonical_root[name]
             if name == 'time':
-                arr.resize(new_n)
-                arr[old_n:new_n] = staging_root[name][staging_append_slice]
+                arr.resize((new_n,))
+                arr[old_n:new_n] = _encode_time_for_array(append_times, arr)
             else:
-                arr.resize(new_n, *arr.shape[1:])
+                arr.resize((new_n, *arr.shape[1:]))
                 arr[old_n:new_n] = staging_root[name][staging_append_slice]
 
     canonical_root.attrs['last_monthly_update'] = refresh_end.strftime('%Y-%m')
@@ -513,11 +734,15 @@ def main():
     month_start, month_end = month_bounds(args.month)
     print(f'Updating MODIS for month {args.month}: {month_start.date()} -> {month_end.date()}')
 
+    refresh_start = compute_refresh_start(args.canonical_zarr, month_start, args.max_interpolation_days)
+    source_context_start = refresh_start - pd.Timedelta(days=int(args.buffer_days))
+    source_context_end = month_end + pd.Timedelta(days=int(args.buffer_days))
+
     if args.check_only:
         if canonical_has_full_month(args.canonical_zarr, month_start, month_end):
             print(f'MODIS availability check for {args.month}: available=True reason=canonical_zarr_already_contains_month')
             raise SystemExit(0)
-        available, reason = remote_month_available(month_start, month_end, args.grid_path)
+        available, reason = remote_month_available(source_context_start, source_context_end, args.grid_path)
         print(f'MODIS availability check for {args.month}: available={available} reason={reason}')
         raise SystemExit(0 if available else 1)
 
@@ -525,19 +750,35 @@ def main():
         print(f'Canonical MODIS zarr already contains full month {args.month}; nothing to do')
         return
 
-    ensure_raw_downloads(month_start, month_end, args.raw_root, args.grid_path)
-    ensure_regridded_month(month_start, month_end, args.regrid_root, args.quality_flag)
+    ensure_raw_downloads(source_context_start, source_context_end, args.raw_root, args.grid_path)
+    ensure_regridded_month(
+        source_context_start,
+        source_context_end,
+        args.grid_path,
+        args.raw_root,
+        args.mosaic_root,
+        args.regrid_root,
+        args.quality_flag,
+        args.regrid_chunk_size,
+        args.regrid_chunk_buffer,
+    )
+    validate_regridded_grid(args.regrid_root, args.canonical_zarr, source_context_start, source_context_end)
 
-    refresh_start = compute_refresh_start(args.canonical_zarr, month_start, args.max_interpolation_days)
     print(f'Refreshing canonical MODIS from {refresh_start.date()} through {month_end.date()} to preserve interpolation consistency')
     staging_zarr = build_staging_zarr(args, refresh_start, month_end)
     result = promote_staging_window(staging_zarr, args.canonical_zarr, refresh_start, month_end)
     print(f'MODIS monthly update complete for {args.month}: {result}')
     print(f'  staging_zarr={staging_zarr}')
     print(f'  canonical_zarr={args.canonical_zarr}')
-    if staging_zarr.exists():
-        shutil.rmtree(staging_zarr)
-        print(f'Removed staging zarr {staging_zarr}')
+    prune_source_artifacts(
+        args.raw_root,
+        args.mosaic_root,
+        args.regrid_root,
+        source_context_start,
+        source_context_end,
+    )
+    if args.retain_staging_after_success:
+        print(f'Retaining staging zarr after success: {staging_zarr}')
 
 
 if __name__ == '__main__':

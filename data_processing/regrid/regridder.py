@@ -11,6 +11,9 @@ sys.path.append('/home/users/trobinet/long_lfmc/data_processing/shared')
 import plotting as plot
 
 
+DAILY_DATE_PATTERN = re.compile(r'_(\d{8})(?:_regridded)?\.[^.]+$')
+
+
 def format_time_value_as_yyyymmdd(time_value):
     """
     Convert an xarray time value (numpy datetime64 or cftime-like object) to
@@ -96,7 +99,10 @@ def reproject_and_regrid_whole_directory(
     fill_value='none',
     chunk_buffer=200,
     single_file=False,
-    resampling=Resampling.nearest
+    resampling=Resampling.nearest,
+    start_date=None,
+    end_date=None,
+    skip_existing=False,
 ):
     """
     Parameters
@@ -147,9 +153,34 @@ def reproject_and_regrid_whole_directory(
     ))
     # get all of the files that have been passed to us to regrid
     src_file_paths = get_all_file_paths(src_dir)
+    if start_date is not None or end_date is not None:
+        start_dt = (
+            datetime.datetime.strptime(start_date, '%Y-%m-%d').date()
+            if start_date is not None else None
+        )
+        end_dt = (
+            datetime.datetime.strptime(end_date, '%Y-%m-%d').date()
+            if end_date is not None else None
+        )
+        src_file_paths = filter_daily_files_by_date(src_file_paths, start_dt, end_dt)
+        print(
+            'filtered source files to {} daily files between {} and {}'.format(
+                len(src_file_paths),
+                start_dt,
+                end_dt,
+            )
+        )
     plotted_first_output = False
     # loop over each file
     for sfp,this_src_file_path in enumerate(src_file_paths):
+        expected_target_path = get_regrid_output_path(
+            this_src_file_path,
+            src_dir,
+            target_dir,
+        )
+        if skip_existing and os.path.exists(expected_target_path):
+            print('skipping existing regrid output {}'.format(expected_target_path))
+            continue
         print('working on file {}'.format(
             this_src_file_path
         ))
@@ -487,6 +518,27 @@ def get_all_file_paths(src_dir):
             file_paths.append(os.path.join(dirpath, filename))
     file_paths_sorted = sorted(file_paths)
     return file_paths_sorted
+
+
+def extract_daily_date_from_path(path):
+    match = DAILY_DATE_PATTERN.search(os.path.basename(path))
+    if match is None:
+        return None
+    return datetime.datetime.strptime(match.group(1), '%Y%m%d').date()
+
+
+def filter_daily_files_by_date(file_paths, start_date, end_date):
+    filtered = []
+    for path in file_paths:
+        file_date = extract_daily_date_from_path(path)
+        if file_date is None:
+            continue
+        if start_date is not None and file_date < start_date:
+            continue
+        if end_date is not None and file_date > end_date:
+            continue
+        filtered.append(path)
+    return filtered
 def mirror_directory_structure(src_root,dst_root):
     for dir_path,dir_names,_ in os.walk(src_root):
         # get the relative path to the source root
@@ -629,4 +681,3 @@ def get_padded_chunk(
         src_y_dim_name: y_slice
     })
     return src_subset
-

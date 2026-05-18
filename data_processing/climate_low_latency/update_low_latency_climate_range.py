@@ -123,17 +123,37 @@ def submit_sbatch_job(script_path: Path, env_vars: dict[str, str], label: str) -
 def wait_for_jobs(job_ids: dict[str, str], label: str, poll_seconds: int = 30) -> None:
     pending = dict(job_ids)
     print(f'Waiting for {label} jobs to complete: {pending}')
+    failed_states = {
+        'BOOT_FAIL',
+        'CANCELLED',
+        'DEADLINE',
+        'FAILED',
+        'NODE_FAIL',
+        'OUT_OF_MEMORY',
+        'PREEMPTED',
+        'TIMEOUT',
+    }
     while pending:
         completed_items = []
         for item_label, job_id in pending.items():
-            if job_is_active(job_id):
-                print(f'  {label} item={item_label} job={job_id} state=ACTIVE; sleeping')
-                continue
             state = final_job_state(job_id)
-            print(f'  {label} item={item_label} job={job_id} final_state={state}')
-            if state != 'COMPLETED':
+            if state == 'COMPLETED':
+                print(f'  {label} item={item_label} job={job_id} final_state={state}')
+                completed_items.append(item_label)
+                continue
+            if state in failed_states:
+                print(f'  {label} item={item_label} job={job_id} final_state={state}')
                 raise RuntimeError(f'{label} job failed for item={item_label} job={job_id} state={state}')
-            completed_items.append(item_label)
+            if job_is_active(job_id):
+                print(
+                    f'  {label} item={item_label} job={job_id} '
+                    f'state=ACTIVE accounting_state={state}; sleeping'
+                )
+            else:
+                print(
+                    f'  {label} item={item_label} job={job_id} '
+                    f'state={state}; waiting for terminal accounting state'
+                )
         for item_label in completed_items:
             pending.pop(item_label, None)
         if pending:

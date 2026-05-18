@@ -56,6 +56,23 @@ def main():
         help="Buffer size for chunking",
         default=200
     )
+    parser.add_argument(
+        "--start_date",
+        type=str,
+        help="Optional first YYYY-MM-DD date to regrid when source filenames contain daily dates",
+        default=None
+    )
+    parser.add_argument(
+        "--end_date",
+        type=str,
+        help="Optional last YYYY-MM-DD date to regrid when source filenames contain daily dates",
+        default=None
+    )
+    parser.add_argument(
+        "--skip_existing",
+        action="store_true",
+        help="Skip source files whose expected target file already exists",
+    )
     target_grid_dir = parser.parse_args().target_grid
     src_dir = parser.parse_args().src_dir
     target_dir = parser.parse_args().target_dir
@@ -63,6 +80,9 @@ def main():
     target_crs = parser.parse_args().target_crs
     chunk_size = parser.parse_args().chunk_size
     chunk_buffer = parser.parse_args().chunk_buffer
+    start_date = parser.parse_args().start_date
+    end_date = parser.parse_args().end_date
+    skip_existing = parser.parse_args().skip_existing
     if parser.parse_args().fill_value != 'none':
         fill_value = float(parser.parse_args().fill_value)
     else:
@@ -108,7 +128,10 @@ def main():
         target_crs,
         chunk_size=chunk_size,
         fill_value=fill_value,
-        chunk_buffer=chunk_buffer
+        chunk_buffer=chunk_buffer,
+        start_date=start_date,
+        end_date=end_date,
+        skip_existing=skip_existing,
     )
 
 

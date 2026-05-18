@@ -199,14 +199,14 @@ submit_sbatch_job() {
 job_is_active() {
     local job_id="$1"
     local states
-    states="$(squeue -h -j "${job_id}" -o '%T')"
+    states="$(squeue -h -j "${job_id}" -o '%T' 2>/dev/null || true)"
     [[ -n "${states}" ]]
 }
 
 final_job_state() {
     local job_id="$1"
     local states
-    states="$(sacct -j "${job_id}" --format=State -n -P)"
+    states="$(sacct -j "${job_id}" --format=State -n -P 2>/dev/null || true)"
     if [[ -z "${states}" ]]; then
         printf 'UNKNOWN\n'
         return 0
@@ -227,17 +227,27 @@ wait_for_job() {
     local label="$2"
     local poll_seconds=30
     echo "Waiting for ${label} job ${job_id}"
-    while job_is_active "${job_id}"; do
-        echo "  ${label} job=${job_id} state=ACTIVE; sleeping ${poll_seconds}s"
+    while true; do
+        local state
+        state="$(final_job_state "${job_id}")"
+        case "${state}" in
+            COMPLETED)
+                echo "  ${label} job=${job_id} final_state=${state}"
+                return 0
+                ;;
+            BOOT_FAIL|CANCELLED*|DEADLINE|FAILED|NODE_FAIL|OUT_OF_MEMORY|PREEMPTED|TIMEOUT)
+                echo "  ${label} job=${job_id} final_state=${state}"
+                echo "${label} job ${job_id} failed with state ${state}"
+                return 1
+                ;;
+        esac
+        if job_is_active "${job_id}"; then
+            echo "  ${label} job=${job_id} state=ACTIVE accounting_state=${state}; sleeping ${poll_seconds}s"
+        else
+            echo "  ${label} job=${job_id} state=${state}; waiting for terminal accounting state"
+        fi
         sleep "${poll_seconds}"
     done
-    local state
-    state="$(final_job_state "${job_id}")"
-    echo "  ${label} job=${job_id} final_state=${state}"
-    if [[ "${state}" != "COMPLETED" ]]; then
-        echo "${label} job ${job_id} failed with state ${state}"
-        return 1
-    fi
 }
 
 write_status() {

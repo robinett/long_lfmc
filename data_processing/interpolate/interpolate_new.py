@@ -42,7 +42,6 @@ def candidate_modis_paths(base_path, dt):
     base_dir = Path(base_path) / year / month
     date_tag = f"{year}{month}{day}"
     return [
-        base_dir / f"modis_reflectance_{date_tag}.nc4",
         base_dir / f"modis_reflectance_{date_tag}_regridded.nc4",
     ]
 
@@ -562,7 +561,12 @@ def build_output_template(
         coord_ds.attrs["interpolation_output"] = "time-gap-limited linear interpolation"
         coord_ds.to_zarr(output_zarr, mode="w", zarr_format=ZARR_VERSION)
 
-        root = zarr.open_group(str(output_zarr), mode="a", zarr_format=ZARR_VERSION)
+        root = zarr.open_group(
+            str(output_zarr),
+            mode="a",
+            zarr_format=ZARR_VERSION,
+            use_consolidated=False,
+        )
         shape = (len(target_dates), y_size, x_size)
 
         for var in interp_vars:
@@ -597,6 +601,7 @@ def build_output_template(
                 }
             )
 
+    zarr.consolidate_metadata(str(output_zarr))
     return output_zarr
 
 
@@ -803,7 +808,12 @@ def process_interpolation_to_zarr(
 
     output_zarr = Path(output_zarr)
     chunk_status_dir(output_zarr).mkdir(parents=True, exist_ok=True)
-    root = zarr.open_group(str(output_zarr), mode="a", zarr_format=ZARR_VERSION)
+    root = zarr.open_group(
+        str(output_zarr),
+        mode="a",
+        zarr_format=ZARR_VERSION,
+        use_consolidated=False,
+    )
 
     assigned_total = 0
     skipped_done_total = 0
