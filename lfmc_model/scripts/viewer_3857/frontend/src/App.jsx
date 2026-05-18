@@ -1270,16 +1270,35 @@ function App() {
   return (
     <div className="app-shell">
       <header className="date-bar">
-        <div className="date-bar-primary">
-          <div>
-            <div className="panel-label">Date</div>
-            <div className="date-row">
+        <div className="date-bar-main">
+          <div className="viewer-title-block">
+            <h1>Viewer for long-term LFMC dataset</h1>
+            <div className="viewer-subtitle">{statusText}</div>
+          </div>
+          <div className="date-slider-block">
+            <div className="date-slider-main-row">
               <div className="date-value">{selectedDate}</div>
-              <div className={`pill ${isMapLoading ? "pill-loading" : ""}`}>
-                {isMapLoading ? "Loading" : "Ready"}
-              </div>
+              <input
+                className="date-slider"
+                type="range"
+                min="0"
+                max={Math.max(dates.length - 1, 0)}
+                step="1"
+                value={dateIndex}
+                disabled={!dates.length}
+                onChange={(event) => {
+                  setIsPlaying(false);
+                  requestDateTransition(Number(event.target.value));
+                }}
+              />
+            </div>
+            <div className="slider-extents date-slider-extents">
+              <span>{dates[0] ?? "--"}</span>
+              <span>{dates[dates.length - 1] ?? "--"}</span>
             </div>
           </div>
+        </div>
+        <div className="date-bar-controls">
           <button
             type="button"
             className={`toggle-button play-button ${isPlaying ? "toggle-button-active" : ""}`}
@@ -1288,8 +1307,6 @@ function App() {
           >
             {isPlaying ? "Pause" : "Play"}
           </button>
-        </div>
-        <div className="date-bar-controls">
           <div className="date-step-controls" aria-label="Date step controls">
             <button
               type="button"
@@ -1353,30 +1370,8 @@ function App() {
             />
           </label>
         </div>
-        <div className="date-slider-row">
-          <input
-            className="date-slider"
-            type="range"
-            min="0"
-            max={Math.max(dates.length - 1, 0)}
-            step="1"
-            value={dateIndex}
-            disabled={!dates.length}
-            onChange={(event) => {
-              setIsPlaying(false);
-              requestDateTransition(Number(event.target.value));
-            }}
-          />
-          <div className="slider-extents">
-            <span>{dates[0] ?? "--"}</span>
-            <span>{dates[dates.length - 1] ?? "--"}</span>
-          </div>
-        </div>
       </header>
       <aside className="control-panel">
-        <h1>Viewer for long-term LFMC dataset</h1>
-        <div className="status-line">{statusText}</div>
-
         <section className="panel-card">
           <div className="panel-label">LFMC (%)</div>
           <div
