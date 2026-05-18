@@ -24,6 +24,7 @@ register(proj4);
 
 const DEFAULT_API_BASE_URL = "https://long-lfmc-api.onrender.com";
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, "");
+const MAX_DOWNLOAD_YEARS = 3;
 
 function apiUrl(pathAndQuery) {
   const normalizedPath = pathAndQuery.startsWith("/") ? pathAndQuery : `/${pathAndQuery}`;
@@ -375,6 +376,100 @@ function parseCoordinateInput(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseDateString(dateStr) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr));
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return date;
+}
+
+function formatDateString(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function shiftDateString(dateStr, amount, unit) {
+  const date = parseDateString(dateStr);
+  if (!date) {
+    return dateStr;
+  }
+  if (unit === "month") {
+    const originalDay = date.getUTCDate();
+    date.setUTCDate(1);
+    date.setUTCMonth(date.getUTCMonth() + amount);
+    const lastDayOfTargetMonth = new Date(
+      Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0),
+    ).getUTCDate();
+    date.setUTCDate(Math.min(originalDay, lastDayOfTargetMonth));
+  } else {
+    const dayMultiplier = unit === "week" ? 7 : 1;
+    date.setUTCDate(date.getUTCDate() + amount * dayMultiplier);
+  }
+  return formatDateString(date);
+}
+
+function findDateIndex(dates, targetDate, direction = "nearest") {
+  if (!dates.length) {
+    return -1;
+  }
+  let low = 0;
+  let high = dates.length - 1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (dates[mid] === targetDate) {
+      return mid;
+    }
+    if (dates[mid] < targetDate) {
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  const beforeIdx = Math.max(0, high);
+  const afterIdx = Math.min(dates.length - 1, low);
+  if (direction === "backward") {
+    return beforeIdx;
+  }
+  if (direction === "forward") {
+    return afterIdx;
+  }
+  const beforeDate = parseDateString(dates[beforeIdx]);
+  const afterDate = parseDateString(dates[afterIdx]);
+  const target = parseDateString(targetDate);
+  if (!beforeDate || !afterDate || !target) {
+    return afterIdx;
+  }
+  return target - beforeDate <= afterDate - target ? beforeIdx : afterIdx;
+}
+
+function maxDownloadEndDate(startDate) {
+  const parsed = parseDateString(startDate);
+  if (!parsed) {
+    return null;
+  }
+  const targetYear = parsed.getUTCFullYear() + MAX_DOWNLOAD_YEARS;
+  const month = parsed.getUTCMonth();
+  const day = parsed.getUTCDate();
+  const lastDayOfTargetMonth = new Date(Date.UTC(targetYear, month + 1, 0)).getUTCDate();
+  return formatDateString(new Date(Date.UTC(targetYear, month, Math.min(day, lastDayOfTargetMonth))));
+}
+
+function isDownloadRangeWithinLimit(startDate, endDate) {
+  const maxEnd = maxDownloadEndDate(startDate);
+  return Boolean(maxEnd) && endDate <= maxEnd;
+}
+
 function App() {
   const lfmcDisplayOpacity = 0.75;
   const mapContainerRef = useRef(null);
@@ -439,7 +534,7 @@ function App() {
   }
 
   async function loadPointAtCoordinate(x, y, dateStr, options = {}) {
-    const { recenter = false } = options;
+    const { recenter = false, updateDownloadSite = true } = options;
     setStatusText("Loading clicked cell and time series...");
     const payload = await queryPoint(x, y, dateStr);
     setPointInfo(payload);
@@ -447,16 +542,18 @@ function App() {
       x: payload.requested_grid_x,
       y: payload.requested_grid_y,
     };
-    setDownloadSites((currentSites) =>
-      currentSites.map((site, siteIndex) =>
-        siteIndex === activeDownloadSiteIndexRef.current
-          ? {
-              lat: formatCoordinateInput(payload.cell_center_lat),
-              lon: formatCoordinateInput(payload.cell_center_lon),
-            }
-          : site,
-      ),
-    );
+    if (updateDownloadSite) {
+      setDownloadSites((currentSites) =>
+        currentSites.map((site, siteIndex) =>
+          siteIndex === activeDownloadSiteIndexRef.current
+            ? {
+                lat: formatCoordinateInput(payload.cell_center_lat),
+                lon: formatCoordinateInput(payload.cell_center_lon),
+              }
+            : site,
+        ),
+      );
+    }
     updateSelectionFeatures(payload, manifestRef.current);
     if (recenter && mapRef.current) {
       mapRef.current.getView().animate({
@@ -706,6 +803,26 @@ function App() {
     void drainQueuedTransitions();
   }
 
+  function requestDateValueTransition(targetDate, direction = "nearest") {
+    if (!dates.length || !targetDate) {
+      return;
+    }
+    const targetIndex = findDateIndex(dates, targetDate, direction);
+    if (targetIndex < 0) {
+      return;
+    }
+    setIsPlaying(false);
+    requestDateTransition(targetIndex);
+  }
+
+  function handleDateStep(amount, unit) {
+    if (!dates.length || selectedDate === "NA") {
+      return;
+    }
+    const targetDate = shiftDateString(selectedDate, amount, unit);
+    requestDateValueTransition(targetDate, amount < 0 ? "backward" : "forward");
+  }
+
   function updateSelectionFeatures(payload, manifestPayload) {
     const selectionSource = selectionSourceRef.current;
     if (!selectionSource) {
@@ -923,7 +1040,7 @@ function App() {
   }, [manifest]);
 
   useEffect(() => {
-    if (!pointRef.current || !manifest) {
+    if (!pointRef.current || !manifest || isPlaying) {
       return;
     }
 
@@ -935,7 +1052,7 @@ function App() {
       .catch((error) => {
         setStatusText(`Point refresh failed: ${error.message}`);
       });
-  }, [dateIndex, manifest]);
+  }, [dateIndex, manifest, isPlaying]);
 
   useEffect(() => {
     if (!isPlaying || dates.length < 2) {
@@ -1015,6 +1132,10 @@ function App() {
     }
     if (downloadEndDate < downloadStartDate) {
       setStatusText("CSV end date must be on or after the start date");
+      return;
+    }
+    if (!isDownloadRangeWithinLimit(downloadStartDate, downloadEndDate)) {
+      setStatusText(`CSV downloads are limited to ${MAX_DOWNLOAD_YEARS} years at a time`);
       return;
     }
 
@@ -1148,6 +1269,110 @@ function App() {
 
   return (
     <div className="app-shell">
+      <header className="date-bar">
+        <div className="date-bar-primary">
+          <div>
+            <div className="panel-label">Date</div>
+            <div className="date-row">
+              <div className="date-value">{selectedDate}</div>
+              <div className={`pill ${isMapLoading ? "pill-loading" : ""}`}>
+                {isMapLoading ? "Loading" : "Ready"}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            className={`toggle-button play-button ${isPlaying ? "toggle-button-active" : ""}`}
+            disabled={dates.length < 2}
+            onClick={() => setIsPlaying((currentValue) => !currentValue)}
+          >
+            {isPlaying ? "Pause" : "Play"}
+          </button>
+        </div>
+        <div className="date-bar-controls">
+          <div className="date-step-controls" aria-label="Date step controls">
+            <button
+              type="button"
+              className="toggle-button date-step-button"
+              disabled={!dates.length}
+              onClick={() => handleDateStep(-1, "day")}
+            >
+              -1 day
+            </button>
+            <button
+              type="button"
+              className="toggle-button date-step-button"
+              disabled={!dates.length}
+              onClick={() => handleDateStep(1, "day")}
+            >
+              +1 day
+            </button>
+            <button
+              type="button"
+              className="toggle-button date-step-button"
+              disabled={!dates.length}
+              onClick={() => handleDateStep(-1, "week")}
+            >
+              -1 week
+            </button>
+            <button
+              type="button"
+              className="toggle-button date-step-button"
+              disabled={!dates.length}
+              onClick={() => handleDateStep(1, "week")}
+            >
+              +1 week
+            </button>
+            <button
+              type="button"
+              className="toggle-button date-step-button"
+              disabled={!dates.length}
+              onClick={() => handleDateStep(-1, "month")}
+            >
+              -1 month
+            </button>
+            <button
+              type="button"
+              className="toggle-button date-step-button"
+              disabled={!dates.length}
+              onClick={() => handleDateStep(1, "month")}
+            >
+              +1 month
+            </button>
+          </div>
+          <label className="date-input-field">
+            <span className="stats-key">Enter Date</span>
+            <input
+              className="location-input date-input"
+              type="date"
+              value={dates.includes(selectedDate) ? selectedDate : ""}
+              min={dates[0] ?? undefined}
+              max={dates[dates.length - 1] ?? undefined}
+              disabled={!dates.length}
+              onChange={(event) => requestDateValueTransition(event.target.value)}
+            />
+          </label>
+        </div>
+        <div className="date-slider-row">
+          <input
+            className="date-slider"
+            type="range"
+            min="0"
+            max={Math.max(dates.length - 1, 0)}
+            step="1"
+            value={dateIndex}
+            disabled={!dates.length}
+            onChange={(event) => {
+              setIsPlaying(false);
+              requestDateTransition(Number(event.target.value));
+            }}
+          />
+          <div className="slider-extents">
+            <span>{dates[0] ?? "--"}</span>
+            <span>{dates[dates.length - 1] ?? "--"}</span>
+          </div>
+        </div>
+      </header>
       <aside className="control-panel">
         <h1>Viewer for long-term LFMC dataset</h1>
         <div className="status-line">{statusText}</div>
@@ -1161,43 +1386,6 @@ function App() {
           <div className="slider-extents">
             <span>{formatValue(activeLayer?.min, 0)}</span>
             <span>{formatValue(activeLayer?.max, 0)}</span>
-          </div>
-        </section>
-
-        <section className="panel-card">
-          <div className="panel-label">Date</div>
-          <div className="date-row">
-            <div className="date-value">{selectedDate}</div>
-            <div className={`pill ${isMapLoading ? "pill-loading" : ""}`}>
-              {isMapLoading ? "Loading" : "Ready"}
-            </div>
-          </div>
-          <div className="date-toolbar">
-            <button
-              type="button"
-              className={`toggle-button play-button ${isPlaying ? "toggle-button-active" : ""}`}
-              disabled={dates.length < 2}
-              onClick={() => setIsPlaying((currentValue) => !currentValue)}
-            >
-              {isPlaying ? "Pause" : "Play"}
-            </button>
-            <input
-              className="date-slider"
-              type="range"
-              min="0"
-              max={Math.max(dates.length - 1, 0)}
-              step="1"
-              value={dateIndex}
-              disabled={!dates.length}
-              onChange={(event) => {
-                setIsPlaying(false);
-                requestDateTransition(Number(event.target.value));
-              }}
-            />
-          </div>
-          <div className="slider-extents">
-            <span>{dates[0] ?? "--"}</span>
-            <span>{dates[dates.length - 1] ?? "--"}</span>
           </div>
         </section>
 
@@ -1260,7 +1448,10 @@ function App() {
 
         <section className="panel-card">
           <div className="panel-label">Time Series</div>
-          <TimeseriesChart pointInfo={pointInfo} selectedDate={selectedDate} />
+          <div className="timeseries-shell">
+            <TimeseriesChart pointInfo={pointInfo} selectedDate={selectedDate} />
+            {isPlaying ? <div className="timeseries-play-overlay">will update after play</div> : null}
+          </div>
         </section>
 
         <section className="panel-card">
@@ -1334,7 +1525,13 @@ function App() {
                 type="date"
                 value={downloadEndDate}
                 min={dates[0] ?? undefined}
-                max={dates[dates.length - 1] ?? undefined}
+                max={
+                  downloadStartDate
+                    ? [dates[dates.length - 1], maxDownloadEndDate(downloadStartDate)]
+                        .filter(Boolean)
+                        .sort()[0]
+                    : dates[dates.length - 1] ?? undefined
+                }
                 onChange={(event) => setDownloadEndDate(event.target.value)}
               />
             </label>

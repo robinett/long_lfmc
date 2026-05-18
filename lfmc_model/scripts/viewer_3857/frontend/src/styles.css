@@ -25,7 +25,59 @@ body {
 .app-shell {
   display: grid;
   grid-template-columns: 380px 1fr;
-  min-height: 100vh;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100vh;
+  min-height: 720px;
+}
+
+.date-bar {
+  grid-column: 1 / -1;
+  padding: 14px 22px 16px;
+  background: rgba(255, 251, 244, 0.9);
+  border-bottom: 1px solid rgba(63, 55, 42, 0.14);
+  box-shadow: 0 10px 28px rgba(63, 46, 26, 0.08);
+}
+
+.date-bar-primary,
+.date-bar-controls {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.date-bar-primary {
+  margin-bottom: 12px;
+}
+
+.date-bar-controls {
+  align-items: center;
+}
+
+.date-step-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.date-step-button {
+  padding: 8px 11px;
+  font-size: 0.78rem;
+}
+
+.date-input-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.date-input {
+  width: 152px;
+}
+
+.date-slider-row {
+  margin-top: 12px;
 }
 
 .control-panel {
@@ -37,6 +89,7 @@ body {
   flex-direction: column;
   gap: 14px;
   overflow-y: auto;
+  min-height: 0;
 }
 
 .control-panel h1 {
@@ -129,6 +182,11 @@ body {
   color: #53412d;
   cursor: pointer;
   font-size: 0.82rem;
+}
+
+.toggle-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
 }
 
 .toggle-button-active {
@@ -276,6 +334,27 @@ body {
   flex-direction: column;
 }
 
+.timeseries-shell {
+  position: relative;
+  min-height: 120px;
+}
+
+.timeseries-play-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: rgba(255, 251, 244, 0.82);
+  color: #3d3023;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-transform: lowercase;
+  box-shadow: inset 0 0 0 1px rgba(128, 89, 58, 0.18);
+}
+
 .timeseries-chart {
   width: 100%;
   height: auto;
@@ -372,12 +451,13 @@ body {
 
 .map-stage {
   padding: 18px;
+  min-height: 0;
 }
 
 .map-frame {
   position: relative;
   width: 100%;
-  height: calc(100vh - 36px);
+  height: 100%;
   border-radius: 26px;
   overflow: hidden;
   box-shadow: 0 28px 60px rgba(52, 40, 24, 0.16);
@@ -406,6 +486,24 @@ body {
 @media (max-width: 1100px) {
   .app-shell {
     grid-template-columns: 1fr;
+    grid-template-rows: auto auto minmax(420px, 1fr);
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .date-bar-primary,
+  .date-bar-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .date-input-field {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .date-input {
+    width: 100%;
   }
 
   .control-panel {

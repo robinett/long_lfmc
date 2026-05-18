@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import csv
+import datetime as dt
 import hmac
 import io
 import json
@@ -35,6 +36,7 @@ config_path = viewer_root / "viewer_config.yaml"
 DATASET_LOAD_WAIT_SECONDS = 45.0
 DEFAULT_POINT_TIMESERIES_DAYS = 90
 MAX_POINT_TIMESERIES_DAYS = 91
+MAX_CSV_DOWNLOAD_YEARS = 3
 
 dask = None
 fsspec = None
@@ -116,6 +118,14 @@ def safe_float(value):
 
 def datetime64_to_datestr(value) -> str:
     return np.datetime_as_string(np.datetime64(value), unit="D")
+
+
+def max_csv_end_date(start_date: str) -> dt.date:
+    parsed_start = dt.date.fromisoformat(start_date)
+    try:
+        return parsed_start.replace(year=parsed_start.year + MAX_CSV_DOWNLOAD_YEARS)
+    except ValueError:
+        return parsed_start.replace(year=parsed_start.year + MAX_CSV_DOWNLOAD_YEARS, day=28)
 
 
 def join_url_parts(base_url: str, relpath: str) -> str:
@@ -807,6 +817,8 @@ class ScientificDataset:
         end_idx = self._date_index(end_date)
         if end_idx < start_idx:
             raise ValueError("end_date must be on or after start_date")
+        if dt.date.fromisoformat(end_date) > max_csv_end_date(start_date):
+            raise ValueError(f"CSV download range must be {MAX_CSV_DOWNLOAD_YEARS} years or less")
         if not sites:
             raise ValueError("At least one site is required for CSV download")
         if len(sites) > 10:
