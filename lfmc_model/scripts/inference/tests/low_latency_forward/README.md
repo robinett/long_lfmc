@@ -7,6 +7,8 @@ Files:
 - `stage_low_latency_forward_setup.sbatch`: stages the scratch baseline and writes test configs.
 - `run_low_latency_forward_inference_test.sbatch`: runs the real low-latency coordinator against the scratch registry/config, with `TODAY_OVERRIDE=2025-01-07`, `SKIP_OAK_SYNC=1`, and owners-only GPU submission.
 - `run_low_latency_forward_test.sh`: submit-only wrapper that chains the stage job and the low-latency coordinator with dependencies.
+- `run_low_latency_one_day_inference_test.sbatch`: runs the same staged sandbox for only `2024-01-01`.
+- `run_low_latency_one_day_test.sh`: submit-only wrapper for the one-day debug run; it reuses the existing staged sandbox and does not restage inputs.
 
 Expected behavior:
 - The scratch LFMC target starts with data only through `2023-12-31`.
@@ -18,4 +20,10 @@ Submit:
 
 ```bash
 bash /home/users/trobinet/long_lfmc/lfmc_model/scripts/inference/tests/low_latency_forward/run_low_latency_forward_test.sh
+```
+
+For a smaller debug pass against the already staged sandbox:
+
+```bash
+bash /home/users/trobinet/long_lfmc/lfmc_model/scripts/inference/tests/low_latency_forward/run_low_latency_one_day_test.sh
 ```

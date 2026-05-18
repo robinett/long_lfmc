@@ -40,6 +40,7 @@ SCRATCH_PRODUCTION_ZARR = SCRATCH_DIR / "production/lfmc_2001_2023_test.zarr"
 SCRATCH_PRODUCTION_METADATA = SCRATCH_DIR / "production/metadata"
 SCRATCH_MODIS_CANONICAL_ZARR = SCRATCH_DIR / "modis/modis_interp_5d_2001_2023_test.zarr"
 SCRATCH_MODIS_RAW_ROOT = SCRATCH_DIR / "modis/modis_earthaccess"
+SCRATCH_MODIS_MOSAIC_ROOT = SCRATCH_DIR / "modis/modis_combined"
 SCRATCH_MODIS_REGRID_ROOT = SCRATCH_DIR / "modis/modis_regrid"
 SCRATCH_MODIS_STAGING_ROOT = SCRATCH_DIR / "modis/modis_interp_staging"
 SCRATCH_MODIS_PLOTS_DIR = SCRATCH_DIR / "modis/plots"
@@ -179,6 +180,7 @@ def copy_is_usable(dst_path: Path) -> bool:
 def reset_processing_roots() -> None:
     paths = [
         SCRATCH_MODIS_RAW_ROOT,
+        SCRATCH_MODIS_MOSAIC_ROOT,
         SCRATCH_MODIS_REGRID_ROOT,
         SCRATCH_MODIS_STAGING_ROOT,
         SCRATCH_MODIS_PLOTS_DIR,
@@ -207,6 +209,7 @@ def reset_processing_roots() -> None:
 def prepare_processing_roots() -> None:
     paths = [
         SCRATCH_MODIS_RAW_ROOT,
+        SCRATCH_MODIS_MOSAIC_ROOT,
         SCRATCH_MODIS_REGRID_ROOT,
         SCRATCH_MODIS_STAGING_ROOT,
         SCRATCH_MODIS_PLOTS_DIR,
@@ -320,6 +323,7 @@ def main() -> None:
     registry_cfg["sources"]["production"]["zarr_path"] = str(SCRATCH_PRODUCTION_ZARR)
     registry_cfg["sources"]["production"]["metadata_dir"] = str(SCRATCH_PRODUCTION_METADATA)
     registry_cfg["processing"]["modis"]["raw_root"] = str(SCRATCH_MODIS_RAW_ROOT)
+    registry_cfg["processing"]["modis"]["mosaic_root"] = str(SCRATCH_MODIS_MOSAIC_ROOT)
     registry_cfg["processing"]["modis"]["regrid_root"] = str(SCRATCH_MODIS_REGRID_ROOT)
     registry_cfg["processing"]["modis"]["staging_root"] = str(SCRATCH_MODIS_STAGING_ROOT)
     registry_cfg["processing"]["modis"]["plots_dir"] = str(SCRATCH_MODIS_PLOTS_DIR)
@@ -371,6 +375,7 @@ def main() -> None:
             "production_metadata_dir": str(SCRATCH_PRODUCTION_METADATA),
             "modis_canonical_zarr": str(SCRATCH_MODIS_CANONICAL_ZARR),
             "modis_raw_root": str(SCRATCH_MODIS_RAW_ROOT),
+            "modis_mosaic_root": str(SCRATCH_MODIS_MOSAIC_ROOT),
             "modis_regrid_root": str(SCRATCH_MODIS_REGRID_ROOT),
             "modis_staging_root": str(SCRATCH_MODIS_STAGING_ROOT),
             "nlcd_annual_zarr": str(SCRATCH_NLCD_ANNUAL_ZARR),
