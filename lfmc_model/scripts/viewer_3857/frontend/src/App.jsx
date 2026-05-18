@@ -129,7 +129,7 @@ function buildDateTicks(dates) {
     }));
 }
 
-function buildTimeseriesGeometry(pointInfo, selectedDate) {
+function buildTimeseriesGeometry(pointInfo) {
   if (!pointInfo?.timeseries) {
     return null;
   }
@@ -139,24 +139,41 @@ function buildTimeseriesGeometry(pointInfo, selectedDate) {
   const stds = pointInfo.timeseries.lfmc_ens_std ?? [];
   const validLinePoints = [];
   const validBandPoints = [];
+  const bandSegments = [];
+  let currentBandSegment = [];
 
   for (let idx = 0; idx < dates.length; idx += 1) {
     const meanValue = means[idx];
     const stdValue = stds[idx];
-    if (meanValue !== null && !Number.isNaN(meanValue)) {
+    const meanNumber = Number(meanValue);
+    const stdNumber = Number(stdValue);
+    const hasMean = meanValue !== null && meanValue !== undefined && Number.isFinite(meanNumber);
+    const hasStd = stdValue !== null && stdValue !== undefined && Number.isFinite(stdNumber);
+    if (hasMean) {
       validLinePoints.push({
         idx,
-        mean: Number(meanValue),
+        mean: meanNumber,
       });
-      if (stdValue !== null && !Number.isNaN(stdValue)) {
-        validBandPoints.push({
+      if (hasStd) {
+        const bandPoint = {
           idx,
-          mean: Number(meanValue),
-          low: Number(meanValue) - Number(stdValue),
-          high: Number(meanValue) + Number(stdValue),
-        });
+          mean: meanNumber,
+          low: meanNumber - stdNumber,
+          high: meanNumber + stdNumber,
+        };
+        validBandPoints.push(bandPoint);
+        currentBandSegment.push(bandPoint);
+      } else if (currentBandSegment.length > 0) {
+        bandSegments.push(currentBandSegment);
+        currentBandSegment = [];
       }
+    } else if (currentBandSegment.length > 0) {
+      bandSegments.push(currentBandSegment);
+      currentBandSegment = [];
     }
+  }
+  if (currentBandSegment.length > 0) {
+    bandSegments.push(currentBandSegment);
   }
 
   if (validLinePoints.length < 2) {
@@ -198,22 +215,17 @@ function buildTimeseriesGeometry(pointInfo, selectedDate) {
   }
 
   const linePath = linePathParts.join(" ");
-  const areaPath =
-    validBandPoints.length >= 2
-      ? [
-          validBandPoints
-            .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xCoord(point.idx)} ${yCoord(point.high)}`)
-            .join(" "),
-          ...[...validBandPoints]
-            .reverse()
-            .map((point) => `L ${xCoord(point.idx)} ${yCoord(point.low)}`),
-          "Z",
-        ].join(" ")
-      : null;
-
-  const selectedIndex = Math.max(dates.indexOf(selectedDate), 0);
-  const selectedX = xCoord(selectedIndex);
-  const todayLabelX = Math.min(Math.max(selectedX + 8, padding.left + 18), width - padding.right - 6);
+  const areaPaths = bandSegments
+    .filter((segment) => segment.length >= 2)
+    .map((segment) =>
+      [
+        segment
+          .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xCoord(point.idx)} ${yCoord(point.high)}`)
+          .join(" "),
+        ...[...segment].reverse().map((point) => `L ${xCoord(point.idx)} ${yCoord(point.low)}`),
+        "Z",
+      ].join(" "),
+    );
   const xTicks = buildDateTicks(dates).map((tick) => ({
     ...tick,
     x: xCoord(tick.idx),
@@ -224,9 +236,7 @@ function buildTimeseriesGeometry(pointInfo, selectedDate) {
     height,
     padding,
     linePath,
-    areaPath,
-    selectedX,
-    todayLabelX,
+    areaPaths,
     axisLeft: padding.left,
     axisRight: width - padding.right,
     axisTop: padding.top,
@@ -239,8 +249,8 @@ function buildTimeseriesGeometry(pointInfo, selectedDate) {
   };
 }
 
-function TimeseriesChart({ pointInfo, selectedDate }) {
-  const geometry = buildTimeseriesGeometry(pointInfo, selectedDate);
+function TimeseriesChart({ pointInfo }) {
+  const geometry = buildTimeseriesGeometry(pointInfo);
 
   if (!geometry) {
     return <p className="panel-note">Click the map to load the previous 90 days of daily values.</p>;
@@ -263,22 +273,10 @@ function TimeseriesChart({ pointInfo, selectedDate }) {
           y2={geometry.axisBottom}
           className="chart-axis"
         />
-        {geometry.areaPath ? <path d={geometry.areaPath} className="chart-band" /> : null}
+        {geometry.areaPaths.map((areaPath, idx) => (
+          <path key={`band-${idx}`} d={areaPath} className="chart-band" />
+        ))}
         <path d={geometry.linePath} className="chart-line" />
-        <line
-          x1={geometry.selectedX}
-          x2={geometry.selectedX}
-          y1={geometry.axisTop}
-          y2={geometry.axisBottom}
-          className="chart-marker"
-        />
-        <text
-          x={geometry.todayLabelX}
-          y={geometry.axisTop - 5}
-          className="chart-label chart-label-today"
-        >
-          Today
-        </text>
         {geometry.yTicks.map((tick) => (
           <g key={`y-${tick.label}`}>
             <line

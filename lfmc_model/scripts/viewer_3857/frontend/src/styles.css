@@ -390,12 +390,6 @@ body {
   stroke-linecap: round;
 }
 
-.chart-marker {
-  stroke: rgba(47, 38, 29, 0.55);
-  stroke-width: 1.5;
-  stroke-dasharray: 4 4;
-}
-
 .chart-axis,
 .chart-tick {
   stroke: rgba(77, 67, 55, 0.72);
@@ -418,12 +412,6 @@ body {
 .chart-label-axis {
   text-anchor: middle;
   letter-spacing: 0.08em;
-}
-
-.chart-label-today {
-  fill: #6f4930;
-  font-size: 0.74rem;
-  font-weight: 600;
 }
 
 .timeseries-legend {
