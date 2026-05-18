@@ -3598,9 +3598,9 @@ def build_figure_6(runtime: Dict[str, object]) -> str:
     return save_path
 
 
-def build_figure_7(runtime: Dict[str, object]) -> str:
+def build_figure_8(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
-    fig_cfg = cfg["figures"]["figure_7"]
+    fig_cfg = cfg["figures"]["figure_8"]
     site_min_obs = int(cfg["variability"]["site_min_obs"])
     monthly_min_obs = int(cfg["variability"]["monthly_min_obs"])
     monthly_min_years = int(cfg["variability"]["monthly_min_years"])
@@ -3688,21 +3688,27 @@ def build_figure_7(runtime: Dict[str, object]) -> str:
         y_tick_fontsize=fig_cfg.get("y_tick_fontsize"),
         category_label_fontsize=fig_cfg.get("category_label_fontsize"),
         y_label_fontsize=fig_cfg.get("y_label_fontsize"),
+        panel_title_fontsize=fig_cfg.get("panel_title_fontsize"),
+        panel_title_pad=float(fig_cfg.get("panel_title_pad", 4.0)),
         legend_fontsize=fig_cfg.get("legend_fontsize"),
         legend_bbox_y=float(fig_cfg.get("legend_bbox_y", 0.005)),
         legend_bottom=float(fig_cfg.get("legend_bottom", 0.27)),
         value_label_rotation=float(fig_cfg.get("value_label_rotation", 0.0)),
+        value_label_rotation_mode=str(fig_cfg.get("value_label_rotation_mode", "anchor")),
+        value_label_offset_scale=float(fig_cfg.get("value_label_offset_scale", 0.01)),
         count_label_rotation=float(fig_cfg.get("count_label_rotation", 0.0)),
+        x_tick_length=float(fig_cfg.get("x_tick_length", 5.0)),
+        wrap_category_labels=bool(fig_cfg.get("wrap_category_labels", False)),
     )
     return save_path
 
 
-def build_figure_8(runtime: Dict[str, object]) -> str:
+def build_supplementary_figure_2(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
-    fig_cfg = cfg["figures"]["figure_8"]
+    fig_cfg = cfg["figures"]["supplementary_figure_2"]
     summary_df, member_df = _build_training_sample_landcover_tables(runtime, fig_cfg)
     if len(summary_df) == 0:
-        raise ValueError("No training-sample landcover rows were available for Figure 8")
+        raise ValueError("No training-sample landcover rows were available for Supplementary Figure 2")
     summary_table_path = _table_output_path(runtime, "supplementary_figure_02_training_sample_landcover_counts")
     member_table_path = _table_output_path(runtime, "supplementary_figure_02_training_sample_landcover_member_counts")
     summary_df.to_csv(summary_table_path, index=False)
@@ -3760,6 +3766,7 @@ def build_figure_8(runtime: Dict[str, object]) -> str:
         value_label_fontsize=fig_cfg.get("value_label_fontsize"),
         count_label_fontsize=fig_cfg.get("count_label_fontsize"),
         value_label_rotation=float(fig_cfg.get("value_label_rotation", 0.0)),
+        value_label_rotation_mode=str(fig_cfg.get("value_label_rotation_mode", "anchor")),
         y_tick_fontsize=fig_cfg.get("y_tick_fontsize"),
         category_label_fontsize=fig_cfg.get("category_label_fontsize"),
         y_label_fontsize=fig_cfg.get("y_label_fontsize"),
@@ -3767,6 +3774,7 @@ def build_figure_8(runtime: Dict[str, object]) -> str:
         legend_bbox_y=float(fig_cfg.get("legend_bbox_y", 0.02)),
         legend_bottom=fig_cfg.get("legend_bottom"),
         x_tick_pad=fig_cfg.get("x_tick_pad"),
+        subplot_left=float(fig_cfg.get("subplot_left", 0.09)),
     )
     return save_path
 
@@ -3893,9 +3901,9 @@ def build_supplementary_figure_1(runtime: Dict[str, object]) -> str:
     return save_path
 
 
-def build_supplementary_figure_2(runtime: Dict[str, object]) -> str:
+def build_figure_7(runtime: Dict[str, object]) -> str:
     cfg = runtime["cfg"]
-    fig_cfg = cfg["figures"]["supplementary_figure_2"]
+    fig_cfg = cfg["figures"]["figure_7"]
     site_min_obs = int(fig_cfg.get("site_min_obs", cfg["variability"]["site_min_obs"]))
     site_r2_df = _build_site_r2_landcover_df(
         runtime=runtime,
@@ -3903,9 +3911,9 @@ def build_supplementary_figure_2(runtime: Dict[str, object]) -> str:
         min_obs=site_min_obs,
     )
     if len(site_r2_df) == 0:
-        raise ValueError("No site-level R2 rows were available for Supplementary Figure 2")
+        raise ValueError("No site-level R2 rows were available for Figure 7")
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
-    table_path = _table_output_path(runtime, "supplementary_figure_02_site_r2_by_landcover")
+    table_path = _table_output_path(runtime, "figure_07_site_r2_by_landcover")
     site_r2_df.to_csv(table_path, index=False)
     categories = [
         category for category in cfg["filters"]["landcover_order"]
@@ -3919,7 +3927,13 @@ def build_supplementary_figure_2(runtime: Dict[str, object]) -> str:
         figsize=fig_cfg["figsize"],
         dpi=int(cfg["plotting"].get("dpi", 350)),
         x_limits=fig_cfg.get("x_limits", [-1.0, 1.0]),
-        show_summary_text=False,
+        show_summary_text=bool(fig_cfg.get("show_summary_text", False)),
+        axis_label_fontsize=fig_cfg.get("axis_label_fontsize"),
+        tick_label_fontsize=fig_cfg.get("tick_label_fontsize"),
+        axis_label_pad=float(fig_cfg.get("axis_label_pad", 4.0)),
+        legend_fontsize=fig_cfg.get("legend_fontsize"),
+        legend_loc=str(fig_cfg.get("legend_loc", "best")),
+        line_width=float(fig_cfg.get("line_width", 2.2)),
     )
     return save_path
 
@@ -3935,22 +3949,6 @@ def build_supplementary_figure_3(runtime: Dict[str, object]) -> str:
         fontsize=int(cfg["plotting"].get("fontsize", 14)),
         figsize=fig_cfg["figsize"],
         dpi=int(cfg["plotting"].get("dpi", 350)),
-        group_gap_scale=float(fig_cfg.get("group_gap_scale", 1.0)),
-        count_label_y=float(fig_cfg.get("count_label_y", -0.06)),
-        count_values_only=bool(fig_cfg.get("count_values_only", False)),
-        n_label=str(fig_cfg["n_label"]) if fig_cfg.get("n_label") is not None else None,
-        x_tick_pad=float(fig_cfg.get("x_tick_pad", 28.0)),
-        value_label_fontsize=fig_cfg.get("value_label_fontsize"),
-        count_label_fontsize=fig_cfg.get("count_label_fontsize"),
-        n_label_fontsize=fig_cfg.get("n_label_fontsize"),
-        y_tick_fontsize=fig_cfg.get("y_tick_fontsize"),
-        category_label_fontsize=fig_cfg.get("category_label_fontsize"),
-        y_label_fontsize=fig_cfg.get("y_label_fontsize"),
-        legend_fontsize=fig_cfg.get("legend_fontsize"),
-        legend_bbox_y=float(fig_cfg.get("legend_bbox_y", 0.005)),
-        legend_bottom=float(fig_cfg.get("legend_bottom", 0.27)),
-        value_label_rotation=float(fig_cfg.get("value_label_rotation", 0.0)),
-        count_label_rotation=float(fig_cfg.get("count_label_rotation", 0.0)),
     )
     return save_path
 
@@ -4100,6 +4098,28 @@ def build_supplementary_figure_4(runtime: Dict[str, object]) -> str:
         fontsize=int(cfg["plotting"].get("fontsize", 14)),
         figsize=fig_cfg["figsize"],
         dpi=int(cfg["plotting"].get("dpi", 350)),
+        group_gap_scale=float(fig_cfg.get("group_gap_scale", 1.0)),
+        count_label_y=float(fig_cfg.get("count_label_y", -0.06)),
+        count_values_only=bool(fig_cfg.get("count_values_only", False)),
+        n_label=str(fig_cfg["n_label"]) if fig_cfg.get("n_label") is not None else None,
+        x_tick_pad=float(fig_cfg.get("x_tick_pad", 28.0)),
+        value_label_fontsize=fig_cfg.get("value_label_fontsize"),
+        count_label_fontsize=fig_cfg.get("count_label_fontsize"),
+        n_label_fontsize=fig_cfg.get("n_label_fontsize"),
+        y_tick_fontsize=fig_cfg.get("y_tick_fontsize"),
+        category_label_fontsize=fig_cfg.get("category_label_fontsize"),
+        y_label_fontsize=fig_cfg.get("y_label_fontsize"),
+        panel_title_fontsize=fig_cfg.get("panel_title_fontsize"),
+        panel_title_pad=float(fig_cfg.get("panel_title_pad", 4.0)),
+        legend_fontsize=fig_cfg.get("legend_fontsize"),
+        legend_bbox_y=float(fig_cfg.get("legend_bbox_y", 0.005)),
+        legend_bottom=float(fig_cfg.get("legend_bottom", 0.27)),
+        value_label_rotation=float(fig_cfg.get("value_label_rotation", 0.0)),
+        value_label_rotation_mode=str(fig_cfg.get("value_label_rotation_mode", "anchor")),
+        value_label_offset_scale=float(fig_cfg.get("value_label_offset_scale", 0.01)),
+        count_label_rotation=float(fig_cfg.get("count_label_rotation", 0.0)),
+        x_tick_length=float(fig_cfg.get("x_tick_length", 5.0)),
+        wrap_category_labels=bool(fig_cfg.get("wrap_category_labels", False)),
     )
     return save_path
 

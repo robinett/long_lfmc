@@ -335,6 +335,8 @@ def _annotate_metric_bars(
     value_fontsize: Optional[float] = None,
     count_fontsize: Optional[float] = None,
     value_rotation: float = 0.0,
+    value_rotation_mode: str = "anchor",
+    value_offset_scale: float = 0.01,
     value_ha: str = "center",
     value_va: str = "bottom",
     count_y: Optional[float] = None,
@@ -356,7 +358,7 @@ def _annotate_metric_bars(
         top = bar.get_height()
         if top_values is not None and idx < len(top_values) and np.isfinite(top_values[idx]):
             top = float(top_values[idx])
-        offset = 0.01 * max(abs(top), abs(bar.get_height()), 1.0)
+        offset = float(value_offset_scale) * max(abs(top), abs(bar.get_height()), 1.0)
         x_loc = bar.get_x() + (bar.get_width() / 2.0)
         value_y = top + offset
         resolved_value_va = value_va
@@ -371,7 +373,7 @@ def _annotate_metric_bars(
             va=resolved_value_va,
             fontsize=resolved_value_fontsize,
             rotation=value_rotation,
-            rotation_mode="anchor",
+            rotation_mode=value_rotation_mode,
             clip_on=False,
         )
         if idx < len(count_arr) and np.isfinite(count_arr[idx]) and count_y is not None:
@@ -1261,6 +1263,12 @@ def plot_site_r2_landcover_distribution(
     dpi: int,
     x_limits: Sequence[float],
     show_summary_text: bool = True,
+    axis_label_fontsize: Optional[float] = None,
+    tick_label_fontsize: Optional[float] = None,
+    axis_label_pad: float = 4.0,
+    legend_fontsize: Optional[float] = None,
+    legend_loc: str = "best",
+    line_width: float = 2.2,
 ) -> None:
     if len(site_r2_df) == 0:
         raise ValueError("No site-level R2 rows provided for landcover distribution plot")
@@ -1291,7 +1299,7 @@ def plot_site_r2_landcover_distribution(
                     data=class_df,
                     x="site_r2_clipped",
                     ax=ax,
-                    linewidth=2.2,
+                    linewidth=float(line_width),
                     label=label,
                     color=color,
                     fill=False,
@@ -1305,7 +1313,7 @@ def plot_site_r2_landcover_distribution(
                 ax.axvline(
                     float(class_df["site_r2_clipped"].iloc[0]),
                     color=color,
-                    linewidth=2.2,
+                    linewidth=float(line_width),
                     label=label,
                 )
         handles, labels = ax.get_legend_handles_labels()
@@ -1314,13 +1322,24 @@ def plot_site_r2_landcover_distribution(
                 handles,
                 labels,
                 frameon=False,
-                fontsize=max(fontsize - 2, 8),
+                fontsize=max(fontsize - 2, 8) if legend_fontsize is None else float(legend_fontsize),
+                loc=str(legend_loc),
                 title=None,
             )
         ax.set_xlim(x_min, x_max)
-        ax.set_xlabel("Site-level LFMC R²", fontsize=fontsize)
-        ax.set_ylabel("Density", fontsize=fontsize)
-        ax.tick_params(axis="both", labelsize=max(fontsize - 2, 8))
+        resolved_axis_label_fontsize = fontsize if axis_label_fontsize is None else float(axis_label_fontsize)
+        resolved_tick_label_fontsize = max(fontsize - 2, 8) if tick_label_fontsize is None else float(tick_label_fontsize)
+        ax.set_xlabel(
+            "Site-level LFMC R²",
+            fontsize=resolved_axis_label_fontsize,
+            labelpad=float(axis_label_pad),
+        )
+        ax.set_ylabel(
+            "Density",
+            fontsize=resolved_axis_label_fontsize,
+            labelpad=float(axis_label_pad),
+        )
+        ax.tick_params(axis="both", labelsize=resolved_tick_label_fontsize)
         if show_summary_text:
             ax.text(
                 0.98,
@@ -1365,6 +1384,7 @@ def plot_training_sample_landcover_comparison(
     value_label_fontsize: Optional[float] = None,
     count_label_fontsize: Optional[float] = None,
     value_label_rotation: float = 0.0,
+    value_label_rotation_mode: str = "anchor",
     y_tick_fontsize: Optional[float] = None,
     category_label_fontsize: Optional[float] = None,
     y_label_fontsize: Optional[float] = None,
@@ -1372,6 +1392,7 @@ def plot_training_sample_landcover_comparison(
     legend_bbox_y: float = 0.02,
     legend_bottom: Optional[float] = None,
     x_tick_pad: Optional[float] = None,
+    subplot_left: float = 0.09,
 ) -> None:
     if len(categories) == 0:
         raise ValueError("No landcover categories provided for training-sample comparison plot")
@@ -1452,6 +1473,7 @@ def plot_training_sample_landcover_comparison(
                         value_fontsize=resolved_value_label_fontsize,
                         count_fontsize=resolved_count_label_fontsize,
                         value_rotation=float(value_label_rotation),
+                        value_rotation_mode=str(value_label_rotation_mode),
                         value_ha="center",
                         tops=top_positions,
                         count_y=float(count_label_y),
@@ -1530,7 +1552,7 @@ def plot_training_sample_landcover_comparison(
                 float(legend_bottom)
                 if legend_bottom is not None else (0.22 if counts_below_axis else 0.16)
             )
-            fig.subplots_adjust(left=0.09, right=0.985, bottom=bottom, top=0.95)
+            fig.subplots_adjust(left=float(subplot_left), right=0.985, bottom=bottom, top=0.95)
         else:
             fig.tight_layout()
         _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
@@ -2030,11 +2052,17 @@ def plot_landcover_comparison_panels(
     y_tick_fontsize: Optional[float] = None,
     category_label_fontsize: Optional[float] = None,
     y_label_fontsize: Optional[float] = None,
+    panel_title_fontsize: Optional[float] = None,
+    panel_title_pad: float = 4.0,
     legend_fontsize: Optional[float] = None,
     legend_bbox_y: float = 0.005,
     legend_bottom: float = 0.27,
     value_label_rotation: float = 0.0,
+    value_label_rotation_mode: str = "anchor",
+    value_label_offset_scale: float = 0.01,
     count_label_rotation: float = 0.0,
+    x_tick_length: float = 5.0,
+    wrap_category_labels: bool = False,
 ) -> None:
     if len(panels) == 0:
         raise ValueError("Landcover comparison plot expects at least 1 panel")
@@ -2067,6 +2095,9 @@ def plot_landcover_comparison_panels(
             max(fontsize - 1, 8) if category_label_fontsize is None else float(category_label_fontsize)
         )
         resolved_y_label_fontsize = fontsize + 10 if y_label_fontsize is None else float(y_label_fontsize)
+        resolved_panel_title_fontsize = (
+            fontsize if panel_title_fontsize is None else float(panel_title_fontsize)
+        )
         resolved_legend_fontsize = fontsize if legend_fontsize is None else float(legend_fontsize)
         for ax, panel in zip(axes, panels):
             values = np.asarray(panel["values"], dtype=float)
@@ -2111,6 +2142,8 @@ def plot_landcover_comparison_panels(
                     value_fontsize=resolved_value_label_fontsize,
                     count_fontsize=resolved_count_label_fontsize,
                     value_rotation=float(value_label_rotation),
+                    value_rotation_mode=str(value_label_rotation_mode),
+                    value_offset_scale=float(value_label_offset_scale),
                     value_ha="center",
                     tops=top_positions,
                     count_y=count_label_y,
@@ -2119,6 +2152,7 @@ def plot_landcover_comparison_panels(
                     count_rotation=float(count_label_rotation),
                     count_ha="center",
                     count_va="top",
+                    value_y_min=0.01,
                 )
             finite_vals = values[np.isfinite(values)]
             if finite_vals.size > 0:
@@ -2138,11 +2172,22 @@ def plot_landcover_comparison_panels(
                 labelleft=True,
                 labelsize=resolved_y_tick_fontsize,
             )
-            ax.tick_params(axis="x", which="major", length=5, width=1.0, pad=float(x_tick_pad))
+            ax.tick_params(
+                axis="x",
+                which="major",
+                length=float(x_tick_length),
+                width=1.0,
+                pad=float(x_tick_pad),
+            )
             ax.set_ylabel(panel["ylabel"], fontsize=resolved_y_label_fontsize, labelpad=12)
             title = str(panel.get("title", ""))
             if title != "":
-                ax.set_title(title, loc="left", pad=4)
+                ax.set_title(
+                    title,
+                    loc="left",
+                    pad=float(panel_title_pad),
+                    fontsize=resolved_panel_title_fontsize,
+                )
         if n_label is not None:
             left_bar_edge = x[0] - (total_bar_width / 2.0)
             axes[-1].text(
@@ -2169,7 +2214,12 @@ def plot_landcover_comparison_panels(
             bbox_to_anchor=(0.5, float(legend_bbox_y)),
             fontsize=resolved_legend_fontsize,
         )
-        axes[-1].set_xticks(x, _format_landcover_labels(categories))
+        category_labels = (
+            _format_landcover_labels_wrapped(categories)
+            if wrap_category_labels
+            else _format_landcover_labels(categories)
+        )
+        axes[-1].set_xticks(x, category_labels)
         axes[-1].tick_params(axis="x", labelsize=resolved_category_label_fontsize)
         fig.subplots_adjust(left=0.08, right=0.985, bottom=float(legend_bottom), top=0.94, hspace=0.34)
         _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
