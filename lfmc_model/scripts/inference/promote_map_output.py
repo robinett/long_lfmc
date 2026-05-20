@@ -21,6 +21,26 @@ from map_runtime_utils import (
 
 
 TIME_VARS = [OUTPUT_MEAN_NAME, OUTPUT_STD_NAME, OUTPUT_QUALITY_FLAG_NAME]
+TIME_UNIT_ALIASES = {
+    'nanosecond': 'ns',
+    'nanoseconds': 'ns',
+    'ns': 'ns',
+    'microsecond': 'us',
+    'microseconds': 'us',
+    'us': 'us',
+    'millisecond': 'ms',
+    'milliseconds': 'ms',
+    'ms': 'ms',
+    'second': 's',
+    'seconds': 's',
+    's': 's',
+    'minute': 'm',
+    'minutes': 'm',
+    'hour': 'h',
+    'hours': 'h',
+    'day': 'D',
+    'days': 'D',
+}
 
 
 def timestamped_message(message: str) -> str:
@@ -44,8 +64,67 @@ def get_args():
     return parser.parse_args()
 
 
+def _parse_time_units(units: str) -> tuple[str, pd.Timestamp]:
+    parts = str(units).strip().split(' since ', 1)
+    if len(parts) != 2:
+        raise ValueError(f'Unsupported time units: {units}')
+    unit = TIME_UNIT_ALIASES.get(parts[0].strip().lower())
+    if unit is None:
+        raise ValueError(f'Unsupported time unit in units: {units}')
+    origin = pd.Timestamp(parts[1].strip()).tz_localize(None)
+    return unit, origin
+
+
+def _decode_time_array(time_arr) -> pd.DatetimeIndex:
+    raw = np.asarray(time_arr[:])
+    if np.issubdtype(raw.dtype, np.datetime64):
+        return pd.DatetimeIndex(pd.to_datetime(raw)).normalize()
+
+    units = str(time_arr.attrs.get('units', '')).strip()
+    if not units:
+        return pd.DatetimeIndex(pd.to_datetime(np.asarray(raw, dtype=np.int64))).normalize()
+
+    unit, origin = _parse_time_units(units)
+    times = origin + pd.to_timedelta(np.asarray(raw, dtype=np.int64), unit=unit)
+    return pd.DatetimeIndex(times).normalize()
+
+
+def _encode_time_array(time_index: pd.DatetimeIndex, time_arr) -> np.ndarray:
+    times = pd.DatetimeIndex(pd.to_datetime(time_index)).normalize()
+    if np.issubdtype(time_arr.dtype, np.datetime64):
+        return np.asarray(times.values, dtype=time_arr.dtype)
+
+    units = str(time_arr.attrs.get('units', '')).strip()
+    if not units:
+        return np.asarray(times.values, dtype='datetime64[ns]').astype(np.int64).astype(time_arr.dtype)
+
+    unit, origin = _parse_time_units(units)
+    unit_ns = pd.Timedelta(1, unit=unit).value
+    deltas = (
+        np.asarray(times.values, dtype='datetime64[ns]') - np.datetime64(origin.to_datetime64(), 'ns')
+    ).astype('timedelta64[ns]').astype(np.int64)
+    if np.any(deltas % unit_ns != 0):
+        raise ValueError(f'Time values are not exactly representable in production units: {units}')
+    return (deltas // unit_ns).astype(time_arr.dtype)
+
+
+def _write_time_values(time_arr, write_slice: slice, time_index: pd.DatetimeIndex):
+    encoded = _encode_time_array(time_index, time_arr)
+    time_arr[write_slice] = encoded
+    observed = np.asarray(time_arr[write_slice])
+    if not np.array_equal(observed, encoded):
+        for offset, value in enumerate(encoded.tolist()):
+            time_arr[int(write_slice.start) + offset] = value
+        observed = np.asarray(time_arr[write_slice])
+    if not np.array_equal(observed, encoded):
+        raise RuntimeError(
+            "Failed to persist production time coordinate values "
+            f"for slice {write_slice}: expected={encoded.tolist()} observed={observed.tolist()}"
+        )
+
+
 def _load_time_index(root) -> pd.DatetimeIndex:
-    return pd.to_datetime(np.asarray(root['time'][:], dtype=np.int64))
+    return _decode_time_array(root['time'])
 
 
 def _load_landcover_years(root) -> np.ndarray:
@@ -94,8 +173,8 @@ def _copy_landcover_years(staging_root, production_root):
             continue
         old_n = int(year_arr.shape[0])
         new_n = old_n + 1
-        year_arr.resize(new_n)
-        landcover_arr.resize(new_n, landcover_arr.shape[1], landcover_arr.shape[2])
+        year_arr.resize((new_n,))
+        landcover_arr.resize((new_n, landcover_arr.shape[1], landcover_arr.shape[2]))
         year_arr[old_n:new_n] = np.asarray([year], dtype=np.int32)
         landcover_arr[old_n:new_n, :, :] = staging_root[OUTPUT_DOMINANT_LANDCOVER_NAME][stage_idx:stage_idx + 1, :, :]
         year_to_prod_idx[year] = old_n
@@ -107,9 +186,9 @@ def _range_starts(start: int, stop: int, step: int):
 
 def _resize_time_var(arr, new_n: int):
     if len(arr.shape) == 1:
-        arr.resize(new_n)
+        arr.resize((new_n,))
         return
-    arr.resize(new_n, *arr.shape[1:])
+    arr.resize((new_n, *arr.shape[1:]))
 
 
 def _copy_time_var_chunkwise(
@@ -162,8 +241,8 @@ def _append_time_range(staging_root, production_root, staging_slice: slice, prod
         raise ValueError('append_time_range requires staged dates to be strictly newer than production time coverage')
     old_n = int(len(production_time))
     new_n = old_n + int(len(staging_time))
-    production_root['time'].resize(new_n)
-    production_root['time'][old_n:new_n] = np.asarray(staging_root['time'][staging_slice], dtype=np.int64)
+    production_root['time'].resize((new_n,))
+    _write_time_values(production_root['time'], slice(old_n, new_n), staging_time)
     production_slice = slice(old_n, new_n)
     for var_name in TIME_VARS:
         arr = production_root[var_name]
@@ -196,14 +275,11 @@ def _replace_tail_range(
         prefix_count = 0
     for var_name in TIME_VARS:
         _resize_time_var(production_root[var_name], prefix_count)
-    production_root['time'].resize(prefix_count)
+    production_root['time'].resize((prefix_count,))
 
     new_n = prefix_count + int(len(staging_time))
-    production_root['time'].resize(new_n)
-    production_root['time'][prefix_count:new_n] = np.asarray(
-        staging_root['time'][staging_slice],
-        dtype=np.int64,
-    )
+    production_root['time'].resize((new_n,))
+    _write_time_values(production_root['time'], slice(prefix_count, new_n), staging_time)
     production_slice = slice(prefix_count, new_n)
     for var_name in TIME_VARS:
         arr = production_root[var_name]
@@ -241,6 +317,11 @@ def _write_metadata_record(metadata_dir: str, record: dict):
     print(timestamped_message(f'Wrote promotion metadata to {path}'))
 
 
+def _consolidate_store_metadata(zarr_path: Path):
+    zarr.consolidate_metadata(str(zarr_path))
+    print(timestamped_message(f'Consolidated metadata for {zarr_path}'))
+
+
 def main():
     args = get_args()
     start_date = pd.Timestamp(args.start_date).normalize()
@@ -271,6 +352,7 @@ def main():
             'status': 'completed_initialized_from_staging',
         }
         _write_metadata_record(metadata_dir, record)
+        _consolidate_store_metadata(production_zarr)
         return
 
     staging_root = zarr.open_group(str(staging_zarr), mode='r')
@@ -300,6 +382,7 @@ def main():
     production_root.attrs['last_promotion_mode'] = args.mode
     production_root.attrs['last_promotion_tier'] = args.tier
     production_root.attrs['last_promotion_at'] = dt.datetime.now().isoformat()
+    _consolidate_store_metadata(production_zarr)
 
     record = {
         'mode': args.mode,

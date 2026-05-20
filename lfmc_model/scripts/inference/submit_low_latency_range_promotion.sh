@@ -82,11 +82,16 @@ metadata_dir="${promotion_values[2]}"
 promotion_mode="$(
     PRODUCTION_ZARR="${production_zarr}" START_DATE="${requested_start_date}" END_DATE="${requested_end_date}" python3 - <<'PY3'
 import os
+import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import zarr
+
+script_dir = Path("/home/users/trobinet/long_lfmc/lfmc_model/scripts/inference")
+sys.path.insert(0, str(script_dir))
+
+from promote_map_output import _load_time_index
 
 production_zarr = Path(os.environ["PRODUCTION_ZARR"])
 start_date = pd.Timestamp(os.environ["START_DATE"]).normalize()
@@ -103,7 +108,7 @@ time_size = int(time_array.shape[0]) if len(time_array.shape) > 0 else 0
 if time_size == 0:
     print("append_time_range")
     raise SystemExit(0)
-times = pd.to_datetime(np.asarray(time_array[:], dtype=np.int64)).normalize()
+times = _load_time_index(root).normalize()
 max_time = pd.Timestamp(times.max()).normalize()
 if start_date > max_time:
     print("append_time_range")
