@@ -384,6 +384,7 @@ def main() -> None:
             "low_latency_standard_zarr": str(SCRATCH_LL_STANDARD_ZARR),
             "low_latency_regrid_root": str(SCRATCH_LL_REGRID_ROOT),
             "append_coord_dir": str(SCRATCH_LL_APPEND_COORD_DIR),
+            "map_run_root": str(SCRATCH_MAP_RUN_ROOT),
             "source_registry_test": str(TEST_SOURCE_REGISTRY),
             "map_config_test": str(TEST_MAP_CONFIG),
         },

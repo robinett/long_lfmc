@@ -19,6 +19,7 @@ promotion_script="${script_dir}/submit_low_latency_range_promotion.sh"
 skip_oak_sync="${SKIP_OAK_SYNC:-0}"
 today_override="${TODAY_OVERRIDE:-}"
 safe_end_date_override="${SAFE_END_DATE_OVERRIDE:-}"
+enable_rollback="${ENABLE_LOW_LATENCY_ROLLBACK:-0}"
 
 source "${process_env}"
 
@@ -84,6 +85,15 @@ status_dir="${metadata_dir}/status_reports"
 lock_dir="${metadata_dir}/locks/low_latency_daily.lock"
 mkdir -p "${status_dir}" "${metadata_dir}/locks"
 status_path="${status_dir}/low_latency_daily_update_${batch_stamp}.json"
+rollback_dir="${LOW_LATENCY_ROLLBACK_DIR:-}"
+if [[ "${enable_rollback}" == "1" && -z "${rollback_dir}" ]]; then
+    rollback_dir="${metadata_dir}/rollback/low_latency_daily_${batch_stamp}"
+fi
+if [[ -n "${rollback_dir}" ]]; then
+    mkdir -p "${rollback_dir}"
+    export LOW_LATENCY_ROLLBACK_DIR="${rollback_dir}"
+    echo "Low-latency rollback capture enabled: ${rollback_dir}"
+fi
 
 bootstrap_modis="not_started"
 bootstrap_modis_regrid="not_started"
@@ -286,6 +296,7 @@ record = {
     },
     'inference_status': os.environ['INFERENCE_STATUS'],
     'sync_back_status': os.environ['SYNC_BACK_STATUS'],
+    'rollback_dir': os.environ.get('LOW_LATENCY_ROLLBACK_DIR', ''),
 }
 path = Path(os.environ['STATUS_PATH'])
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -450,13 +461,15 @@ modis_job_id="$(submit_sbatch_job \
     "START_DATE=${requested_start_date}" \
     "END_DATE=${requested_end_date}" \
     "TAIL_CONTEXT_DAYS=${modis_tail_context_days}" \
-    "REGISTRY_PATH=${registry_path}")"
+    "REGISTRY_PATH=${registry_path}" \
+    "LOW_LATENCY_ROLLBACK_DIR=${LOW_LATENCY_ROLLBACK_DIR:-}")"
 climate_job_id="$(submit_sbatch_job \
     "${climate_worker_script}" \
     "low_latency_climate" \
     "START_DATE=${requested_start_date}" \
     "END_DATE=${requested_end_date}" \
-    "REGISTRY_PATH=${registry_path}")"
+    "REGISTRY_PATH=${registry_path}" \
+    "LOW_LATENCY_ROLLBACK_DIR=${LOW_LATENCY_ROLLBACK_DIR:-}")"
 
 modis_wait_failed=0
 climate_wait_failed=0

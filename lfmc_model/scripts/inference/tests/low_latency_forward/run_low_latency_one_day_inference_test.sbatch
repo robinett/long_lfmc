@@ -41,4 +41,5 @@ AUTO_RESUME_COMPLETE_RUN=true \
 CONFIG_PATH="${map_config}" \
 REGISTRY_PATH="${source_registry}" \
 SKIP_OAK_SYNC=1 \
+ENABLE_LOW_LATENCY_ROLLBACK=1 \
 bash "${repo_root}/lfmc_model/scripts/inference/orchestrate_low_latency_daily_update.sh"

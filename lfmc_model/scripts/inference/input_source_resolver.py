@@ -236,11 +236,11 @@ def open_inference_datasets_from_resolution(source_resolution: Dict[str, object]
     daymet_ds = _merge_daymet_datasets(daymet_ds, anomaly_daymet_ds)
     return {
         'daymet': daymet_ds,
-        'modis': xr.open_zarr(str(source_resolution['modis_path'])),
+        'modis': xr.open_zarr(str(source_resolution['modis_path']), consolidated=False),
         'static': xr.open_dataset(str(source_resolution['static_path'])),
         'soils': xr.open_dataset(str(source_resolution['soils_path'])),
         'canopy_height': xr.open_dataset(str(source_resolution['canopy_height_path'])),
-        'landcover_frac': xr.open_zarr(str(source_resolution['landcover_path'])),
+        'landcover_frac': xr.open_zarr(str(source_resolution['landcover_path']), consolidated=False),
     }
 
 

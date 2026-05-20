@@ -18,6 +18,7 @@ from map_runtime_utils import (
     OUTPUT_QUALITY_FLAG_NAME,
     OUTPUT_STD_NAME,
 )
+from low_latency_rollback import capture_zarr_rollback_from_env
 
 
 TIME_VARS = [OUTPUT_MEAN_NAME, OUTPUT_STD_NAME, OUTPUT_QUALITY_FLAG_NAME]
@@ -362,6 +363,24 @@ def main():
     staging_time = _load_time_index(staging_root)
     production_time = _load_time_index(production_root)
     staging_slice = _get_time_slice(staging_time, start_date, end_date)
+    capture_zarr_rollback_from_env(
+        target_zarr=production_zarr,
+        label='production_lfmc',
+        dim_name='time',
+        window_start=start_date,
+        window_end=end_date,
+        reason=f'before_{args.tier}_promotion_{args.mode}',
+    )
+    staging_years = _load_landcover_years(staging_root)
+    if len(staging_years) > 0:
+        capture_zarr_rollback_from_env(
+            target_zarr=production_zarr,
+            label='production_lfmc_landcover',
+            dim_name=OUTPUT_LANDCOVER_YEAR_NAME,
+            window_start=int(np.min(staging_years)),
+            window_end=int(np.max(staging_years)),
+            reason=f'before_{args.tier}_landcover_promotion',
+        )
 
     if args.mode == 'append_time_range':
         _append_time_range(staging_root, production_root, staging_slice, production_time)

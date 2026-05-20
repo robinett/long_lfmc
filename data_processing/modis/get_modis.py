@@ -184,7 +184,7 @@ def filter_missing_links(out_dir: Path, links, short_name: str, month_days, skip
             for short, date, tile, version in sorted(missing_expected)[:5]
         ]
         sample_link_keys = [link_keys[url] for url in list(link_keys)[:5]]
-        raise RuntimeError(
+        print(
             f'Found {len(links)} {short_name} links but none matched the missing expected filenames. '
             f'sample_link_names={sample_names} sample_link_keys={sample_link_keys} '
             f'sample_missing_expected={sample_missing}'
@@ -192,24 +192,57 @@ def filter_missing_links(out_dir: Path, links, short_name: str, month_days, skip
     return filtered, existing, missing_expected
 
 
-def collect_links(results, month_days, short_name: str):
-    links = []
-    desired = len(month_days) * len(TILES_V)
+def _expected_date_tile_pairs(month_days):
     for date in month_days:
         date_tag = f"A{date.strftime('%Y%j')}"
         for v, h in zip(TILES_V, TILES_H):
-            found = False
             tile_tag = f'h{h:02d}v{v:02d}'
-            for res in results:
-                for url in res.data_links():
-                    if date_tag in url and tile_tag in url and url.endswith('.hdf'):
-                        links.append(url)
-                        found = True
-                        break
-                if found:
-                    break
-            if not found:
-                print(f'Warning: No {short_name} link found for {date_tag} {tile_tag}')
+            yield date_tag, tile_tag
+
+
+def _result_links_by_key(results, short_name: str):
+    links_by_key = {}
+    for res in results:
+        for url in res.data_links():
+            key = modis_file_key(link_filename(url))
+            if key is None or key[0] != short_name:
+                continue
+            links_by_key.setdefault((key[1], key[2]), url)
+    return links_by_key
+
+
+def _search_exact_granule_link(short_name: str, date_tag: str, tile_tag: str):
+    results = earthaccess.search_data(
+        short_name=short_name,
+        version='061',
+        granule_name=f'{short_name}.{date_tag}.{tile_tag}.061.*',
+        downloadable=True,
+    )
+    links_by_key = _result_links_by_key(results, short_name)
+    return links_by_key.get((date_tag, tile_tag))
+
+
+def collect_links(results, month_days, short_name: str, retry_missing_exact: bool = True):
+    links = []
+    exact_recovered = 0
+    links_by_key = _result_links_by_key(results, short_name)
+    expected_pairs = list(_expected_date_tile_pairs(month_days))
+    desired = len(expected_pairs)
+    for date_tag, tile_tag in expected_pairs:
+        url = links_by_key.get((date_tag, tile_tag))
+        if url is None and retry_missing_exact:
+            url = _search_exact_granule_link(short_name, date_tag, tile_tag)
+            if url is not None:
+                exact_recovered += 1
+        if url is not None:
+            links.append(url)
+        else:
+            print(f'Warning: No {short_name} link found for {date_tag} {tile_tag}')
+    if exact_recovered:
+        print(
+            f'Recovered {exact_recovered} {short_name} links with exact granule-name searches '
+            f'after broad CMR search misses.'
+        )
     print(f'Found {len(links)} {short_name} links, out of {desired} desired.')
     return links
 
@@ -256,10 +289,16 @@ def download_links_with_retries(
             if not missing_after:
                 print(f'{short_name}: month={this_start:%Y-%m} already complete')
                 return []
-            raise FileNotFoundError(
+            reason = str(last_error) if last_error is not None else 'download_candidates_exhausted'
+            print(
                 f'{short_name}: month={this_start:%Y-%m} still missing {len(missing_after)} logical granules '
-                f'but has no download candidates; sample_missing={sorted(missing_after)[:10]}'
+                f'but has no download candidates; carrying forward as NaN fallbacks; '
+                f'sample_missing={sorted(missing_after)[:10]}'
             )
+            return [
+                key_to_dict(key, reason=reason)
+                for key in sorted(missing_after)
+            ]
         try:
             earthaccess.download(filtered, str(out_dir), threads=download_threads, show_progress=True)
             last_error = None

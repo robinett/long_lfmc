@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import xarray as xr
 import zarr
+
+REPO_ROOT = Path("/home/users/trobinet/long_lfmc")
+INFERENCE_SCRIPT_DIR = REPO_ROOT / "lfmc_model/scripts/inference"
+if str(INFERENCE_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(INFERENCE_SCRIPT_DIR))
+
+from low_latency_rollback import capture_zarr_rollback_from_env
 
 
 def saturation_vapor_pressure_pa(temp_c: xr.DataArray) -> xr.DataArray:
@@ -103,6 +111,14 @@ def main() -> None:
     clim_ds = xr.open_zarr(args.climatology_zarr, consolidated=False)
 
     try:
+        capture_zarr_rollback_from_env(
+            target_zarr=args.combined_zarr,
+            label="daymet_combined",
+            dim_name="time",
+            window_start=start_date,
+            window_end=end_date,
+            reason="before_combined_weather_append",
+        )
         standard_range = standard_ds.sel(time=slice(str(start_date.date()), str(end_date.date())))
         if int(standard_range.sizes.get("time", 0)) == 0:
             raise ValueError(

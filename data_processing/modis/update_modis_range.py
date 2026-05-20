@@ -11,6 +11,9 @@ import yaml
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
+INFERENCE_SCRIPT_DIR = SCRIPT_DIR.parents[1] / "lfmc_model/scripts/inference"
+if str(INFERENCE_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(INFERENCE_SCRIPT_DIR))
 
 from get_modis import (
     DEFAULT_GRID_PATH,
@@ -35,6 +38,7 @@ from update_modis_month import (
     run_cmd,
     validate_regridded_grid,
 )
+from low_latency_rollback import capture_zarr_rollback_from_env
 
 
 def parse_args():
@@ -183,8 +187,20 @@ def remote_range_available(start_date: pd.Timestamp, end_date: pd.Timestamp, gri
         downloadable=True,
     )
     quality_links = collect_links(results_quality, dates, "MCD43A2")
-    available = len(data_links) >= desired and len(quality_links) >= desired
+    available = True
+    data_missing = max(desired - len(data_links), 0)
+    quality_missing = max(desired - len(quality_links), 0)
     reason = f"data_links={len(data_links)}/{desired};quality_links={len(quality_links)}/{desired}"
+    if data_missing:
+        reason = (
+            f"{reason};data_missing={data_missing};"
+            "data_partial_allowed=nan_fallback"
+        )
+    if quality_missing:
+        reason = (
+            f"{reason};quality_missing={quality_missing};"
+            "quality_partial_allowed=nan_fallback"
+        )
     return available, reason
 
 
@@ -264,6 +280,14 @@ def main():
     validate_regridded_grid(args.regrid_root, args.canonical_zarr, source_context_start, source_context_end)
 
     staging_zarr = build_staging_zarr(args, refresh_start, source_end)
+    capture_zarr_rollback_from_env(
+        target_zarr=args.canonical_zarr,
+        label="modis_canonical",
+        dim_name="time",
+        window_start=refresh_start,
+        window_end=source_end,
+        reason="before_modis_range_promotion",
+    )
     result = promote_staging_window(staging_zarr, args.canonical_zarr, refresh_start, source_end)
     print(f"MODIS range update complete: {result}")
     print(f"  staging_zarr={staging_zarr}")

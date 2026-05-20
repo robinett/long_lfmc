@@ -19,8 +19,14 @@ import zarr
 
 from get_modis import DEFAULT_GRID_PATH, TILES_V, collect_links
 
-
 REPO_ROOT = Path('/home/users/trobinet/long_lfmc')
+INFERENCE_SCRIPT_DIR = REPO_ROOT / 'lfmc_model/scripts/inference'
+if str(INFERENCE_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(INFERENCE_SCRIPT_DIR))
+
+from low_latency_rollback import capture_zarr_rollback_from_env
+
+
 DEFAULT_REGISTRY_PATH = REPO_ROOT / 'lfmc_model/scripts/inference/source_registry.yaml'
 INTERPOLATION_WORKER_SCRIPT = REPO_ROOT / 'data_processing/interpolate/run_interpolation_worker.sbatch'
 MODIS_SINUSOIDAL_CRS = '+proj=sinu +R=6371007.181 +lon_0=0 +x_0=0 +y_0=0 +units=m +no_defs'
@@ -167,10 +173,22 @@ def remote_month_available(month_start: pd.Timestamp, month_end: pd.Timestamp, g
         downloadable=True,
     )
     quality_links = collect_links(results_quality, dates, 'MCD43A2')
-    available = len(data_links) >= desired and len(quality_links) >= desired
+    available = True
+    data_missing = max(desired - len(data_links), 0)
+    quality_missing = max(desired - len(quality_links), 0)
     reason = (
         f'data_links={len(data_links)}/{desired};quality_links={len(quality_links)}/{desired}'
     )
+    if data_missing:
+        reason = (
+            f'{reason};data_missing={data_missing};'
+            'data_partial_allowed=nan_fallback'
+        )
+    if quality_missing:
+        reason = (
+            f'{reason};quality_missing={quality_missing};'
+            'quality_partial_allowed=nan_fallback'
+        )
     return available, reason
 
 
@@ -191,6 +209,7 @@ def _run_capture(cmd):
 
 
 def _wait_for_slurm_job(job_id: str, label: str) -> bool:
+    inactive_nonterminal_polls = 0
     while True:
         states = subprocess.run(
             ['sacct', '-j', str(job_id), '--format=State', '-n'],
@@ -212,9 +231,6 @@ def _wait_for_slurm_job(job_id: str, label: str) -> bool:
         if any(state in bad_states for state in clean_states):
             print(f'  {label} job={job_id} failed with states={clean_states}')
             return False
-        if any(state == 'COMPLETED' for state in clean_states):
-            print(f'  {label} job={job_id} completed with states={clean_states}')
-            return True
         active = subprocess.run(
             ['squeue', '-h', '-j', str(job_id)],
             text=True,
@@ -222,9 +238,40 @@ def _wait_for_slurm_job(job_id: str, label: str) -> bool:
             check=True,
         ).stdout.strip()
         if active:
+            inactive_nonterminal_polls = 0
             print(f'  {label} job={job_id} state=ACTIVE; sleeping 60s')
             time.sleep(60)
             continue
+        if clean_states and all(state == 'COMPLETED' for state in clean_states):
+            print(f'  {label} job={job_id} completed with states={clean_states}')
+            return True
+        nonterminal_states = {
+            'CONFIGURING',
+            'COMPLETING',
+            'PENDING',
+            'REQUEUED',
+            'REQUEUE_FED',
+            'REQUEUE_HOLD',
+            'RESIZING',
+            'RUNNING',
+            'SPECIAL_EXIT',
+            'STAGE_OUT',
+            'SUSPENDED',
+        }
+        if clean_states and any(state in nonterminal_states for state in clean_states):
+            inactive_nonterminal_polls += 1
+            if inactive_nonterminal_polls <= 10:
+                print(
+                    f'  {label} job={job_id} no longer in squeue but accounting '
+                    f'has nonterminal states={clean_states}; sleeping 30s'
+                )
+                time.sleep(30)
+                continue
+            print(
+                f'  {label} job={job_id} accounting did not settle after '
+                f'{inactive_nonterminal_polls} inactive polls; states={clean_states}'
+            )
+            return False
         print(f'  {label} job={job_id} ended with unexpected states={clean_states}')
         return False
 
@@ -766,6 +813,14 @@ def main():
 
     print(f'Refreshing canonical MODIS from {refresh_start.date()} through {month_end.date()} to preserve interpolation consistency')
     staging_zarr = build_staging_zarr(args, refresh_start, month_end)
+    capture_zarr_rollback_from_env(
+        target_zarr=args.canonical_zarr,
+        label='modis_canonical',
+        dim_name='time',
+        window_start=refresh_start,
+        window_end=month_end,
+        reason='before_modis_month_promotion',
+    )
     result = promote_staging_window(staging_zarr, args.canonical_zarr, refresh_start, month_end)
     print(f'MODIS monthly update complete for {args.month}: {result}')
     print(f'  staging_zarr={staging_zarr}')

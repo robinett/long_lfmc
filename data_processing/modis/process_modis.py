@@ -40,8 +40,7 @@ def get_metadata(
     Function for creating daily netcdf files from modis hdf files
     '''
     print('getting metadata for all tiles')
-    metadata_seed_date = None
-    first_day_files = []
+    metadata_files = {}
     current_date = start_date
     while current_date <= end_date:
         this_date_section = 'A' + current_date.strftime('%Y%j')
@@ -57,49 +56,25 @@ def get_metadata(
                 )
             )
         )
-        if len(candidate_files) > 0:
-            metadata_seed_date = current_date
-            first_day_files = candidate_files
-            break
+        for candidate_file in candidate_files:
+            tile_number = candidate_file.split('/')[-1].split('.')[2]
+            if tile_number not in metadata_files:
+                metadata_files[tile_number] = candidate_file
         current_date = current_date + datetime.timedelta(days=1)
-    if metadata_seed_date is None:
+    if not metadata_files:
         raise FileNotFoundError(
             'No MODIS A4 files found to build tile metadata for '
             f'{start_date.strftime("%Y-%m-%d")} -> {end_date.strftime("%Y-%m-%d")}'
         )
     print(
-        'using metadata seed date {}'.format(
-            metadata_seed_date.strftime('%Y-%m-%d')
+        'using {} MODIS tile files to build metadata'.format(
+            len(metadata_files)
         )
     )
-    # get the iv and ih tiles from these files
-    ivs = np.zeros(0)
-    ihs = np.zeros(0)
-    for f in first_day_files:
-        # get the tile number
-        tile_numbers = f.split('/')[-1].split('.')[2]
-        #print(tile_numbers)
-        # get the iv and ih from the tile number
-        ih = int(tile_numbers[1:3])
-        iv = int(tile_numbers[5:])
-        # append to the arrays
-        ihs = np.append(ihs, ih)
-        ivs = np.append(ivs, iv)
     # get the metadata for each tile so that we don't have to do this every day
     # later
     extracted_metadata = {}
-    for h,htile in enumerate(ihs):
-        vtile = ivs[h]
-        # get the file for the first day corresponding to this tile
-        this_date_section = 'A' + metadata_seed_date.strftime('%Y%j')
-        this_tile_section = 'h' + f"{int(htile):02}" + 'v' + f"{int(vtile):02}"
-        tile_fname = [
-            f for f in first_day_files
-            if (
-                f.split('.')[1] == this_date_section
-                and f.split('.')[2] == this_tile_section
-            )
-        ][0]
+    for this_tile_section, tile_fname in sorted(metadata_files.items()):
         # open the file and get the metadata
         sd = SD(tile_fname, SDC.READ)
         # Read the global attribute
@@ -193,6 +168,11 @@ def regrid_to_daily_ncs(
     if allowed_missing_keys is None:
         allowed_missing_keys = set()
     while current_date <= end_date:
+        all_datasets = []
+        date_tag = 'A' + current_date.strftime('%Y%j')
+        print('working on {}'.format(
+            current_date.strftime('%Y-%m-%d')
+        ))
         # files only for today
         today_files = sorted(
             glob.glob(
@@ -209,9 +189,22 @@ def regrid_to_daily_ncs(
             print('Warning: No files found for {}'.format(
                 current_date.strftime('%Y-%m-%d')
             ))
-            print('Skipping date')
-            current_date = current_date + datetime.timedelta(days=1)
-            continue
+            missing_keys = {
+                ('MCD43A4', date_tag, tile_number, '061')
+                for tile_number in metadata.keys()
+            }
+            unallowed_missing_keys = sorted(missing_keys - allowed_missing_keys)
+            if unallowed_missing_keys:
+                raise FileNotFoundError(
+                    'No MODIS A4 files found for {} and missing tiles are not '
+                    'listed in the missing-granule manifest; sample_missing={}'.format(
+                        current_date.strftime('%Y-%m-%d'),
+                        unallowed_missing_keys[:10]
+                    )
+                )
+            print('Writing all-NaN MODIS fallback mosaic for {}'.format(
+                current_date.strftime('%Y-%m-%d')
+            ))
         # check if we have the right number of files
         if len(today_files) != tiles_per_day:
             #raise ValueError(
@@ -233,11 +226,6 @@ def regrid_to_daily_ncs(
                 )
             )
         )
-        all_datasets = []
-        date_tag = 'A' + current_date.strftime('%Y%j')
-        print('working on {}'.format(
-            current_date.strftime('%Y-%m-%d')
-        ))
         print('extracting data')
         present_tiles = set()
         for f,file in enumerate(today_files):
