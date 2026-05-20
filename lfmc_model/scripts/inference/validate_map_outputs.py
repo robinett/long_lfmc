@@ -359,11 +359,22 @@ def main():
 
     safe_start = pd.Timestamp(run_config["safe_start_date"]).normalize()
     safe_end = pd.Timestamp(run_config["safe_end_date"]).normalize()
-    month_start, month_end, site_error = _load_site_error_for_validation(
-        run_config,
-        safe_start,
-        safe_end,
-    )
+    site_error = None
+    try:
+        month_start, month_end, site_error = _load_site_error_for_validation(
+            run_config,
+            safe_start,
+            safe_end,
+        )
+    except ValueError as exc:
+        if "No site-error measurements found" not in str(exc):
+            raise
+        month_start = safe_start
+        month_end = safe_end
+        print(
+            "[validate_map_outputs] no site-error measurements found for "
+            f"{safe_start.date()} to {safe_end.date()}; skipping measured-site validation"
+        )
     selected_site_keys = [
         rec["site_key"]
         for rec in run_config.get("validation_sites", [])
@@ -414,16 +425,19 @@ def main():
     print(f"[validate_map_outputs] wrote sample-location timeseries to {sample_ts_dir}")
 
     measured_site_dir = os.path.join(plots_root, "measured_sites")
-    _write_validation_site_plots(
-        ds=ds,
-        model_grid=model_grid,
-        site_error=site_error,
-        month_start=month_start,
-        month_end=month_end,
-        out_dir=measured_site_dir,
-        n_sites=int(args.n_validation_sites),
-        selected_site_keys=selected_site_keys,
-    )
+    if site_error is None:
+        print("[validate_map_outputs] measured-site plots skipped")
+    else:
+        _write_validation_site_plots(
+            ds=ds,
+            model_grid=model_grid,
+            site_error=site_error,
+            month_start=month_start,
+            month_end=month_end,
+            out_dir=measured_site_dir,
+            n_sites=int(args.n_validation_sites),
+            selected_site_keys=selected_site_keys,
+        )
 
 
 if __name__ == "__main__":
