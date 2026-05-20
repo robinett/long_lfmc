@@ -414,6 +414,7 @@ prepare_retry_states="${PREPARE_RETRY_STATES:-$(cfg_value submission prepare_ret
 merge_blocks_per_job="${MERGE_BLOCKS_PER_JOB:-$(cfg_value submission merge_blocks_per_job 1)}"
 model_type="${MODEL_TYPE:-$(cfg_value ensemble model_type standard)}"
 cleanup_prepared_tensors_after_success="${CLEANUP_PREPARED_TENSORS_AFTER_SUCCESS:-$(cfg_value submission cleanup_prepared_tensors_after_success false)}"
+wait_for_merge_completion="${WAIT_FOR_MERGE_COMPLETION:-$(cfg_value submission wait_for_merge_completion false)}"
 wait_for_validation_completion="${WAIT_FOR_VALIDATION_COMPLETION:-$(cfg_value submission wait_for_validation_completion false)}"
 multiyear_current_year="${MULTIYEAR_CURRENT_YEAR:-NA}"
 multiyear_start_year="${MULTIYEAR_START_YEAR:-}"
@@ -1651,6 +1652,23 @@ validate_job_id="$(submit_with_retry \
     "validate_maps" \
     sbatch --parsable --dependency=afterok:${merge_array_job_id} --export=ALL,MANIFEST_PATH="${manifest_path}" "${script_dir}/validate_maps_ensemble.sbatch")"
 echo "Submitted validation job ${validate_job_id}"
+
+if [[ "${wait_for_merge_completion}" == "true" ]]; then
+    echo "Waiting for merge job ${merge_array_job_id} to complete"
+    while true; do
+        merge_job_state="$(job_state "${merge_array_job_id}")"
+        if job_failed "${merge_job_state}"; then
+            echo "Merge job ${merge_array_job_id} failed with state ${merge_job_state}" >&2
+            exit 1
+        fi
+        if [[ "${merge_job_state}" == "COMPLETED" ]]; then
+            break
+        fi
+        echo "Merge monitor: job=${merge_array_job_id} state=${merge_job_state}; sleeping ${gpu_submit_sleep_seconds}s"
+        sleep "${gpu_submit_sleep_seconds}"
+    done
+    echo "Merge job ${merge_array_job_id} completed"
+fi
 
 if [[ "${wait_for_validation_completion}" == "true" ]]; then
     echo "Waiting for validation job ${validate_job_id} to complete"

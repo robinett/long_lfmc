@@ -43,6 +43,7 @@ REQUESTED_START_DATE="${requested_start_date}" \
 REQUESTED_END_DATE="${requested_end_date}" \
 ENSEMBLE_ROOT="${ensemble_root}" \
 INPUT_DATA_NAME="${input_data_name}" \
+WAIT_FOR_MERGE_COMPLETION=true \
 bash "${map_submit_script}"
 
 readarray -t promotion_values < <(CONFIG_PATH="${config_path}" REGISTRY_PATH="${registry_path}" python3 - <<'PY2'
