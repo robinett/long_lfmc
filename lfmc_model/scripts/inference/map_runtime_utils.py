@@ -188,6 +188,7 @@ def clamp_runtime_window_for_sources(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
     var_locs: Dict[str, Sequence[str]] = VAR_LOCS,
+    nlcd_mode: Optional[str] = None,
 ) -> Tuple[pd.Timestamp, pd.Timestamp]:
     safe_start, safe_end = _clamp_inference_window(
         dss,
@@ -201,7 +202,8 @@ def clamp_runtime_window_for_sources(
     if "landcover_frac" in static_sources:
         lc_start, lc_end = get_year_coord_bounds(dss["landcover_frac"], coord_name="year")
         safe_start = max(safe_start, lc_start)
-        safe_end = min(safe_end, lc_end)
+        if str(nlcd_mode) != "latest_available_year":
+            safe_end = min(safe_end, lc_end)
     return safe_start, safe_end
 
 
@@ -211,6 +213,7 @@ def resolve_common_runtime_window(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
     var_locs: Dict[str, Sequence[str]] = VAR_LOCS,
+    nlcd_mode: Optional[str] = None,
 ) -> Tuple[pd.Timestamp, pd.Timestamp]:
     starts = []
     ends = []
@@ -221,6 +224,7 @@ def resolve_common_runtime_window(
             start_date,
             end_date,
             var_locs=var_locs,
+            nlcd_mode=nlcd_mode,
         )
         starts.append(safe_start)
         ends.append(safe_end)

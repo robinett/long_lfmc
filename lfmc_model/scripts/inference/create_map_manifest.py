@@ -316,6 +316,7 @@ def main():
         runtimes,
         requested_start,
         requested_end,
+        nlcd_mode=source_resolution.get("nlcd_mode") if source_resolution is not None else None,
     )
     if safe_start > safe_end:
         raise ValueError(
@@ -370,11 +371,26 @@ def main():
     validation_sites = []
     model_grid = open_model_grid(grid_path)
     year_tile_payloads = {}
+    nlcd_year_map = (
+        source_resolution.get("nlcd_output_year_to_source_year")
+        if source_resolution is not None
+        else None
+    )
     for block_year in block_years:
+        landcover_source_year = int(
+            nlcd_year_map.get(str(block_year), block_year)
+            if nlcd_year_map is not None
+            else block_year
+        )
+        if landcover_source_year != block_year:
+            print(
+                f"[create_map_manifest] year={block_year} using NLCD source year "
+                f"{landcover_source_year}"
+            )
         prediction_mask = load_or_build_prediction_mask_for_year(
             model_grid=model_grid,
             landcover_ds=dss["landcover_frac"],
-            year=block_year,
+            year=landcover_source_year,
             grid_path=grid_path,
         )
         tile_payloads_for_year = build_tile_payloads(
