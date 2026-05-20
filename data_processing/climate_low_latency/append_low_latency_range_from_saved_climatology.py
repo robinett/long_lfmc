@@ -42,6 +42,36 @@ def select_clim_var(ds: xr.Dataset, var_name: str, month_day_indexer: xr.DataArr
     return out.astype(np.float32)
 
 
+def ensure_xy_match(left: xr.DataArray, right: xr.DataArray, label: str) -> None:
+    for coord_name in ["x", "y"]:
+        if coord_name not in left.coords or coord_name not in right.coords:
+            raise ValueError(f"Cannot verify {label}: missing {coord_name} coordinate")
+        if not np.array_equal(left[coord_name].values, right[coord_name].values):
+            raise ValueError(f"{label} has incompatible {coord_name} coordinates")
+
+
+def align_to_reference_grid(da: xr.DataArray, reference: xr.Dataset, label: str) -> xr.DataArray:
+    out = da
+    for coord_name in ["x", "y"]:
+        if coord_name not in out.coords or coord_name not in reference.coords:
+            raise ValueError(f"Cannot align {label}: missing {coord_name} coordinate")
+        source_values = out[coord_name].values
+        target_values = reference[coord_name].values
+        if np.array_equal(source_values, target_values):
+            continue
+        if source_values.shape != target_values.shape or set(source_values.tolist()) != set(target_values.tolist()):
+            raise ValueError(f"Cannot align {label}: incompatible {coord_name} coordinates")
+        out = out.reindex({coord_name: target_values})
+    for coord_name in ["x", "y"]:
+        if not np.array_equal(out[coord_name].values, reference[coord_name].values):
+            raise ValueError(f"Failed to align {label}: incompatible {coord_name} coordinates")
+    return out
+
+
+def drop_aux_spatial_coords(da: xr.DataArray) -> xr.DataArray:
+    return da.drop_vars(["lat", "lon", "spatial_ref"], errors="ignore")
+
+
 def truncate_store_before_date(combined_zarr: Path, combined_ds: xr.Dataset, start_date: pd.Timestamp) -> None:
     times = pd.to_datetime(combined_ds["time"].values).normalize()
     prefix_count = int(np.searchsorted(times.values, start_date.to_datetime64(), side="left"))
@@ -50,12 +80,14 @@ def truncate_store_before_date(combined_zarr: Path, combined_ds: xr.Dataset, sta
         f"keeping {prefix_count} time steps"
     )
     root = zarr.open_group(str(combined_zarr), mode="a")
-    root["time"].resize(prefix_count)
+    root["time"].resize((prefix_count,))
     root["data"].resize(
-        prefix_count,
-        root["data"].shape[1],
-        root["data"].shape[2],
-        root["data"].shape[3],
+        (
+            prefix_count,
+            root["data"].shape[1],
+            root["data"].shape[2],
+            root["data"].shape[3],
+        )
     )
 
 
@@ -85,11 +117,11 @@ def main() -> None:
             combined_ds = xr.open_zarr(args.combined_zarr, consolidated=False)
             combined_times = pd.to_datetime(combined_ds["time"].values).normalize()
 
-        prcp = select_standard_var(standard_range, "prcp")
-        srad = select_standard_var(standard_range, "srad")
-        swe = select_standard_var(standard_range, "swe")
-        tmax = select_standard_var(standard_range, "tmax")
-        vp = select_standard_var(standard_range, "vp")
+        prcp = align_to_reference_grid(select_standard_var(standard_range, "prcp"), combined_ds, "prcp")
+        srad = align_to_reference_grid(select_standard_var(standard_range, "srad"), combined_ds, "srad")
+        swe = align_to_reference_grid(select_standard_var(standard_range, "swe"), combined_ds, "swe")
+        tmax = align_to_reference_grid(select_standard_var(standard_range, "tmax"), combined_ds, "tmax")
+        vp = align_to_reference_grid(select_standard_var(standard_range, "vp"), combined_ds, "vp")
         vpd = (saturation_vapor_pressure_pa(tmax) - vp).clip(min=0.0).astype(np.float32)
         vpd.name = "vpd"
 
@@ -121,7 +153,14 @@ def main() -> None:
                 f"rolling anomalies for {start_date.date()}"
             )
 
-        prcp_hist = xr.concat([prior_prcp, prcp], dim="time")
+        ensure_xy_match(prior_prcp, prcp, "Precipitation rolling-history concat")
+        prcp_hist = xr.concat(
+            [drop_aux_spatial_coords(prior_prcp), drop_aux_spatial_coords(prcp)],
+            dim="time",
+            compat="override",
+            coords="minimal",
+            join="exact",
+        )
         prcp_rolling30 = (
             prcp_hist.rolling(time=30, min_periods=30)
             .sum()
@@ -144,8 +183,13 @@ def main() -> None:
         }
 
         variable_order = [str(val) for val in combined_ds["variable"].values]
-        arrays = [derived[var_name].expand_dims(variable=[var_name]) for var_name in variable_order]
-        out = xr.concat(arrays, dim="variable").transpose("time", "variable", "y", "x")
+        arrays = [
+            drop_aux_spatial_coords(derived[var_name]).expand_dims(variable=[var_name])
+            for var_name in variable_order
+        ]
+        out = xr.concat(arrays, dim="variable", coords="minimal", compat="override").transpose(
+            "time", "variable", "y", "x"
+        )
         out = out.chunk({"time": 32, "variable": 1, "y": 512, "x": 512})
         out_ds = xr.Dataset(
             {"data": out},
