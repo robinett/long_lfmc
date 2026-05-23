@@ -184,6 +184,15 @@ body {
   gap: 10px;
 }
 
+.layer-toggle-row {
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.layer-toggle-button {
+  flex: 1 1 132px;
+}
+
 .toggle-button {
   border: 0;
   border-radius: 999px;
@@ -216,6 +225,20 @@ body {
   font-size: 0.82rem;
   color: #645a4e;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.legend-extents-three {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 8px;
+}
+
+.legend-extents-three span:nth-child(2) {
+  text-align: center;
+}
+
+.legend-extents-three span:last-child {
+  text-align: right;
 }
 
 .date-slider-extents {
@@ -349,6 +372,18 @@ body {
   flex-direction: column;
 }
 
+.timeseries-mode-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.timeseries-mode-button {
+  flex: 1;
+  padding: 7px 10px;
+  font-size: 0.76rem;
+}
+
 .timeseries-shell {
   position: relative;
   min-height: 120px;
@@ -388,6 +423,10 @@ body {
   stroke-width: 2.5;
   stroke-linejoin: round;
   stroke-linecap: round;
+}
+
+.chart-line-anomaly {
+  stroke: #41548b;
 }
 
 .chart-axis,
@@ -441,6 +480,10 @@ body {
   height: 0;
   border-top: 3px solid #824c27;
   border-radius: 0;
+}
+
+.timeseries-legend-swatch-anomaly {
+  border-top-color: #41548b;
 }
 
 .timeseries-legend-swatch-band {

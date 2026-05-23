@@ -57,10 +57,14 @@ def view_resolutions(pixel_width: float, min_zoom: int, max_zoom: int, extras):
 
 def completed_tile_dates(cfg, available_dates):
     out = []
+    required_layers = set(cfg["layers"].keys())
     for date_str in available_dates:
         status_path = date_status_path(tile_status_dir(cfg), date_str)
         if status_path.exists():
-            out.append(date_str)
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            completed_layers = set(status.get("layers", {}).keys())
+            if required_layers.issubset(completed_layers):
+                out.append(date_str)
     return out
 
 

@@ -25,6 +25,8 @@ register(proj4);
 const DEFAULT_API_BASE_URL = "https://long-lfmc-api.onrender.com";
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, "");
 const MAX_DOWNLOAD_YEARS = 3;
+const DEFAULT_LAYER_KEY = "mean";
+const DEFAULT_TIMESERIES_MODE = "mean";
 
 function apiUrl(pathAndQuery) {
   const normalizedPath = pathAndQuery.startsWith("/") ? pathAndQuery : `/${pathAndQuery}`;
@@ -59,6 +61,14 @@ function legendGradient(layerConfig) {
     return `rgb(${color.join(",")}) ${pct}`;
   });
   return `linear-gradient(to right, ${pieces.join(", ")})`;
+}
+
+function isAnomalyLayer(layerKey) {
+  return layerKey === "anomaly";
+}
+
+function layerUnitLabel(layerConfig) {
+  return layerConfig?.unit === "percent" ? "%" : (layerConfig?.unit ?? "");
 }
 
 function niceTickStep(span, targetTickCount) {
@@ -129,26 +139,29 @@ function buildDateTicks(dates) {
     }));
 }
 
-function buildTimeseriesGeometry(pointInfo) {
+function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
   if (!pointInfo?.timeseries) {
     return null;
   }
 
   const dates = pointInfo.timeseries.dates ?? [];
-  const means = pointInfo.timeseries.lfmc_ens_mean ?? [];
-  const stds = pointInfo.timeseries.lfmc_ens_std ?? [];
+  const isAnomalyMode = mode === "anomaly";
+  const values = isAnomalyMode
+    ? (pointInfo.timeseries.lfmc_anomaly ?? [])
+    : (pointInfo.timeseries.lfmc_ens_mean ?? []);
+  const stds = isAnomalyMode ? [] : (pointInfo.timeseries.lfmc_ens_std ?? []);
   const validLinePoints = [];
   const validBandPoints = [];
   const bandSegments = [];
   let currentBandSegment = [];
 
   for (let idx = 0; idx < dates.length; idx += 1) {
-    const meanValue = means[idx];
+    const meanValue = values[idx];
     const stdValue = stds[idx];
     const meanNumber = Number(meanValue);
     const stdNumber = Number(stdValue);
     const hasMean = meanValue !== null && meanValue !== undefined && Number.isFinite(meanNumber);
-    const hasStd = stdValue !== null && stdValue !== undefined && Number.isFinite(stdNumber);
+    const hasStd = !isAnomalyMode && stdValue !== null && stdValue !== undefined && Number.isFinite(stdNumber);
     if (hasMean) {
       validLinePoints.push({
         idx,
@@ -190,8 +203,8 @@ function buildTimeseriesGeometry(pointInfo) {
     ...validLinePoints.map((point) => point.mean),
     ...validBandPoints.flatMap((point) => [point.low, point.high]),
   ];
-  const dataYMin = Math.min(...yValues);
-  const dataYMax = Math.max(...yValues);
+  const dataYMin = isAnomalyMode ? Math.min(...yValues, 0) : Math.min(...yValues);
+  const dataYMax = isAnomalyMode ? Math.max(...yValues, 0) : Math.max(...yValues);
   const yTicks = buildAxisTicks(dataYMin, dataYMax);
   const yMin = yTicks[0].value;
   const yMax = yTicks[yTicks.length - 1].value;
@@ -205,7 +218,7 @@ function buildTimeseriesGeometry(pointInfo) {
   const linePathParts = [];
 
   for (let idx = 0; idx < dates.length; idx += 1) {
-    const meanValue = means[idx];
+    const meanValue = values[idx];
     if (meanValue === null || Number.isNaN(meanValue)) {
       lineStarted = false;
       continue;
@@ -246,14 +259,44 @@ function buildTimeseriesGeometry(pointInfo) {
       y: padding.top + tick.fraction * innerHeight,
     })),
     xTicks,
+    mode,
+    axisLabel: isAnomalyMode ? "LFMC anomaly (%)" : "LFMC (%)",
+    lineLabel: isAnomalyMode ? "Anomaly" : "Prediction",
+    showBand: !isAnomalyMode,
   };
 }
 
-function TimeseriesChart({ pointInfo }) {
-  const geometry = buildTimeseriesGeometry(pointInfo);
+function TimeseriesChart({ pointInfo, mode, onModeChange }) {
+  const hasAnomaly = Boolean(pointInfo?.timeseries?.lfmc_anomaly?.some((value) => value !== null && value !== undefined));
+  const activeMode = mode === "anomaly" && hasAnomaly ? "anomaly" : DEFAULT_TIMESERIES_MODE;
+  const geometry = buildTimeseriesGeometry(pointInfo, activeMode);
+  const modeControls = (
+    <div className="timeseries-mode-row" aria-label="Timeseries mode">
+      <button
+        type="button"
+        className={`toggle-button timeseries-mode-button ${activeMode === "mean" ? "toggle-button-active" : ""}`}
+        onClick={() => onModeChange("mean")}
+      >
+        LFMC
+      </button>
+      <button
+        type="button"
+        className={`toggle-button timeseries-mode-button ${activeMode === "anomaly" ? "toggle-button-active" : ""}`}
+        disabled={!hasAnomaly}
+        onClick={() => onModeChange("anomaly")}
+      >
+        Anomaly
+      </button>
+    </div>
+  );
 
   if (!geometry) {
-    return <p className="panel-note">Click the map to load the previous 90 days of daily values.</p>;
+    return (
+      <div className="timeseries-wrap">
+        {modeControls}
+        <p className="panel-note">Click the map to load the previous 90 days of daily values.</p>
+      </div>
+    );
   }
 
   return (
@@ -276,7 +319,7 @@ function TimeseriesChart({ pointInfo }) {
         {geometry.areaPaths.map((areaPath, idx) => (
           <path key={`band-${idx}`} d={areaPath} className="chart-band" />
         ))}
-        <path d={geometry.linePath} className="chart-line" />
+        <path d={geometry.linePath} className={`chart-line chart-line-${geometry.mode}`} />
         {geometry.yTicks.map((tick) => (
           <g key={`y-${tick.label}`}>
             <line
@@ -316,19 +359,22 @@ function TimeseriesChart({ pointInfo }) {
           transform={`rotate(-90 16 ${geometry.axisTop + (geometry.axisBottom - geometry.axisTop) / 2})`}
           className="chart-label chart-label-axis"
         >
-          LFMC (%)
+          {geometry.axisLabel}
         </text>
       </svg>
       <div className="timeseries-legend" aria-label="Timeseries legend">
         <div className="timeseries-legend-item">
-          <span className="timeseries-legend-swatch timeseries-legend-swatch-line" />
-          <span className="timeseries-legend-label">Prediction</span>
+          <span className={`timeseries-legend-swatch timeseries-legend-swatch-line timeseries-legend-swatch-${geometry.mode}`} />
+          <span className="timeseries-legend-label">{geometry.lineLabel}</span>
         </div>
-        <div className="timeseries-legend-item">
-          <span className="timeseries-legend-swatch timeseries-legend-swatch-band" />
-          <span className="timeseries-legend-label">Ensemble-based uncertainty</span>
-        </div>
+        {geometry.showBand ? (
+          <div className="timeseries-legend-item">
+            <span className="timeseries-legend-swatch timeseries-legend-swatch-band" />
+            <span className="timeseries-legend-label">Ensemble-based uncertainty</span>
+          </div>
+        ) : null}
       </div>
+      {modeControls}
     </div>
   );
 }
@@ -477,6 +523,7 @@ function App() {
   const selectionSourceRef = useRef(null);
   const manifestRef = useRef(null);
   const dateIndexRef = useRef(0);
+  const selectedLayerKeyRef = useRef(DEFAULT_LAYER_KEY);
   const pointRef = useRef(null);
   const transitionTokenRef = useRef(0);
   const queuedDateIndexRef = useRef(null);
@@ -486,6 +533,8 @@ function App() {
 
   const [manifest, setManifest] = useState(null);
   const [dateIndex, setDateIndex] = useState(0);
+  const [selectedLayerKey, setSelectedLayerKey] = useState(DEFAULT_LAYER_KEY);
+  const [timeseriesMode, setTimeseriesMode] = useState(DEFAULT_TIMESERIES_MODE);
   const [isPlaying, setIsPlaying] = useState(false);
   const [locationLatInput, setLocationLatInput] = useState("");
   const [locationLonInput, setLocationLonInput] = useState("");
@@ -500,7 +549,9 @@ function App() {
   const [isPointLoading, setIsPointLoading] = useState(false);
   const dates = manifest?.dates ?? [];
   const selectedDate = dates[dateIndex] ?? "NA";
-  const activeLayer = manifest?.layers?.mean ?? null;
+  const layerEntries = Object.entries(manifest?.layers ?? {});
+  const activeLayer = manifest?.layers?.[selectedLayerKey] ?? manifest?.layers?.[DEFAULT_LAYER_KEY] ?? null;
+  const activeLayerKey = manifest?.layers?.[selectedLayerKey] ? selectedLayerKey : DEFAULT_LAYER_KEY;
 
   async function queryPoint(x, y, dateStr) {
     const query = new URLSearchParams({
@@ -616,15 +667,15 @@ function App() {
     return { keys, threshold };
   }
 
-  function createTileSourceForDate(manifestPayload, targetDate, requestToken, onReady) {
-    const layerConfig = manifestPayload.layers.mean;
+  function createTileSourceForDate(manifestPayload, targetDate, layerKey, requestToken, onReady) {
+    const layerConfig = manifestPayload.layers[layerKey];
     const tileTemplate = layerConfig?.tile_root_template;
     const assetBaseUrl = manifestPayload.asset_base_url;
     if (!tileTemplate) {
-      throw new Error(`No tile template found for mean ${targetDate}`);
+      throw new Error(`No tile template found for ${layerKey} ${targetDate}`);
     }
     if (!assetBaseUrl) {
-      throw new Error(`No asset base URL configured for mean ${targetDate}`);
+      throw new Error(`No asset base URL configured for ${layerKey} ${targetDate}`);
     }
 
     const tileGrid = buildTileGrid(manifestPayload);
@@ -689,7 +740,7 @@ function App() {
     tileSource.on("tileloadstart", () => {
       if (requestToken === transitionTokenRef.current) {
         setIsMapLoading(true);
-        setStatusText(`Loading LFMC tiles for ${targetDate}`);
+        setStatusText(`Loading ${layerConfig.label} tiles for ${targetDate}`);
       }
     });
     tileSource.on("tileloadend", handleTileSettled);
@@ -730,17 +781,22 @@ function App() {
   }
 
   async function transitionToDateIndex(targetIndex, options = {}) {
-    const { immediate = false } = options;
+    const { immediate = false, force = false, layerKey = selectedLayerKeyRef.current } = options;
     const manifestPayload = manifestRef.current;
     if (!manifestPayload || !mapRef.current) {
       return false;
     }
-    if (!immediate && targetIndex === dateIndexRef.current) {
+    if (!immediate && !force && targetIndex === dateIndexRef.current) {
       return true;
     }
 
     const targetDate = manifestPayload.dates[targetIndex];
     if (!targetDate) {
+      return false;
+    }
+    const layerConfig = manifestPayload.layers[layerKey];
+    if (!layerConfig) {
+      setStatusText(`Layer ${layerKey} is not available`);
       return false;
     }
 
@@ -756,7 +812,7 @@ function App() {
     }
 
     return new Promise((resolve) => {
-      const tileSource = createTileSourceForDate(manifestPayload, targetDate, requestToken, async () => {
+      const tileSource = createTileSourceForDate(manifestPayload, targetDate, layerKey, requestToken, async () => {
         if (requestToken !== transitionTokenRef.current) {
           resolve(false);
           return;
@@ -773,7 +829,7 @@ function App() {
         setDateIndex(targetIndex);
         dateIndexRef.current = targetIndex;
         setIsMapLoading(false);
-        setStatusText(`Showing LFMC for ${targetDate}`);
+        setStatusText(`Showing ${layerConfig.label} for ${targetDate}`);
         resolve(true);
       });
 
@@ -802,6 +858,20 @@ function App() {
   function requestDateTransition(targetIndex) {
     queuedDateIndexRef.current = targetIndex;
     void drainQueuedTransitions();
+  }
+
+  function handleLayerChange(layerKey) {
+    const manifestPayload = manifestRef.current;
+    if (!manifestPayload?.layers?.[layerKey]) {
+      return;
+    }
+    setIsPlaying(false);
+    setSelectedLayerKey(layerKey);
+    selectedLayerKeyRef.current = layerKey;
+    if (isAnomalyLayer(layerKey)) {
+      setTimeseriesMode("anomaly");
+    }
+    void transitionToDateIndex(dateIndexRef.current, { force: true, layerKey });
   }
 
   function requestDateValueTransition(targetDate, direction = "nearest") {
@@ -913,11 +983,22 @@ function App() {
 
   useEffect(() => {
     manifestRef.current = manifest;
+    if (manifest && !manifest.layers?.[selectedLayerKeyRef.current]) {
+      const nextLayerKey = manifest.layers?.[DEFAULT_LAYER_KEY] ? DEFAULT_LAYER_KEY : Object.keys(manifest.layers ?? {})[0];
+      if (nextLayerKey) {
+        selectedLayerKeyRef.current = nextLayerKey;
+        setSelectedLayerKey(nextLayerKey);
+      }
+    }
   }, [manifest]);
 
   useEffect(() => {
     dateIndexRef.current = dateIndex;
   }, [dateIndex]);
+
+  useEffect(() => {
+    selectedLayerKeyRef.current = selectedLayerKey;
+  }, [selectedLayerKey]);
 
   useEffect(() => {
     activeDownloadSiteIndexRef.current = activeDownloadSiteIndex;
@@ -1373,14 +1454,35 @@ function App() {
       </header>
       <aside className="control-panel">
         <section className="panel-card">
-          <div className="panel-label">LFMC (%)</div>
+          <div className="panel-label">Map Layer</div>
+          <div className="toggle-row layer-toggle-row">
+            {layerEntries.map(([layerKey, layer]) => (
+              <button
+                key={layerKey}
+                type="button"
+                className={`toggle-button layer-toggle-button ${activeLayerKey === layerKey ? "toggle-button-active" : ""}`}
+                onClick={() => handleLayerChange(layerKey)}
+              >
+                {layer.label ?? formatLabel(layerKey)}
+              </button>
+            ))}
+          </div>
           <div
             className="legend-bar"
             style={{ background: activeLayer ? legendGradient(activeLayer) : undefined }}
           />
-          <div className="slider-extents">
-            <span>{formatValue(activeLayer?.min, 0)}</span>
-            <span>{formatValue(activeLayer?.max, 0)}</span>
+          <div className={`slider-extents ${isAnomalyLayer(activeLayerKey) ? "legend-extents-three" : ""}`}>
+            <span>
+              {isAnomalyLayer(activeLayerKey) ? "Dry " : ""}
+              {formatValue(activeLayer?.min, 0)}
+              {layerUnitLabel(activeLayer)}
+            </span>
+            {isAnomalyLayer(activeLayerKey) ? <span>0{layerUnitLabel(activeLayer)}</span> : null}
+            <span>
+              {formatValue(activeLayer?.max, 0)}
+              {layerUnitLabel(activeLayer)}
+              {isAnomalyLayer(activeLayerKey) ? " Wet" : ""}
+            </span>
           </div>
         </section>
 
@@ -1428,6 +1530,14 @@ function App() {
                 <span className="stats-value">{formatValue(pointInfo.lfmc_ens_mean, 1)}</span>
               </div>
               <div>
+                <span className="stats-key">Anomaly</span>
+                <span className="stats-value">{formatValue(pointInfo.lfmc_anomaly, 1)}</span>
+              </div>
+              <div>
+                <span className="stats-key">Climatology</span>
+                <span className="stats-value">{formatValue(pointInfo.lfmc_climatology_mean, 1)}</span>
+              </div>
+              <div>
                 <span className="stats-key">Land Cover</span>
                 <span className="stats-value">{formatLabel(pointInfo.landcover_name)}</span>
               </div>
@@ -1444,7 +1554,7 @@ function App() {
         <section className="panel-card">
           <div className="panel-label">Time Series</div>
           <div className="timeseries-shell">
-            <TimeseriesChart pointInfo={pointInfo} selectedDate={selectedDate} />
+            <TimeseriesChart pointInfo={pointInfo} mode={timeseriesMode} onModeChange={setTimeseriesMode} />
             {isPointLoading ? <div className="timeseries-play-overlay">loading</div> : null}
             {!isPointLoading && isPlaying ? (
               <div className="timeseries-play-overlay">will update after play</div>

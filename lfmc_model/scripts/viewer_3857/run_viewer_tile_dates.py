@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import datetime as dt
 import json
 import math
 import shutil
@@ -63,6 +64,13 @@ def landcover_year_index(ds: xr.Dataset, landcover_variable: str, date_str: str)
     return int(np.argmin(np.abs(years.astype(np.int64) - year)))
 
 
+def calendar_index_365(date_str: str) -> int:
+    date_value = dt.date.fromisoformat(date_str)
+    if date_value.month == 2 and date_value.day == 29:
+        date_value = dt.date(date_value.year, 2, 28)
+    return int(dt.date(2001, date_value.month, date_value.day).timetuple().tm_yday - 1)
+
+
 def tile_relpath(layer_key: str, date_str: str, zoom: int, tile_x: int, tile_y: int) -> Path:
     return Path("tiles") / layer_key / date_str / str(zoom) / str(tile_x) / f"{tile_y}.png"
 
@@ -79,16 +87,26 @@ def downsample_rgba(rgba: np.ndarray, factor: int) -> np.ndarray:
 
 def rgba_for_layer(ds, cfg, layer_key: str, time_idx: int, date_str: str, evergreen_code):
     layer_cfg = cfg["layers"][layer_key]
-    variable_name = str(layer_cfg["variable"])
     landcover_variable = str(cfg["dataset"]["landcover_variable"])
     rendering_cfg = cfg.get("rendering", {})
     default_valid_alpha = int(rendering_cfg.get("default_valid_alpha", 235))
     evergreen_forest_alpha = int(rendering_cfg.get("evergreen_forest_alpha", 60))
 
-    data = np.asarray(ds[variable_name].isel(time=time_idx).values, dtype=np.float32)
+    if str(layer_cfg.get("derived", "")).strip() == "lfmc_anomaly":
+        source_variable = str(layer_cfg["source_variable"])
+        climatology_variable = str(layer_cfg["climatology_variable"])
+        day_idx = calendar_index_365(date_str)
+        source_data = np.asarray(ds[source_variable].isel(time=time_idx).values, dtype=np.float32)
+        climatology_data = np.asarray(ds[climatology_variable].isel(climatology_day=day_idx).values, dtype=np.float32)
+        data = source_data - climatology_data
+    else:
+        variable_name = str(layer_cfg["variable"])
+        data = np.asarray(ds[variable_name].isel(time=time_idx).values, dtype=np.float32)
     valid_mask = np.isfinite(data)
     value_min = float(layer_cfg["min"])
     value_max = float(layer_cfg["max"])
+    if str(layer_cfg.get("derived", "")).strip() == "lfmc_anomaly" and abs(value_min) != abs(value_max):
+        raise ValueError(f"Anomaly layer {layer_key!r} must use min/max centered at zero")
     normalized = (data - value_min) / (value_max - value_min)
     normalized = np.clip(normalized, 0.0, 1.0)
     normalized[~valid_mask] = 0.0
@@ -142,6 +160,10 @@ def run_dates(args):
     if not dates:
         log("No dates selected for tile worker")
         return
+    layer_keys = args.layers or list(cfg["layers"].keys())
+    for layer_key in layer_keys:
+        if layer_key not in cfg["layers"]:
+            raise ValueError(f"Layer {layer_key!r} is not defined in config")
 
     ds = xr.open_zarr(viewer_dataset_path(cfg), consolidated=False)
     root = asset_root(cfg)
@@ -156,8 +178,12 @@ def run_dates(args):
             if date_str not in date_index:
                 raise ValueError(f"Date {date_str} not found in viewer dataset")
             time_idx = date_index[date_str]
-            layer_counts = {}
-            for layer_key in cfg["layers"]:
+            status_path = date_status_path(tile_status_dir(cfg), date_str)
+            if status_path.exists():
+                layer_counts = read_json(status_path).get("layers", {})
+            else:
+                layer_counts = {}
+            for layer_key in layer_keys:
                 date_layer_dir = root / "tiles" / layer_key / date_str
                 if date_layer_dir.exists():
                     shutil.rmtree(date_layer_dir)
@@ -187,6 +213,7 @@ def parse_args():
     parser.add_argument("--array-index", type=int, default=None)
     parser.add_argument("--use-slurm-array", action="store_true")
     parser.add_argument("--dates", nargs="*", default=None)
+    parser.add_argument("--layers", nargs="*", default=None)
     return parser.parse_args()
 
 

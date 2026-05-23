@@ -12,21 +12,6 @@ log() {
 
 cd "${script_dir}"
 
-log "Preparing scientific LFMC dataset for Source upload"
-source /home/users/trobinet/uv_activations/activate_lfmc_model_py312.sh
-
-python3 "${script_dir}/prepare_scientific_lfmc_dataset_for_source.py"
-
-log "Uploading scientific LFMC dataset to Source with remote cleanup enabled"
-python3 "${script_dir}/upload_source_coop.py" \
-    --config_path "${config_path}" \
-    --dataset_key scientific_lfmc_maps \
-    --delete_extra_remote_files
-
-log "Verifying remote scientific LFMC dataset"
-source /home/users/trobinet/uv_activations/activate_lfmc_viewer_py312.sh
-python3 "${script_dir}/verify_remote_scientific_lfmc_dataset.py"
-
 log "Preparing viewer 3857 LFMC dataset for Source upload"
 source /home/users/trobinet/uv_activations/activate_lfmc_viewer_py312.sh
 
@@ -61,4 +46,4 @@ else
     log "Skipping deployed viewer API refresh because LONG_LFMC_API_REFRESH_TOKEN is not set"
 fi
 
-log "Finished uploading all Source products"
+log "Finished uploading viewer 3857 Source products"

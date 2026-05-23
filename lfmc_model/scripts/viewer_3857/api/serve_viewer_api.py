@@ -37,6 +37,7 @@ DATASET_LOAD_WAIT_SECONDS = 45.0
 DEFAULT_POINT_TIMESERIES_DAYS = 90
 MAX_POINT_TIMESERIES_DAYS = 91
 MAX_CSV_DOWNLOAD_YEARS = 3
+DEFAULT_POINT_CLIMATOLOGY_VARIABLE = "lfmc_climatology_mean_point"
 
 dask = None
 fsspec = None
@@ -116,8 +117,21 @@ def safe_float(value):
     return float(value) if np.isfinite(value) else None
 
 
+def safe_difference(left, right):
+    if left is None or right is None:
+        return None
+    return safe_float(float(left) - float(right))
+
+
 def datetime64_to_datestr(value) -> str:
     return np.datetime_as_string(np.datetime64(value), unit="D")
+
+
+def calendar_day_index_365(date_str: str) -> int:
+    date_value = dt.date.fromisoformat(date_str)
+    if date_value.month == 2 and date_value.day == 29:
+        date_value = dt.date(date_value.year, 2, 28)
+    return int(dt.date(2001, date_value.month, date_value.day).timetuple().tm_yday - 1)
 
 
 def max_csv_end_date(start_date: str) -> dt.date:
@@ -202,6 +216,7 @@ class ViewerPointDataset:
         self.uncertainty_variable = str(data_cfg["uncertainty_variable"])
         self.quality_variable = str(data_cfg["quality_variable"])
         self.landcover_variable = str(data_cfg["landcover_variable"])
+        self.climatology_variable = str(data_cfg.get("climatology_variable", DEFAULT_POINT_CLIMATOLOGY_VARIABLE))
         self.initial_date = str(data_cfg["initial_date"])
 
         self.asset_mode = str(assets_cfg.get("asset_mode", "local")).strip().lower()
@@ -219,6 +234,14 @@ class ViewerPointDataset:
         self.landcover_year_array = self.root["landcover_year"]
         self.lat_array = self.root["lat"]
         self.lon_array = self.root["lon"]
+        try:
+            self.climatology_array = self.root[self.climatology_variable]
+        except KeyError:
+            self.climatology_array = None
+            log(
+                f"Viewer climatology variable {self.climatology_variable!r} not found; "
+                "point anomaly values will be null"
+            )
 
         self.dates = [str(value) for value in self.manifest.get("dates", [])]
         if not self.dates:
@@ -374,6 +397,24 @@ class ViewerPointDataset:
         values = np.asarray(array[start_idx:end_idx, y_idx, x_idx], dtype=np.float32)
         return tuple(float(value) for value in values)
 
+    def _climatology_value_for_cell(self, date_str: str, y_idx: int, x_idx: int):
+        if self.climatology_array is None:
+            return None
+        day_idx = calendar_day_index_365(date_str)
+        return safe_float(np.asarray(self.climatology_array[day_idx, y_idx, x_idx]).item())
+
+    def _climatology_series_for_cell(
+        self,
+        dates: List[str],
+        y_idx: int,
+        x_idx: int,
+    ) -> Tuple[float, ...]:
+        if self.climatology_array is None:
+            return tuple(np.nan for _ in dates)
+        day_indices = np.asarray([calendar_day_index_365(date_str) for date_str in dates], dtype=np.int64)
+        point_climatology = np.asarray(self.climatology_array[:, y_idx, x_idx], dtype=np.float32)
+        return tuple(float(value) for value in point_climatology[day_indices])
+
     def point_payload(
         self,
         date_str: str,
@@ -394,6 +435,8 @@ class ViewerPointDataset:
         cell_bounds = self._cell_bounds(x_idx=x_idx, y_idx=y_idx)
         mean_value = safe_float(np.asarray(self.mean_array[time_idx, y_idx, x_idx]).item())
         uncertainty_value = safe_float(np.asarray(self.uncertainty_array[time_idx, y_idx, x_idx]).item())
+        climatology_value = self._climatology_value_for_cell(date_str, y_idx, x_idx)
+        anomaly_value = safe_difference(mean_value, climatology_value)
         landcover_year_idx = self._landcover_year_index(date_str)
         raw_landcover_value = np.asarray(self.landcover_array[landcover_year_idx, y_idx, x_idx]).item()
         landcover_code = safe_float(raw_landcover_value)
@@ -431,6 +474,8 @@ class ViewerPointDataset:
             },
             "lfmc_ens_mean": mean_value,
             "lfmc_ens_std": uncertainty_value,
+            "lfmc_climatology_mean": climatology_value,
+            "lfmc_anomaly": anomaly_value,
             "quality_flag": quality_value,
             "data_product_level": self.quality_labels.get(quality_value, "unknown"),
             "landcover_code": landcover_code,
@@ -442,13 +487,22 @@ class ViewerPointDataset:
             bounded_days = min(max(int(timeseries_days), 1), MAX_POINT_TIMESERIES_DAYS)
             start_idx = max(0, time_idx - bounded_days + 1)
             end_idx = time_idx + 1
+            series_dates = self.dates[start_idx:end_idx]
             mean_series = self._series_for_cell(self.mean_array, start_idx, end_idx, y_idx, x_idx)
             uncertainty_series = self._series_for_cell(self.uncertainty_array, start_idx, end_idx, y_idx, x_idx)
+            climatology_series = self._climatology_series_for_cell(series_dates, y_idx, x_idx)
             quality_series = np.asarray(self.quality_array[start_idx:end_idx])
+            mean_payload_series = [safe_float(value) for value in mean_series]
+            climatology_payload_series = [safe_float(value) for value in climatology_series]
             payload["timeseries"] = {
-                "dates": self.dates[start_idx:end_idx],
-                "lfmc_ens_mean": [safe_float(value) for value in mean_series],
+                "dates": series_dates,
+                "lfmc_ens_mean": mean_payload_series,
                 "lfmc_ens_std": [safe_float(value) for value in uncertainty_series],
+                "lfmc_climatology_mean": climatology_payload_series,
+                "lfmc_anomaly": [
+                    safe_difference(mean, climatology)
+                    for mean, climatology in zip(mean_payload_series, climatology_payload_series)
+                ],
                 "quality_flag": [int(value) for value in quality_series],
                 "window_days": bounded_days,
             }

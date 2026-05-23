@@ -58,6 +58,7 @@ def get_args():
     parser.add_argument("--acl", choices=["none", "bucket-owner-full-control"], default=None)
     parser.add_argument("--profile", type=str, default=None)
     parser.add_argument("--aws_executable", type=str, default="aws")
+    parser.add_argument("--upload_backend", choices=["auto", "aws", "boto3"], default=None)
     parser.add_argument("--delete_extra_remote_files", action="store_true")
     parser.add_argument(
         "--no-delete_extra_remote_files",
@@ -266,6 +267,36 @@ def iter_local_files(source_path: Path) -> Iterable[Path]:
             yield Path(root) / filename
 
 
+def upload_stage_for_path(path: Path, source_path: Path, artifact_type: str) -> int:
+    rel_path = path.relative_to(source_path).as_posix()
+    filename = path.name
+    zarr_metadata_names = {
+        ".zarray",
+        ".zattrs",
+        ".zgroup",
+        "zarr.json",
+    }
+    if artifact_type == "directory" and rel_path == "manifest.json":
+        return 2
+    if artifact_type == "zarr" and rel_path == ".zmetadata":
+        return 2
+    if artifact_type == "zarr" and filename in zarr_metadata_names:
+        return 1
+    return 0
+
+
+def order_upload_files(paths: Iterable[Path], source_path: Path, artifact_type: str) -> Tuple[Path, ...]:
+    return tuple(
+        sorted(
+            paths,
+            key=lambda path: (
+                upload_stage_for_path(path, source_path, artifact_type),
+                path.relative_to(source_path).as_posix(),
+            ),
+        )
+    )
+
+
 def build_boto3_client(region: str, env: Dict[str, str], profile: Optional[str], endpoint_url: Optional[str]):
     import boto3
 
@@ -364,6 +395,7 @@ def upload_with_boto3(
     transfer_max_concurrency: int,
     match_mode: str,
     single_part_threshold_gb: int,
+    artifact_type: str,
 ):
     from boto3.s3.transfer import TransferConfig
 
@@ -378,7 +410,11 @@ def upload_with_boto3(
         use_threads=transfer_max_concurrency > 1,
     )
 
-    local_files = list(iter_local_files(source_path))
+    local_files = order_upload_files(
+        iter_local_files(source_path),
+        source_path=source_path,
+        artifact_type=artifact_type,
+    )
     total_files = len(local_files)
     remote_objects = list_remote_objects_boto3(client, bucket=bucket, key_prefix=key_prefix)
     remote_by_key = {str(obj["Key"]): obj for obj in remote_objects}
@@ -466,26 +502,33 @@ def upload_with_boto3(
         future_to_path[future] = path
         return True
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        path_iter = iter(upload_files)
-        future_to_path = {}
-        for _ in range(max_workers):
-            if not submit_next(executor, path_iter, future_to_path):
-                break
-
-        while future_to_path:
-            done, _ = concurrent.futures.wait(
-                future_to_path,
-                return_when=concurrent.futures.FIRST_COMPLETED,
+    for stage in sorted({upload_stage_for_path(path, source_path, artifact_type) for path in upload_files}):
+        stage_files = [path for path in upload_files if upload_stage_for_path(path, source_path, artifact_type) == stage]
+        logger.write(
+            timestamped_message(
+                f"Uploading stage {stage}: {len(stage_files)} files"
             )
-            for future in done:
-                path = future_to_path.pop(future)
-                _, file_size = future.result()
-                submit_next(executor, path_iter, future_to_path)
-                with progress_lock:
-                    uploaded_files += 1
-                    uploaded_bytes += file_size
-                    maybe_log_progress(time.time())
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            path_iter = iter(stage_files)
+            future_to_path = {}
+            for _ in range(max_workers):
+                if not submit_next(executor, path_iter, future_to_path):
+                    break
+
+            while future_to_path:
+                done, _ = concurrent.futures.wait(
+                    future_to_path,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    path = future_to_path.pop(future)
+                    _, file_size = future.result()
+                    submit_next(executor, path_iter, future_to_path)
+                    with progress_lock:
+                        uploaded_files += 1
+                        uploaded_bytes += file_size
+                        maybe_log_progress(time.time())
 
 
 def delete_extra_remote_objects_boto3(
@@ -633,6 +676,9 @@ def main():
     boto3_single_part_threshold_gb = int(source_cfg.get("boto3_single_part_threshold_gb", 5))
     if boto3_single_part_threshold_gb < 1:
         raise ValueError("source_coop.boto3_single_part_threshold_gb must be at least 1")
+    upload_backend = str(args.upload_backend or source_cfg.get("upload_backend", "auto")).strip().lower()
+    if upload_backend not in {"auto", "aws", "boto3"}:
+        raise ValueError("source_coop.upload_backend must be one of: auto, aws, boto3")
 
     if not source_path.exists():
         raise FileNotFoundError(f"Source path does not exist: {source_path}")
@@ -695,7 +741,11 @@ def main():
             )
         )
 
-        aws_path = resolve_aws_cli(args.aws_executable, env=env, logger=logger)
+        aws_path = None
+        if upload_backend in {"auto", "aws"}:
+            aws_path = resolve_aws_cli(args.aws_executable, env=env, logger=logger)
+            if upload_backend == "aws" and aws_path is None:
+                raise RuntimeError("AWS upload backend was requested, but the AWS CLI is unavailable")
         if aws_path is not None:
             sync_command = [aws_path, "s3", "sync", str(source_path), remote_uri]
             if endpoint_url:
@@ -756,6 +806,7 @@ def main():
                 transfer_max_concurrency=boto3_transfer_max_concurrency,
                 match_mode=boto3_match_mode,
                 single_part_threshold_gb=boto3_single_part_threshold_gb,
+                artifact_type=artifact_type,
             )
             if delete_extra_remote_files:
                 delete_extra_remote_objects_boto3(

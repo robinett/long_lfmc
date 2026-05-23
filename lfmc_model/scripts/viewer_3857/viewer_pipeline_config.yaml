@@ -22,6 +22,32 @@ output:
   spatial_chunk_size: 256
   latlon_row_chunk_size: 256
 
+climatology:
+  enabled: true
+  source_variable: lfmc_ens_mean
+  source_output_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/source_lfmc_climatology_365d.zarr
+  source_state_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/state/source_climatology
+  baseline_start_date: 2001-01-01
+  baseline_end_date: 2024-12-31
+  calendar_day_count: 365
+  feb29_policy: map_to_feb28
+  window_offsets: [-10, 10]
+  source_time_block_size: 128
+  source_work_block_size: 256
+  source_spatial_chunk_size: 128
+  source_climatology_day_chunk_size: 365
+  viewer_state_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/state/viewer_climatology
+  viewer_work_block_size: 256
+  viewer_max_concurrent_tasks: 32
+  viewer_tile_variable: lfmc_climatology_mean_tile
+  viewer_tile_chunks: [1, 256, 256]
+  viewer_point_variable: lfmc_climatology_mean_point
+  viewer_point_chunks: [365, 16, 16]
+  max_concurrent_tasks: 64
+  anomaly_tile_plan_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/state/anomaly_tile_plan.json
+  anomaly_tile_block_days: 90
+  anomaly_tile_max_concurrent_tasks: 16
+
 batching:
   init_block_days: 180
   append_block_days: 180
@@ -56,3 +82,19 @@ layers:
       - [109, 142, 96]
       - [37, 59, 54]
     stops: [0.0, 0.18, 0.40, 0.68, 1.0]
+  anomaly:
+    variable: lfmc_anomaly
+    derived: lfmc_anomaly
+    source_variable: lfmc_ens_mean
+    climatology_variable: lfmc_climatology_mean_tile
+    label: LFMC anomaly
+    unit: percent
+    min: -40.0
+    max: 40.0
+    palette:
+      - [132, 57, 43]
+      - [230, 178, 122]
+      - [247, 247, 241]
+      - [181, 209, 224]
+      - [65, 84, 139]
+    stops: [0.0, 0.25, 0.5, 0.75, 1.0]

@@ -7,6 +7,7 @@ source_coop:
   verify_after_upload: true
   delete_extra_remote_files: false
   acl: none
+  upload_backend: boto3
   boto3_max_workers: 16
   boto3_transfer_max_concurrency: 1
   boto3_match_mode: size
@@ -28,8 +29,18 @@ datasets:
     artifact_type: zarr
     source_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857.zarr
     destination_relpath: viewer_3857/lfmc_maps_3857.zarr
+    required_variables:
+      - lfmc_ens_mean
+      - lfmc_ens_std
+      - quality_flag
+      - dominant_landcover_code
+      - lfmc_climatology_mean_tile
+      - lfmc_climatology_mean_point
   viewer_3857_assets:
     description: Remote tile and manifest assets for the EPSG:3857 long LFMC web viewer.
     artifact_type: directory
     source_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_assets/web_mercator_3857
     destination_relpath: viewer_3857/assets/web_mercator_3857
+    required_layers:
+      - mean
+      - anomaly

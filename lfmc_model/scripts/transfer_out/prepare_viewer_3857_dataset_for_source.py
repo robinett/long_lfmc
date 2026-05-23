@@ -10,6 +10,7 @@ import zarr
 
 here = Path(__file__).resolve().parent
 viewer_dataset_config_path = here.parent / "viewer_3857" / "viewer_dataset_config.yaml"
+transfer_config_path = here / "source_coop_transfer_configs.yaml"
 
 
 def timestamped_message(message: str) -> str:
@@ -25,8 +26,15 @@ def load_dataset_config():
         return yaml.safe_load(f)
 
 
+def load_transfer_config():
+    with transfer_config_path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
 def main() -> None:
     cfg = load_dataset_config()
+    transfer_cfg = load_transfer_config()
+    viewer_dataset_cfg = transfer_cfg["datasets"]["viewer_3857_lfmc_maps"]
     viewer_dataset_path = Path(str(cfg["output"]["viewer_dataset_path"])).expanduser().resolve()
     if not viewer_dataset_path.exists():
         raise FileNotFoundError(
@@ -58,12 +66,33 @@ def main() -> None:
             str(cfg["dataset"]["quality_variable"]),
             str(cfg["dataset"]["landcover_variable"]),
         ]
+        expected_variables.extend(str(name) for name in viewer_dataset_cfg.get("required_variables", []))
+        expected_variables = sorted(set(expected_variables))
         missing_variables = [name for name in expected_variables if name not in ds.data_vars]
         if missing_variables:
             raise ValueError(
                 "Viewer dataset is missing expected variables after rebuild: "
                 f"{missing_variables}"
             )
+        for variable_name in ["lfmc_climatology_mean_tile", "lfmc_climatology_mean_point"]:
+            if variable_name not in ds.data_vars:
+                continue
+            climatology_dims = [
+                dim_name
+                for dim_name in ds[variable_name].dims
+                if dim_name in {"climatology_day", "dayofyear"}
+            ]
+            if not climatology_dims:
+                raise ValueError(
+                    f"Expected {variable_name} to include a climatology day dimension, "
+                    f"found dims={ds[variable_name].dims}"
+                )
+            climatology_size = int(ds.sizes[climatology_dims[0]])
+            if climatology_size != 365:
+                raise ValueError(
+                    f"Expected {variable_name} to have 365 climatology days, "
+                    f"found {climatology_size}"
+                )
         log(
             "Verified consolidated viewer dataset "
             f"with dims {dict(ds.sizes)} and variables {list(ds.data_vars)}"
