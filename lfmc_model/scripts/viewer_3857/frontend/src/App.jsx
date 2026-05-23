@@ -258,6 +258,7 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
       ...tick,
       y: padding.top + tick.fraction * innerHeight,
     })),
+    zeroLineY: isAnomalyMode ? yCoord(0) : null,
     xTicks,
     mode,
     axisLabel: isAnomalyMode ? "LFMC anomaly (%)" : "LFMC (%)",
@@ -319,6 +320,15 @@ function TimeseriesChart({ pointInfo, mode, onModeChange }) {
         {geometry.areaPaths.map((areaPath, idx) => (
           <path key={`band-${idx}`} d={areaPath} className="chart-band" />
         ))}
+        {geometry.zeroLineY !== null ? (
+          <line
+            x1={geometry.axisLeft}
+            x2={geometry.axisRight}
+            y1={geometry.zeroLineY}
+            y2={geometry.zeroLineY}
+            className="chart-zero-line"
+          />
+        ) : null}
         <path d={geometry.linePath} className={`chart-line chart-line-${geometry.mode}`} />
         {geometry.yTicks.map((tick) => (
           <g key={`y-${tick.label}`}>
