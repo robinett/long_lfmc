@@ -36,6 +36,18 @@ datasets:
       - dominant_landcover_code
       - lfmc_climatology_mean_tile
       - lfmc_climatology_mean_point
+  viewer_3857_lfmc_maps_t32:
+    description: Rechunked EPSG:3857 viewer Zarr with 32-day time chunks.
+    artifact_type: zarr
+    source_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857_rechunk_t32.zarr
+    destination_relpath: viewer_3857/lfmc_maps_3857_t32.zarr
+    required_variables:
+      - lfmc_ens_mean
+      - lfmc_ens_std
+      - quality_flag
+      - dominant_landcover_code
+      - lfmc_climatology_mean_tile
+      - lfmc_climatology_mean_point
   viewer_3857_assets:
     description: Remote tile and manifest assets for the EPSG:3857 long LFMC web viewer.
     artifact_type: directory

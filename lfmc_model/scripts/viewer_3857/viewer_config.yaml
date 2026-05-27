@@ -7,7 +7,7 @@ data:
   data_source: source
   consolidated: true
   local_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857.zarr
-  source_store: s3://rseg/long-lfmc-test/viewer_3857/lfmc_maps_3857.zarr
+  source_store: s3://rseg/long-lfmc-test/viewer_3857/lfmc_maps_3857_t32.zarr
   source_endpoint_url: https://data.source.coop
   grid_crs: EPSG:3857
   display_variable: lfmc_ens_mean

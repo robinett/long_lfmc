@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 import yaml
 
@@ -59,6 +59,29 @@ def get_args():
     parser.add_argument("--profile", type=str, default=None)
     parser.add_argument("--aws_executable", type=str, default="aws")
     parser.add_argument("--upload_backend", choices=["auto", "aws", "boto3"], default=None)
+    parser.add_argument(
+        "--transfer_mode",
+        "--transfer-mode",
+        choices=["sync", "fresh-prefix", "manifest"],
+        default="sync",
+        help=(
+            "sync compares local files to remote objects before upload; "
+            "fresh-prefix uploads every local file without remote listing; "
+            "manifest uploads only relative paths listed in --manifest_path."
+        ),
+    )
+    parser.add_argument("--manifest_path", "--manifest-path", type=str, default=None)
+    parser.add_argument(
+        "--verify_mode",
+        "--verify-mode",
+        choices=["auto", "full", "sample", "metadata", "none"],
+        default="auto",
+        help=(
+            "Verification strategy after upload. auto uses full for sync and sample "
+            "for fresh-prefix/manifest."
+        ),
+    )
+    parser.add_argument("--sample_verify_count", "--sample-verify-count", type=int, default=64)
     parser.add_argument("--delete_extra_remote_files", action="store_true")
     parser.add_argument(
         "--no-delete_extra_remote_files",
@@ -297,6 +320,75 @@ def order_upload_files(paths: Iterable[Path], source_path: Path, artifact_type: 
     )
 
 
+def build_upload_plan(
+    paths: Iterable[Path],
+    source_path: Path,
+    artifact_type: str,
+    logger: Optional[TeeLogger] = None,
+) -> Tuple[Tuple[Path, ...], int]:
+    started = time.time()
+    last_log_time = started
+    ordered_paths = []
+    total_bytes = 0
+    for path in paths:
+        ordered_paths.append(path)
+        total_bytes += path.stat().st_size
+        now = time.time()
+        if logger is not None and (
+            len(ordered_paths) == 1
+            or len(ordered_paths) % 100000 == 0
+            or now - last_log_time >= 30
+        ):
+            elapsed = now - started
+            rate = len(ordered_paths) / elapsed if elapsed > 0 else 0.0
+            logger.write(
+                timestamped_message(
+                    "Upload plan progress: "
+                    f"{len(ordered_paths)} files, {human_bytes(total_bytes)}, "
+                    f"{rate:.0f} files/s"
+                )
+            )
+            last_log_time = now
+
+    return order_upload_files(ordered_paths, source_path, artifact_type), total_bytes
+
+
+def load_manifest_files(manifest_path: Path, source_path: Path) -> Tuple[Path, ...]:
+    paths = []
+    with manifest_path.open("r", encoding="utf-8") as f:
+        for line_number, raw_line in enumerate(f, start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            rel_path = Path(line)
+            if rel_path.is_absolute() or ".." in rel_path.parts:
+                raise ValueError(
+                    f"Manifest path must be relative and stay inside the source tree: "
+                    f"{manifest_path}:{line_number}: {line!r}"
+                )
+            full_path = source_path / rel_path
+            if not full_path.exists():
+                raise FileNotFoundError(
+                    f"Manifest path does not exist: {manifest_path}:{line_number}: {line!r}"
+                )
+            if not full_path.is_file():
+                raise ValueError(
+                    f"Manifest path is not a file: {manifest_path}:{line_number}: {line!r}"
+                )
+            paths.append(full_path)
+    return tuple(paths)
+
+
+def resolve_verify_mode(verify_mode: str, transfer_mode: str, skip_verify: bool, default_enabled: bool) -> str:
+    if skip_verify or not default_enabled:
+        return "none"
+    if verify_mode != "auto":
+        return verify_mode
+    if transfer_mode == "sync":
+        return "full"
+    return "sample"
+
+
 def build_boto3_client(region: str, env: Dict[str, str], profile: Optional[str], endpoint_url: Optional[str]):
     import boto3
 
@@ -385,6 +477,7 @@ def upload_extra_args(path: Path, acl: str) -> Dict[str, object]:
 def upload_with_boto3(
     client,
     source_path: Path,
+    local_files: Sequence[Path],
     bucket: str,
     key_prefix: str,
     acl: str,
@@ -396,6 +489,7 @@ def upload_with_boto3(
     match_mode: str,
     single_part_threshold_gb: int,
     artifact_type: str,
+    transfer_mode: str,
 ):
     from boto3.s3.transfer import TransferConfig
 
@@ -410,33 +504,36 @@ def upload_with_boto3(
         use_threads=transfer_max_concurrency > 1,
     )
 
-    local_files = order_upload_files(
-        iter_local_files(source_path),
-        source_path=source_path,
-        artifact_type=artifact_type,
-    )
     total_files = len(local_files)
-    remote_objects = list_remote_objects_boto3(client, bucket=bucket, key_prefix=key_prefix)
-    remote_by_key = {str(obj["Key"]): obj for obj in remote_objects}
     upload_files = []
     upload_bytes = 0
     skipped_files = 0
     skipped_bytes = 0
-    for path in local_files:
-        rel_path = path.relative_to(source_path).as_posix()
-        key = f"{key_prefix}/{rel_path}"
-        file_size = path.stat().st_size
-        remote_obj = remote_by_key.get(key)
-        if remote_obj is not None and remote_object_matches_local(client, bucket, path, remote_obj, match_mode):
-            skipped_files += 1
-            skipped_bytes += file_size
-        else:
-            upload_files.append(path)
-            upload_bytes += file_size
+    if transfer_mode == "sync":
+        logger.write(timestamped_message("Listing remote objects for sync comparison"))
+        remote_objects = list_remote_objects_boto3(client, bucket=bucket, key_prefix=key_prefix)
+        remote_by_key = {str(obj["Key"]): obj for obj in remote_objects}
+        for path in local_files:
+            rel_path = path.relative_to(source_path).as_posix()
+            key = f"{key_prefix}/{rel_path}"
+            file_size = path.stat().st_size
+            remote_obj = remote_by_key.get(key)
+            if remote_obj is not None and remote_object_matches_local(client, bucket, path, remote_obj, match_mode):
+                skipped_files += 1
+                skipped_bytes += file_size
+            else:
+                upload_files.append(path)
+                upload_bytes += file_size
+    elif transfer_mode in {"fresh-prefix", "manifest"}:
+        upload_files = list(local_files)
+        upload_bytes = total_bytes
+    else:
+        raise ValueError(f"Unsupported transfer_mode: {transfer_mode}")
 
     logger.write(
         timestamped_message(
-            f"Uploading with boto3: {len(upload_files)}/{total_files} files need transfer, "
+            f"Uploading with boto3 ({transfer_mode}): "
+            f"{len(upload_files)}/{total_files} files need transfer, "
             f"{human_bytes(upload_bytes)}/{human_bytes(total_bytes)} need transfer, "
             f"skipping {skipped_files} existing matching files ({human_bytes(skipped_bytes)}), "
             f"max_workers={max_workers}, transfer_max_concurrency={transfer_max_concurrency}, "
@@ -575,6 +672,91 @@ def verify_with_boto3(client, bucket: str, key_prefix: str, logger: TeeLogger, d
     return remote_file_count, remote_total_bytes
 
 
+def metadata_verify_files(local_files: Sequence[Path], source_path: Path, artifact_type: str) -> Tuple[Path, ...]:
+    if artifact_type == "zarr":
+        preferred_names = {".zmetadata", ".zgroup", "zarr.json"}
+    else:
+        preferred_names = {"manifest.json"}
+    metadata_files = [
+        path for path in local_files
+        if path.relative_to(source_path).as_posix() in preferred_names
+    ]
+    if metadata_files:
+        return tuple(metadata_files)
+    return tuple(
+        path for path in local_files
+        if upload_stage_for_path(path, source_path, artifact_type) > 0
+    )
+
+
+def sample_verify_files(
+    local_files: Sequence[Path],
+    source_path: Path,
+    artifact_type: str,
+    sample_count: int,
+) -> Tuple[Path, ...]:
+    if sample_count < 1:
+        raise ValueError("--sample_verify_count must be at least 1")
+    selected = []
+    seen = set()
+
+    def add(path: Path) -> None:
+        rel_path = path.relative_to(source_path).as_posix()
+        if rel_path not in seen:
+            seen.add(rel_path)
+            selected.append(path)
+
+    for path in metadata_verify_files(local_files, source_path, artifact_type):
+        add(path)
+    if not local_files:
+        return tuple(selected)
+
+    remaining_slots = max(0, sample_count - len(selected))
+    if remaining_slots <= 0:
+        return tuple(selected[:sample_count])
+
+    if len(local_files) <= remaining_slots:
+        for path in local_files:
+            add(path)
+        return tuple(selected)
+
+    denominator = max(1, remaining_slots - 1)
+    for index in range(remaining_slots):
+        sample_index = round(index * (len(local_files) - 1) / denominator)
+        add(local_files[sample_index])
+    return tuple(selected)
+
+
+def verify_selected_files_boto3(
+    client,
+    bucket: str,
+    key_prefix: str,
+    source_path: Path,
+    files: Sequence[Path],
+    logger: TeeLogger,
+    dry_run: bool,
+) -> None:
+    if dry_run:
+        logger.write(timestamped_message("Dry run enabled. Selected-file verification was not executed."))
+        return
+    if not files:
+        raise RuntimeError("No files were available for selected-file verification")
+
+    logger.write(timestamped_message(f"Verifying {len(files)} selected remote objects with HEAD requests"))
+    for path in files:
+        rel_path = path.relative_to(source_path).as_posix()
+        key = f"{key_prefix}/{rel_path}"
+        local_size = path.stat().st_size
+        head = client.head_object(Bucket=bucket, Key=key)
+        remote_size = int(head["ContentLength"])
+        if remote_size != local_size:
+            raise RuntimeError(
+                "Selected verification failed: "
+                f"s3://{bucket}/{key} has {remote_size} bytes, expected {local_size}"
+            )
+    logger.write(timestamped_message("Selected-file verification completed"))
+
+
 def stream_command(command, env: Dict[str, str], logger: TeeLogger, dry_run: bool) -> int:
     logger.write(timestamped_message(f"Running command: {' '.join(command)}"))
     if dry_run:
@@ -659,11 +841,21 @@ def main():
         )
     ).expanduser()
     acl = str(args.acl or source_cfg.get("acl", "none"))
-    verify_after_upload = not args.skip_verify and bool(source_cfg.get("verify_after_upload", True))
+    transfer_mode = args.transfer_mode
+    verify_mode = resolve_verify_mode(
+        verify_mode=args.verify_mode,
+        transfer_mode=transfer_mode,
+        skip_verify=args.skip_verify,
+        default_enabled=bool(source_cfg.get("verify_after_upload", True)),
+    )
     delete_extra_remote_files = resolve_bool(
         args.delete_extra_remote_files,
         bool(source_cfg.get("delete_extra_remote_files", False)),
     )
+    if transfer_mode != "sync" and delete_extra_remote_files:
+        raise ValueError("--delete_extra_remote_files is only supported with --transfer_mode sync")
+    if transfer_mode == "manifest" and not args.manifest_path:
+        raise ValueError("--manifest_path is required with --transfer_mode manifest")
     boto3_max_workers = int(source_cfg.get("boto3_max_workers", 16))
     if boto3_max_workers < 1:
         raise ValueError("source_coop.boto3_max_workers must be at least 1")
@@ -679,6 +871,14 @@ def main():
     upload_backend = str(args.upload_backend or source_cfg.get("upload_backend", "auto")).strip().lower()
     if upload_backend not in {"auto", "aws", "boto3"}:
         raise ValueError("source_coop.upload_backend must be one of: auto, aws, boto3")
+    if transfer_mode != "sync" and upload_backend == "aws":
+        raise ValueError("--transfer_mode fresh-prefix/manifest requires --upload_backend boto3 or auto")
+    if transfer_mode != "sync" and upload_backend == "auto":
+        upload_backend = "boto3"
+    if upload_backend == "aws" and verify_mode in {"metadata", "sample"}:
+        raise ValueError("--verify_mode metadata/sample requires the boto3 upload backend")
+    if args.sample_verify_count < 1:
+        raise ValueError("--sample_verify_count must be at least 1")
 
     if not source_path.exists():
         raise FileNotFoundError(f"Source path does not exist: {source_path}")
@@ -698,8 +898,8 @@ def main():
             "expected 'zarr' or 'directory'"
         )
 
-    log_dir = Path(__file__).resolve().parent / "logs"
-    log_name = f"source_coop_upload_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_dir = Path(__file__).resolve().parents[3] / "logs" / "source_transfer"
+    log_name = f"source_coop_upload_{dt.datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{os.getpid()}.log"
     logger = TeeLogger(log_dir / log_name)
 
     try:
@@ -708,10 +908,27 @@ def main():
         logger.write(timestamped_message(f"Artifact type: {artifact_type}"))
         logger.write(timestamped_message(f"Source path: {source_path}"))
 
-        local_file_count, local_total_bytes = local_inventory(source_path, logger=logger)
+        if transfer_mode == "manifest":
+            manifest_path = Path(require_config_value(args.manifest_path, "manifest_path")).expanduser()
+            manifest_files = load_manifest_files(manifest_path, source_path)
+            logger.write(timestamped_message(f"Manifest path: {manifest_path}"))
+            local_files, local_total_bytes = build_upload_plan(
+                manifest_files,
+                source_path=source_path,
+                artifact_type=artifact_type,
+                logger=logger,
+            )
+        else:
+            local_files, local_total_bytes = build_upload_plan(
+                iter_local_files(source_path),
+                source_path=source_path,
+                artifact_type=artifact_type,
+                logger=logger,
+            )
+        local_file_count = len(local_files)
         logger.write(
             timestamped_message(
-                f"Local inventory: {local_file_count} files, {human_bytes(local_total_bytes)}"
+                f"Local upload plan: {local_file_count} files, {human_bytes(local_total_bytes)}"
             )
         )
 
@@ -720,6 +937,8 @@ def main():
         logger.write(timestamped_message(f"AWS region: {region}"))
         if endpoint_url:
             logger.write(timestamped_message(f"S3 endpoint URL: {endpoint_url}"))
+        logger.write(timestamped_message(f"Transfer mode: {transfer_mode}"))
+        logger.write(timestamped_message(f"Verify mode: {verify_mode}"))
         logger.write(
             timestamped_message(
                 "Remote delete behavior: "
@@ -761,7 +980,7 @@ def main():
             if sync_returncode != 0:
                 raise RuntimeError(f"Upload failed with exit code {sync_returncode}")
 
-            if verify_after_upload:
+            if verify_mode == "full":
                 verify_command = [
                     aws_path,
                     "s3",
@@ -796,6 +1015,7 @@ def main():
             upload_with_boto3(
                 client=client,
                 source_path=source_path,
+                local_files=local_files,
                 bucket=bucket,
                 key_prefix=key_prefix,
                 acl=acl,
@@ -807,6 +1027,7 @@ def main():
                 match_mode=boto3_match_mode,
                 single_part_threshold_gb=boto3_single_part_threshold_gb,
                 artifact_type=artifact_type,
+                transfer_mode=transfer_mode,
             )
             if delete_extra_remote_files:
                 delete_extra_remote_objects_boto3(
@@ -817,7 +1038,7 @@ def main():
                     logger=logger,
                     dry_run=args.dry_run,
                 )
-            if verify_after_upload:
+            if verify_mode == "full":
                 remote_file_count, remote_total_bytes = verify_with_boto3(
                     client=client,
                     bucket=bucket,
@@ -825,6 +1046,33 @@ def main():
                     logger=logger,
                     dry_run=args.dry_run,
                 )
+            elif verify_mode == "metadata":
+                verify_selected_files_boto3(
+                    client=client,
+                    bucket=bucket,
+                    key_prefix=key_prefix,
+                    source_path=source_path,
+                    files=metadata_verify_files(local_files, source_path, artifact_type),
+                    logger=logger,
+                    dry_run=args.dry_run,
+                )
+                remote_file_count, remote_total_bytes = None, None
+            elif verify_mode == "sample":
+                verify_selected_files_boto3(
+                    client=client,
+                    bucket=bucket,
+                    key_prefix=key_prefix,
+                    source_path=source_path,
+                    files=sample_verify_files(
+                        local_files,
+                        source_path,
+                        artifact_type,
+                        sample_count=args.sample_verify_count,
+                    ),
+                    logger=logger,
+                    dry_run=args.dry_run,
+                )
+                remote_file_count, remote_total_bytes = None, None
             else:
                 remote_file_count, remote_total_bytes = None, None
 
