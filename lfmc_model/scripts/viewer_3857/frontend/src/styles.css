@@ -362,7 +362,16 @@ body {
 }
 
 .download-date-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
   margin-top: 10px;
+}
+
+.download-date-grid .location-input {
+  min-width: 0;
+  padding-right: 8px;
+  font-size: 0.86rem;
 }
 
 .download-site-header {

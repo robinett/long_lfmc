@@ -611,6 +611,12 @@ function createDownloadSite(startDate = "", endDate = "") {
   };
 }
 
+function defaultDownloadEndDate(dates, startDate) {
+  return startDate
+    ? minDateString(dates[dates.length - 1], maxDownloadEndDate(startDate))
+    : dates[dates.length - 1] ?? "";
+}
+
 function App() {
   const lfmcDisplayOpacity = 0.75;
   const mapContainerRef = useRef(null);
@@ -1054,7 +1060,9 @@ function App() {
             currentSites.map((site) => ({
               ...site,
               startDate: site.startDate || runtimeManifest.dates[0] || "",
-              endDate: site.endDate || runtimeManifest.dates[runtimeManifest.dates.length - 1] || "",
+              endDate:
+                site.endDate ||
+                defaultDownloadEndDate(runtimeManifest.dates, site.startDate || runtimeManifest.dates[0] || ""),
             })),
           );
           setStatusText(`Loaded ${runtimeManifest.dataset_label}`);
@@ -1419,7 +1427,7 @@ function App() {
         ...currentSites,
         createDownloadSite(
           activeSite.startDate || dates[0] || "",
-          activeSite.endDate || dates[dates.length - 1] || "",
+          activeSite.endDate || defaultDownloadEndDate(dates, activeSite.startDate || dates[0] || ""),
         ),
       ];
     });
@@ -1451,7 +1459,7 @@ function App() {
     setDownloadSites((currentSites) => {
       const nextSites =
         currentSites.length === 1
-          ? [createDownloadSite(dates[0] ?? "", dates[dates.length - 1] ?? "")]
+          ? [createDownloadSite(dates[0] ?? "", defaultDownloadEndDate(dates, dates[0] ?? ""))]
           : currentSites.filter((_, siteIndex) => siteIndex !== index);
       setActiveDownloadSiteIndex((currentValue) => {
         if (nextSites.length === 1) {
@@ -1577,12 +1585,12 @@ function App() {
           <div className="panel-label">Information about this product</div>
           <p>
             Welcome to the viewer for Live Fuel Moisture Content (LFMC) products produced by Stanford's Remote
-            Sensing Ecohydrology Group. Use this site to explore the data products. LFMC is defined as the mass
-            of water in vegetation normalized by its dry biomass, representing how "wet" or "dry" vegetation is
-            in a given location. It is a crucial indicator for wildland fire risk. This viewer allows you to
-            explore both absolute values of LFMC as well as LFMC anomalies, which show how wet or dry vegetation
-            is relative to the average value for that calendar year across 2001 to 2024. For more information
-            about the data products displayed here, as well as instructions for downloading data, please view{" "}
+            Sensing Ecohydrology Group. LFMC is defined as the mass of water in vegetation normalized by its dry
+            biomass, representing how "wet" or "dry" vegetation is in a given location. It is a crucial indicator
+            for wildland fire risk. This viewer allows you to explore both absolute values of LFMC as well as LFMC
+            anomalies, which show how wet or dry vegetation is relative to the average value for that calendar
+            year. For more information about the data products displayed here, as well as instructions for
+            downloading data, please view{" "}
             <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
               this document
             </a>
@@ -1749,7 +1757,7 @@ function App() {
                   />
                 </label>
               </div>
-              <div className="location-grid download-date-grid">
+              <div className="download-date-grid">
                 <label className="location-field">
                   <span className="stats-key">Start Date</span>
                   <input
@@ -1757,7 +1765,7 @@ function App() {
                     type="date"
                     value={site.startDate}
                     min={dates[0] ?? undefined}
-                    max={dates[dates.length - 1] ?? undefined}
+                    max={site.endDate || dates[dates.length - 1] || undefined}
                     onChange={(event) => handleUpdateDownloadSite(index, "startDate", event.target.value)}
                     onFocus={() => setActiveDownloadSiteIndex(index)}
                   />
@@ -1771,7 +1779,7 @@ function App() {
                     min={site.startDate || dates[0] || undefined}
                     max={
                       site.startDate
-                        ? minDateString(dates[dates.length - 1], maxDownloadEndDate(site.startDate))
+                        ? defaultDownloadEndDate(dates, site.startDate)
                         : dates[dates.length - 1] ?? undefined
                     }
                     onChange={(event) => handleUpdateDownloadSite(index, "endDate", event.target.value)}
