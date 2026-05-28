@@ -71,6 +71,48 @@ function layerUnitLabel(layerConfig) {
   return layerConfig?.unit === "percent" ? "%" : (layerConfig?.unit ?? "");
 }
 
+function buildLegendTicks(layerConfig, layerKey) {
+  if (!layerConfig) {
+    return [];
+  }
+
+  const minValue = Number(layerConfig.min);
+  const maxValue = Number(layerConfig.max);
+  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue) || maxValue <= minValue) {
+    return [];
+  }
+
+  const unitLabel = layerUnitLabel(layerConfig);
+  const rawStops = layerConfig.stops?.length ? layerConfig.stops : [0, 0.25, 0.5, 0.75, 1];
+  const seenPositions = new Set();
+
+  return rawStops
+    .map((stop) => Math.min(Math.max(Number(stop), 0), 1))
+    .filter((stop) => Number.isFinite(stop))
+    .filter((stop) => {
+      const positionKey = stop.toFixed(4);
+      if (seenPositions.has(positionKey)) {
+        return false;
+      }
+      seenPositions.add(positionKey);
+      return true;
+    })
+    .map((stop) => {
+      const value = minValue + stop * (maxValue - minValue);
+      let label = `${formatValue(value, 0)}${unitLabel}`;
+      if (isAnomalyLayer(layerKey) && stop === 0) {
+        label = `Dry ${label}`;
+      } else if (isAnomalyLayer(layerKey) && stop === 1) {
+        label = `${label} Wet`;
+      }
+
+      return {
+        label,
+        position: stop * 100,
+      };
+    });
+}
+
 function niceTickStep(span, targetTickCount) {
   const roughStep = span / Math.max(targetTickCount - 1, 1);
   const magnitude = 10 ** Math.floor(Math.log10(Math.max(roughStep, 1e-6)));
@@ -1481,18 +1523,17 @@ function App() {
             className="legend-bar"
             style={{ background: activeLayer ? legendGradient(activeLayer) : undefined }}
           />
-          <div className={`slider-extents ${isAnomalyLayer(activeLayerKey) ? "legend-extents-three" : ""}`}>
-            <span>
-              {isAnomalyLayer(activeLayerKey) ? "Dry " : ""}
-              {formatValue(activeLayer?.min, 0)}
-              {layerUnitLabel(activeLayer)}
-            </span>
-            {isAnomalyLayer(activeLayerKey) ? <span>0{layerUnitLabel(activeLayer)}</span> : null}
-            <span>
-              {formatValue(activeLayer?.max, 0)}
-              {layerUnitLabel(activeLayer)}
-              {isAnomalyLayer(activeLayerKey) ? " Wet" : ""}
-            </span>
+          <div className="legend-axis">
+            {buildLegendTicks(activeLayer, activeLayerKey).map((tick) => (
+              <div
+                key={`${tick.position}-${tick.label}`}
+                className="legend-tick"
+                style={{ left: `${tick.position}%` }}
+              >
+                <span className="legend-tick-mark" />
+                <span className="legend-tick-label">{tick.label}</span>
+              </div>
+            ))}
           </div>
         </section>
 
