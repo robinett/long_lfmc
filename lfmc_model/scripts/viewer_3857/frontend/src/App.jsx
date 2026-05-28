@@ -617,6 +617,35 @@ function defaultDownloadEndDate(dates, startDate) {
     : dates[dates.length - 1] ?? "";
 }
 
+function clampDateString(value, minValue, maxValue) {
+  if (!value) {
+    return value;
+  }
+  let nextValue = value;
+  if (minValue && nextValue < minValue) {
+    nextValue = minValue;
+  }
+  if (maxValue && nextValue > maxValue) {
+    nextValue = maxValue;
+  }
+  return nextValue;
+}
+
+function clampDownloadSiteDates(site, dates) {
+  const datasetStart = dates[0] ?? "";
+  const datasetEnd = dates[dates.length - 1] ?? "";
+  const nextSite = { ...site };
+
+  nextSite.startDate = clampDateString(nextSite.startDate, datasetStart, datasetEnd);
+  if (nextSite.startDate && nextSite.endDate && nextSite.startDate > nextSite.endDate) {
+    nextSite.endDate = nextSite.startDate;
+  }
+
+  const endMax = defaultDownloadEndDate(dates, nextSite.startDate);
+  nextSite.endDate = clampDateString(nextSite.endDate, nextSite.startDate || datasetStart, endMax);
+  return nextSite;
+}
+
 function App() {
   const lfmcDisplayOpacity = 0.75;
   const mapContainerRef = useRef(null);
@@ -1444,11 +1473,8 @@ function App() {
           ...site,
           [field]: value,
         };
-        if (field === "startDate" && nextSite.endDate) {
-          const maxEnd = minDateString(dates[dates.length - 1] ?? "", maxDownloadEndDate(value) ?? "");
-          if (maxEnd && nextSite.endDate > maxEnd) {
-            nextSite.endDate = maxEnd;
-          }
+        if (field === "startDate" || field === "endDate") {
+          return clampDownloadSiteDates(nextSite, dates);
         }
         return nextSite;
       }),
@@ -1709,6 +1735,14 @@ function App() {
 
         <section className="panel-card">
           <div className="panel-label">Download LFMC data</div>
+          <p className="panel-note download-note">
+            This tool allows you to download LFMC data for up to 10 sites and up to three years at each site. For
+            larger downloads, please see{" "}
+            <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
+              this information document
+            </a>
+            .
+          </p>
           {downloadSites.map((site, index) => (
             <div
               className={`download-site-block ${index === activeDownloadSiteIndex ? "download-site-block-active" : ""}`}
