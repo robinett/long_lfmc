@@ -11,9 +11,6 @@ import yaml
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-INFERENCE_SCRIPT_DIR = SCRIPT_DIR.parents[1] / "lfmc_model/scripts/inference"
-if str(INFERENCE_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(INFERENCE_SCRIPT_DIR))
 
 from get_modis import (
     DEFAULT_GRID_PATH,
@@ -29,16 +26,17 @@ from update_modis_month import (
     build_staging_zarr,
     candidate_regrid_paths,
     canonical_time_bounds,
-    ensure_daily_mosaics,
-    ensure_regridded_files,
+    ensure_daily_mosaics_for_dates,
+    ensure_regridded_files_for_dates,
     ensure_raw_downloads,
     modis_bounding_box,
+    mosaic_dates_needing_build,
     prune_source_artifacts,
     promote_staging_window,
+    regrid_dates_needing_build,
     run_cmd,
     validate_regridded_grid,
 )
-from low_latency_rollback import capture_zarr_rollback_from_env
 
 
 def parse_args():
@@ -261,16 +259,35 @@ def main():
             f"{source_context_start.date()} -> {source_context_end.date()}; "
             f"missing_count={len(missing_raw)} sample_missing={missing_raw[:10]}"
         )
-    ensure_daily_mosaics(
+    total_source_days = len(range_dates(source_context_start, source_context_end))
+    regrid_missing_or_invalid_dates = regrid_dates_needing_build(
+        args.regrid_root,
         source_context_start,
         source_context_end,
+    )
+    mosaic_build_dates = []
+    for ts in regrid_missing_or_invalid_dates:
+        if mosaic_dates_needing_build(args.mosaic_root, ts, ts):
+            mosaic_build_dates.append(ts)
+    print(
+        "Regridded MODIS reuse check: "
+        f"{total_source_days - len(regrid_missing_or_invalid_dates)}/{total_source_days} "
+        "source-context dates already have valid regrids"
+    )
+    print(
+        "Native MODIS mosaic dependency check: "
+        f"{len(mosaic_build_dates)}/{len(regrid_missing_or_invalid_dates)} "
+        "dates needing regrid also need a mosaic built first"
+    )
+    ensure_daily_mosaics_for_dates(
+        mosaic_build_dates,
         args.raw_root,
         args.mosaic_root,
         args.quality_flag,
     )
-    ensure_regridded_files(
-        source_context_start,
-        source_context_end,
+
+    ensure_regridded_files_for_dates(
+        regrid_missing_or_invalid_dates,
         args.grid_path,
         args.mosaic_root,
         args.regrid_root,
@@ -280,14 +297,6 @@ def main():
     validate_regridded_grid(args.regrid_root, args.canonical_zarr, source_context_start, source_context_end)
 
     staging_zarr = build_staging_zarr(args, refresh_start, source_end)
-    capture_zarr_rollback_from_env(
-        target_zarr=args.canonical_zarr,
-        label="modis_canonical",
-        dim_name="time",
-        window_start=refresh_start,
-        window_end=source_end,
-        reason="before_modis_range_promotion",
-    )
     result = promote_staging_window(staging_zarr, args.canonical_zarr, refresh_start, source_end)
     print(f"MODIS range update complete: {result}")
     print(f"  staging_zarr={staging_zarr}")

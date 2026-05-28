@@ -20,13 +20,6 @@ import zarr
 from get_modis import DEFAULT_GRID_PATH, TILES_V, collect_links
 
 REPO_ROOT = Path('/home/users/trobinet/long_lfmc')
-INFERENCE_SCRIPT_DIR = REPO_ROOT / 'lfmc_model/scripts/inference'
-if str(INFERENCE_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(INFERENCE_SCRIPT_DIR))
-
-from low_latency_rollback import capture_zarr_rollback_from_env
-
-
 DEFAULT_REGISTRY_PATH = REPO_ROOT / 'lfmc_model/scripts/inference/source_registry.yaml'
 INTERPOLATION_WORKER_SCRIPT = REPO_ROOT / 'data_processing/interpolate/run_interpolation_worker.sbatch'
 MODIS_SINUSOIDAL_CRS = '+proj=sinu +R=6371007.181 +lon_0=0 +x_0=0 +y_0=0 +units=m +no_defs'
@@ -113,6 +106,97 @@ def daily_regrid_path(regrid_root: Path, dt_value: pd.Timestamp) -> Path:
 
 def candidate_regrid_paths(regrid_root: Path, dt_value: pd.Timestamp) -> list[Path]:
     return [daily_regrid_path(regrid_root, dt_value)]
+
+
+def _date_spans(dates: list[pd.Timestamp]) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    if not dates:
+        return []
+    normalized = sorted(pd.Timestamp(ts).normalize() for ts in dates)
+    spans = []
+    span_start = normalized[0]
+    previous = normalized[0]
+    for ts in normalized[1:]:
+        if ts == previous + pd.Timedelta(days=1):
+            previous = ts
+            continue
+        spans.append((span_start, previous))
+        span_start = ts
+        previous = ts
+    spans.append((span_start, previous))
+    return spans
+
+
+def _span_summary(spans: list[tuple[pd.Timestamp, pd.Timestamp]], max_items: int = 8) -> str:
+    pieces = []
+    for start, end in spans[:max_items]:
+        if start == end:
+            pieces.append(str(start.date()))
+        else:
+            pieces.append(f'{start.date()}->{end.date()}')
+    if len(spans) > max_items:
+        pieces.append(f'...+{len(spans) - max_items} more')
+    return ', '.join(pieces) if pieces else 'none'
+
+
+def _daily_file_is_readable(path: Path, required_vars: list[str] | None = None) -> bool:
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    try:
+        with xr.open_dataset(path, engine='netcdf4') as ds:
+            if 'x' not in ds.coords or 'y' not in ds.coords:
+                return False
+            if int(ds.sizes.get('x', 0)) == 0 or int(ds.sizes.get('y', 0)) == 0:
+                return False
+            if required_vars is not None:
+                return all(name in ds.data_vars for name in required_vars)
+            return bool(ds.data_vars)
+    except Exception as exc:
+        print(f'Existing MODIS daily file is not readable and will be rebuilt: {path} ({exc})')
+        return False
+
+
+def modis_reflectance_vars() -> list[str]:
+    return [
+        'Nadir_Reflectance_Band1',
+        'Nadir_Reflectance_Band2',
+        'Nadir_Reflectance_Band3',
+        'Nadir_Reflectance_Band4',
+        'Nadir_Reflectance_Band5',
+        'Nadir_Reflectance_Band6',
+        'Nadir_Reflectance_Band7',
+    ]
+
+
+def valid_daily_mosaic(path: Path) -> bool:
+    return _daily_file_is_readable(path, modis_reflectance_vars())
+
+
+def valid_daily_regrid(path: Path) -> bool:
+    return _daily_file_is_readable(path, modis_reflectance_vars())
+
+
+def mosaic_dates_needing_build(
+    mosaic_root: Path,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> list[pd.Timestamp]:
+    return [
+        ts
+        for ts in pd.date_range(start_date, end_date, freq='D')
+        if not valid_daily_mosaic(daily_mosaic_path(mosaic_root, ts))
+    ]
+
+
+def regrid_dates_needing_build(
+    regrid_root: Path,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+) -> list[pd.Timestamp]:
+    return [
+        ts
+        for ts in pd.date_range(start_date, end_date, freq='D')
+        if not valid_daily_regrid(daily_regrid_path(regrid_root, ts))
+    ]
 
 
 def _load_time_index_from_zarr(zarr_path: Path) -> pd.DatetimeIndex:
@@ -309,6 +393,29 @@ def ensure_daily_mosaics(
     ])
 
 
+def ensure_daily_mosaics_for_dates(
+    dates: list[pd.Timestamp],
+    raw_root: Path,
+    mosaic_root: Path,
+    quality_flag: int,
+) -> None:
+    spans = _date_spans(dates)
+    total_days = sum((end - start).days + 1 for start, end in spans)
+    if total_days == 0:
+        print('Native MODIS mosaic plan: 0 dates need building')
+        return
+    print(
+        f'Native MODIS mosaic plan: building {total_days} dates across '
+        f'{len(spans)} range(s): {_span_summary(spans)}'
+    )
+    for start_date, end_date in spans:
+        for ts in pd.date_range(start_date, end_date, freq='D'):
+            path = daily_mosaic_path(mosaic_root, ts)
+            if path.exists():
+                path.unlink()
+        ensure_daily_mosaics(start_date, end_date, raw_root, mosaic_root, quality_flag)
+
+
 def ensure_regridded_files(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
@@ -336,6 +443,39 @@ def ensure_regridded_files(
         '--end_date', str(end_date.date()),
         '--skip_existing',
     ])
+
+
+def ensure_regridded_files_for_dates(
+    dates: list[pd.Timestamp],
+    grid_path: Path,
+    mosaic_root: Path,
+    regrid_root: Path,
+    chunk_size: int,
+    chunk_buffer: int,
+) -> None:
+    spans = _date_spans(dates)
+    total_days = sum((end - start).days + 1 for start, end in spans)
+    if total_days == 0:
+        print('Regridded MODIS plan: 0 dates need building')
+        return
+    print(
+        f'Regridded MODIS plan: building {total_days} dates across '
+        f'{len(spans)} range(s): {_span_summary(spans)}'
+    )
+    for start_date, end_date in spans:
+        for ts in pd.date_range(start_date, end_date, freq='D'):
+            path = daily_regrid_path(regrid_root, ts)
+            if path.exists():
+                path.unlink()
+        ensure_regridded_files(
+            start_date,
+            end_date,
+            grid_path,
+            mosaic_root,
+            regrid_root,
+            chunk_size,
+            chunk_buffer,
+        )
 
 
 def validate_regridded_grid(
@@ -491,14 +631,22 @@ def build_staging_zarr(args, refresh_start: pd.Timestamp, month_end: pd.Timestam
         '--diagnostic_map_plot_path', diagnostic_map,
     ]
     if staging_zarr.exists():
-        _ensure_staging_matches_request(
-            staging_zarr,
-            refresh_start,
-            month_end,
-            args.canonical_zarr,
-        )
-        print(f'Resuming existing MODIS interpolation staging zarr: {staging_zarr}')
-    else:
+        try:
+            _ensure_staging_matches_request(
+                staging_zarr,
+                refresh_start,
+                month_end,
+                args.canonical_zarr,
+            )
+            print(f'Resuming existing MODIS interpolation staging zarr: {staging_zarr}')
+        except ValueError as exc:
+            print(
+                'Discarding incompatible MODIS interpolation staging zarr '
+                f'for fresh initialization: {staging_zarr}'
+            )
+            print(f'  reason={exc}')
+            _remove_staging_workspace(staging_zarr)
+    if not staging_zarr.exists():
         run_cmd([
             *base_cmd,
             '--mode', 'init',
@@ -587,6 +735,13 @@ def _chunk_status_dir(staging_zarr: Path) -> Path:
 
 def _legacy_chunk_status_dir(staging_zarr: Path) -> Path:
     return staging_zarr / '_chunk_status'
+
+
+def _remove_staging_workspace(staging_zarr: Path) -> None:
+    for path in (_chunk_status_dir(staging_zarr), staging_zarr):
+        if path.exists():
+            print(f'  removing {path}')
+            shutil.rmtree(path)
 
 
 def _completed_chunk_count(staging_zarr: Path) -> int:
@@ -813,14 +968,6 @@ def main():
 
     print(f'Refreshing canonical MODIS from {refresh_start.date()} through {month_end.date()} to preserve interpolation consistency')
     staging_zarr = build_staging_zarr(args, refresh_start, month_end)
-    capture_zarr_rollback_from_env(
-        target_zarr=args.canonical_zarr,
-        label='modis_canonical',
-        dim_name='time',
-        window_start=refresh_start,
-        window_end=month_end,
-        reason='before_modis_month_promotion',
-    )
     result = promote_staging_window(staging_zarr, args.canonical_zarr, refresh_start, month_end)
     print(f'MODIS monthly update complete for {args.month}: {result}')
     print(f'  staging_zarr={staging_zarr}')
