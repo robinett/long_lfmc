@@ -331,7 +331,7 @@ body {
   border-color: rgba(114, 80, 51, 0.5);
 }
 
-.location-input[type="date"][readonly] {
+.picker-only-date {
   cursor: pointer;
 }
 

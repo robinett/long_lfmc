@@ -653,6 +653,10 @@ function showDatePicker(event) {
   }
 }
 
+function preventManualDateEdit(event) {
+  event.preventDefault();
+}
+
 function App() {
   const lfmcDisplayOpacity = 0.75;
   const mapContainerRef = useRef(null);
@@ -1602,16 +1606,18 @@ function App() {
           <label className="date-input-field">
             <span className="stats-key">Enter Date</span>
             <input
-              className="location-input date-input"
+              className="location-input date-input picker-only-date"
               type="date"
-              readOnly
               value={dates.includes(selectedDate) ? selectedDate : ""}
               min={dates[0] ?? undefined}
               max={dates[dates.length - 1] ?? undefined}
               disabled={!dates.length}
               onClick={showDatePicker}
-              onFocus={showDatePicker}
+              onBeforeInput={preventManualDateEdit}
               onChange={(event) => requestDateValueTransition(event.target.value)}
+              onDrop={preventManualDateEdit}
+              onKeyDown={preventManualDateEdit}
+              onPaste={preventManualDateEdit}
             />
           </label>
         </div>
@@ -1805,26 +1811,27 @@ function App() {
                 <label className="location-field">
                   <span className="stats-key">Start Date</span>
                   <input
-                    className="location-input"
+                    className="location-input picker-only-date"
                     type="date"
-                    readOnly
                     value={site.startDate}
                     min={dates[0] ?? undefined}
                     max={site.endDate || dates[dates.length - 1] || undefined}
                     onClick={showDatePicker}
+                    onBeforeInput={preventManualDateEdit}
                     onChange={(event) => handleUpdateDownloadSite(index, "startDate", event.target.value)}
+                    onDrop={preventManualDateEdit}
                     onFocus={(event) => {
                       setActiveDownloadSiteIndex(index);
-                      showDatePicker(event);
                     }}
+                    onKeyDown={preventManualDateEdit}
+                    onPaste={preventManualDateEdit}
                   />
                 </label>
                 <label className="location-field">
                   <span className="stats-key">End Date</span>
                   <input
-                    className="location-input"
+                    className="location-input picker-only-date"
                     type="date"
-                    readOnly
                     value={site.endDate}
                     min={site.startDate || dates[0] || undefined}
                     max={
@@ -1833,11 +1840,14 @@ function App() {
                         : dates[dates.length - 1] ?? undefined
                     }
                     onClick={showDatePicker}
+                    onBeforeInput={preventManualDateEdit}
                     onChange={(event) => handleUpdateDownloadSite(index, "endDate", event.target.value)}
+                    onDrop={preventManualDateEdit}
                     onFocus={(event) => {
                       setActiveDownloadSiteIndex(index);
-                      showDatePicker(event);
                     }}
+                    onKeyDown={preventManualDateEdit}
+                    onPaste={preventManualDateEdit}
                   />
                 </label>
               </div>
