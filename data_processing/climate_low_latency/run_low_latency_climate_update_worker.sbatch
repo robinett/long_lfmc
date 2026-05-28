@@ -3,8 +3,8 @@
 #SBATCH --partition=serc
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=128G
-#SBATCH --time=3-00:00:00
+#SBATCH --mem=48G
+#SBATCH --time=12:00:00
 #SBATCH -o /home/users/trobinet/long_lfmc/logs/low_latency_parallel/low_latency_climate_%j.out
 #SBATCH -e /home/users/trobinet/long_lfmc/logs/low_latency_parallel/low_latency_climate_%j.err
 

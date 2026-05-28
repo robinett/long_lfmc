@@ -18,12 +18,6 @@ from zarr import consolidate_metadata
 
 REPO_ROOT = Path('/home/users/trobinet/long_lfmc')
 DEFAULT_REGISTRY_PATH = REPO_ROOT / 'lfmc_model/scripts/inference/source_registry.yaml'
-INFERENCE_SCRIPT_DIR = REPO_ROOT / 'lfmc_model/scripts/inference'
-if str(INFERENCE_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(INFERENCE_SCRIPT_DIR))
-
-from low_latency_rollback import capture_zarr_rollback_from_env
-
 EXPECTED_VARIABLES = ['prcp', 'srad', 'swe', 'tmax', 'vp']
 DATA_CHUNKS = (1, len(EXPECTED_VARIABLES), 512, 512)
 LATLON_CHUNKS = (512, 512)
@@ -451,14 +445,6 @@ def main():
     args = apply_registry_defaults(parse_args())
     start_date, end_date = parse_date_range(args.start_date, args.end_date)
     print(f'Updating combined low-latency climate store for {start_date.date()} -> {end_date.date()}')
-    capture_zarr_rollback_from_env(
-        target_zarr=args.out_zarr,
-        label='low_latency_climate_standard',
-        dim_name='time',
-        window_start=start_date,
-        window_end=end_date,
-        reason='before_low_latency_climate_append',
-    )
     update_sources(args)
     if args.check_only:
         print('Low-latency climate source checks passed')

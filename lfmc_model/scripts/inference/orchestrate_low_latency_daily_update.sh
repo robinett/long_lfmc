@@ -12,14 +12,13 @@ current_model_script="${script_dir}/current_model_family_utils.py"
 
 modis_update_script="${repo_root}/data_processing/modis/update_modis_range.py"
 climate_update_script="${repo_root}/data_processing/climate_low_latency/update_low_latency_climate_range.py"
-combined_weather_update_script="${repo_root}/data_processing/climate_low_latency/append_low_latency_range_from_saved_climatology.py"
 modis_worker_script="${repo_root}/data_processing/modis/run_modis_range_worker.sbatch"
 climate_worker_script="${repo_root}/data_processing/climate_low_latency/run_low_latency_climate_update_worker.sbatch"
+combined_weather_worker_script="${repo_root}/data_processing/climate_low_latency/run_combined_weather_append_worker.sbatch"
 promotion_script="${script_dir}/submit_low_latency_range_promotion.sh"
 skip_oak_sync="${SKIP_OAK_SYNC:-0}"
 today_override="${TODAY_OVERRIDE:-}"
 safe_end_date_override="${SAFE_END_DATE_OVERRIDE:-}"
-enable_rollback="${ENABLE_LOW_LATENCY_ROLLBACK:-0}"
 
 source "${process_env}"
 
@@ -85,15 +84,6 @@ status_dir="${metadata_dir}/status_reports"
 lock_dir="${metadata_dir}/locks/low_latency_daily.lock"
 mkdir -p "${status_dir}" "${metadata_dir}/locks"
 status_path="${status_dir}/low_latency_daily_update_${batch_stamp}.json"
-rollback_dir="${LOW_LATENCY_ROLLBACK_DIR:-}"
-if [[ "${enable_rollback}" == "1" && -z "${rollback_dir}" ]]; then
-    rollback_dir="${metadata_dir}/rollback/low_latency_daily_${batch_stamp}"
-fi
-if [[ -n "${rollback_dir}" ]]; then
-    mkdir -p "${rollback_dir}"
-    export LOW_LATENCY_ROLLBACK_DIR="${rollback_dir}"
-    echo "Low-latency rollback capture enabled: ${rollback_dir}"
-fi
 
 bootstrap_modis="not_started"
 bootstrap_modis_regrid="not_started"
@@ -296,7 +286,6 @@ record = {
     },
     'inference_status': os.environ['INFERENCE_STATUS'],
     'sync_back_status': os.environ['SYNC_BACK_STATUS'],
-    'rollback_dir': os.environ.get('LOW_LATENCY_ROLLBACK_DIR', ''),
 }
 path = Path(os.environ['STATUS_PATH'])
 path.parent.mkdir(parents=True, exist_ok=True)
@@ -461,15 +450,13 @@ modis_job_id="$(submit_sbatch_job \
     "START_DATE=${requested_start_date}" \
     "END_DATE=${requested_end_date}" \
     "TAIL_CONTEXT_DAYS=${modis_tail_context_days}" \
-    "REGISTRY_PATH=${registry_path}" \
-    "LOW_LATENCY_ROLLBACK_DIR=${LOW_LATENCY_ROLLBACK_DIR:-}")"
+    "REGISTRY_PATH=${registry_path}")"
 climate_job_id="$(submit_sbatch_job \
     "${climate_worker_script}" \
     "low_latency_climate" \
     "START_DATE=${requested_start_date}" \
     "END_DATE=${requested_end_date}" \
-    "REGISTRY_PATH=${registry_path}" \
-    "LOW_LATENCY_ROLLBACK_DIR=${LOW_LATENCY_ROLLBACK_DIR:-}")"
+    "REGISTRY_PATH=${registry_path}")"
 
 modis_wait_failed=0
 climate_wait_failed=0
@@ -497,13 +484,27 @@ if [[ "${modis_wait_failed}" == "1" || "${climate_wait_failed}" == "1" ]]; then
     exit 1
 fi
 
-python3 "${combined_weather_update_script}" \
-    --standard_zarr "${low_latency_climate_path}" \
-    --combined_zarr "${daymet_combined_path}" \
-    --climatology_zarr "${daymet_climatology_path}" \
-    --start_date "${requested_start_date}" \
-    --end_date "${requested_end_date}"
-combined_weather_update_status="completed"
+combined_weather_update_status="submitted"
+combined_weather_job_id="$(submit_sbatch_job \
+    "${combined_weather_worker_script}" \
+    "combined_weather" \
+    "START_DATE=${requested_start_date}" \
+    "END_DATE=${requested_end_date}" \
+    "STANDARD_ZARR=${low_latency_climate_path}" \
+    "COMBINED_ZARR=${daymet_combined_path}" \
+    "CLIMATOLOGY_ZARR=${daymet_climatology_path}")"
+
+if wait_for_job "${combined_weather_job_id}" "combined_weather"; then
+    combined_weather_update_status="completed"
+else
+    combined_weather_update_status="failed"
+    final_status="failed_combined_weather_update"
+    message="Combined low-latency weather append failed for ${requested_start_date} -> ${requested_end_date}"
+    update_status_env
+    write_status >/dev/null
+    echo "${message}"
+    exit 1
+fi
 
 source "${model_env}"
 CONFIG_PATH="${config_path}" REGISTRY_PATH="${registry_path}" REQUESTED_START_DATE="${requested_start_date}" REQUESTED_END_DATE="${requested_end_date}" bash "${promotion_script}"
