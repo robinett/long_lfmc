@@ -18,7 +18,6 @@ from map_runtime_utils import (
     OUTPUT_QUALITY_FLAG_NAME,
     OUTPUT_STD_NAME,
 )
-from low_latency_rollback import capture_zarr_rollback_from_env
 
 
 TIME_VARS = [OUTPUT_MEAN_NAME, OUTPUT_STD_NAME, OUTPUT_QUALITY_FLAG_NAME]
@@ -156,7 +155,7 @@ def _get_time_slice(index: pd.DatetimeIndex, start_date: pd.Timestamp, end_date:
     return slice(int(positions[0]), int(positions[-1]) + 1)
 
 
-def _copy_landcover_years(staging_root, production_root):
+def _copy_landcover_years(staging_root, production_root, production_zarr: Path):
     if OUTPUT_DOMINANT_LANDCOVER_NAME not in staging_root or OUTPUT_LANDCOVER_YEAR_NAME not in staging_root:
         return
     staging_years = _load_landcover_years(staging_root)
@@ -174,9 +173,21 @@ def _copy_landcover_years(staging_root, production_root):
             continue
         old_n = int(year_arr.shape[0])
         new_n = old_n + 1
-        year_arr.resize((new_n,))
-        landcover_arr.resize((new_n, landcover_arr.shape[1], landcover_arr.shape[2]))
+        _resize_array_and_verify(production_zarr, OUTPUT_LANDCOVER_YEAR_NAME, (new_n,))
+        _resize_array_and_verify(
+            production_zarr,
+            OUTPUT_DOMINANT_LANDCOVER_NAME,
+            (new_n, landcover_arr.shape[1], landcover_arr.shape[2]),
+        )
+        production_root = _reopen_group(production_zarr, mode='a')
+        landcover_arr = production_root[OUTPUT_DOMINANT_LANDCOVER_NAME]
+        year_arr = production_root[OUTPUT_LANDCOVER_YEAR_NAME]
         year_arr[old_n:new_n] = np.asarray([year], dtype=np.int32)
+        production_root = _reopen_group(production_zarr, mode='a')
+        observed_year = int(np.asarray(production_root[OUTPUT_LANDCOVER_YEAR_NAME][old_n:new_n], dtype=np.int32)[0])
+        if observed_year != year:
+            raise RuntimeError(f'Failed to verify appended landcover year: expected={year} observed={observed_year}')
+        landcover_arr = production_root[OUTPUT_DOMINANT_LANDCOVER_NAME]
         landcover_arr[old_n:new_n, :, :] = staging_root[OUTPUT_DOMINANT_LANDCOVER_NAME][stage_idx:stage_idx + 1, :, :]
         year_to_prod_idx[year] = old_n
 
@@ -190,6 +201,38 @@ def _resize_time_var(arr, new_n: int):
         arr.resize((new_n,))
         return
     arr.resize((new_n, *arr.shape[1:]))
+
+
+def _reopen_group(zarr_path: Path, mode: str = 'a'):
+    return zarr.open_group(str(zarr_path), mode=mode, use_consolidated=False)
+
+
+def _resize_array_and_verify(zarr_path: Path, array_name: str, new_shape: tuple[int, ...]):
+    root = _reopen_group(zarr_path, mode='a')
+    arr = root[array_name]
+    arr.resize(new_shape)
+    root = _reopen_group(zarr_path, mode='a')
+    observed = tuple(int(value) for value in root[array_name].shape)
+    if observed != tuple(int(value) for value in new_shape):
+        raise RuntimeError(
+            f"Failed to resize {array_name} in {zarr_path}: "
+            f"expected_shape={new_shape} observed_shape={observed}"
+        )
+    print(timestamped_message(f'Resized {array_name} to {observed}'))
+    return root
+
+
+def _resize_time_arrays_and_reopen(production_zarr: Path, new_n: int):
+    root = _reopen_group(production_zarr, mode='a')
+    _resize_array_and_verify(production_zarr, 'time', (new_n,))
+    for var_name in TIME_VARS:
+        arr = root[var_name]
+        if len(arr.shape) == 1:
+            new_shape = (new_n,)
+        else:
+            new_shape = (new_n, *arr.shape[1:])
+        _resize_array_and_verify(production_zarr, var_name, new_shape)
+    return _reopen_group(production_zarr, mode='a')
 
 
 def _copy_time_var_chunkwise(
@@ -236,18 +279,30 @@ def _copy_time_var_chunkwise(
                     )
 
 
-def _append_time_range(staging_root, production_root, staging_slice: slice, production_time: pd.DatetimeIndex):
+def _append_time_range(
+    staging_root,
+    production_root,
+    production_zarr: Path,
+    staging_slice: slice,
+    production_time: pd.DatetimeIndex,
+):
     staging_time = _load_time_index(staging_root)[staging_slice]
     if len(production_time) > 0 and staging_time[0] <= production_time[-1]:
         raise ValueError('append_time_range requires staged dates to be strictly newer than production time coverage')
     old_n = int(len(production_time))
     new_n = old_n + int(len(staging_time))
-    production_root['time'].resize((new_n,))
+    production_root = _resize_time_arrays_and_reopen(production_zarr, new_n)
     _write_time_values(production_root['time'], slice(old_n, new_n), staging_time)
+    production_root = _reopen_group(production_zarr, mode='a')
+    observed_time = _load_time_index(production_root)[old_n:new_n]
+    if not np.array_equal(observed_time.values.astype('datetime64[ns]'), staging_time.values.astype('datetime64[ns]')):
+        raise RuntimeError(
+            "Failed to verify appended production time coordinates: "
+            f"expected={staging_time.astype(str).tolist()} observed={observed_time.astype(str).tolist()}"
+        )
     production_slice = slice(old_n, new_n)
     for var_name in TIME_VARS:
         arr = production_root[var_name]
-        _resize_time_var(arr, new_n)
         _copy_time_var_chunkwise(
             staging_arr=staging_root[var_name],
             production_arr=arr,
@@ -260,6 +315,7 @@ def _append_time_range(staging_root, production_root, staging_slice: slice, prod
 def _replace_tail_range(
     staging_root,
     production_root,
+    production_zarr: Path,
     staging_slice: slice,
     production_time: pd.DatetimeIndex,
     start_date: pd.Timestamp,
@@ -274,17 +330,21 @@ def _replace_tail_range(
     prefix_count = int(np.searchsorted(production_time.values, start_date.to_datetime64(), side='left'))
     if prefix_count < 0:
         prefix_count = 0
-    for var_name in TIME_VARS:
-        _resize_time_var(production_root[var_name], prefix_count)
-    production_root['time'].resize((prefix_count,))
+    production_root = _resize_time_arrays_and_reopen(production_zarr, prefix_count)
 
     new_n = prefix_count + int(len(staging_time))
-    production_root['time'].resize((new_n,))
+    production_root = _resize_time_arrays_and_reopen(production_zarr, new_n)
     _write_time_values(production_root['time'], slice(prefix_count, new_n), staging_time)
+    production_root = _reopen_group(production_zarr, mode='a')
+    observed_time = _load_time_index(production_root)[prefix_count:new_n]
+    if not np.array_equal(observed_time.values.astype('datetime64[ns]'), staging_time.values.astype('datetime64[ns]')):
+        raise RuntimeError(
+            "Failed to verify replaced production time coordinates: "
+            f"expected={staging_time.astype(str).tolist()} observed={observed_time.astype(str).tolist()}"
+        )
     production_slice = slice(prefix_count, new_n)
     for var_name in TIME_VARS:
         arr = production_root[var_name]
-        _resize_time_var(arr, new_n)
         _copy_time_var_chunkwise(
             staging_arr=staging_root[var_name],
             production_arr=arr,
@@ -356,38 +416,21 @@ def main():
         _consolidate_store_metadata(production_zarr)
         return
 
-    staging_root = zarr.open_group(str(staging_zarr), mode='r')
-    production_root = zarr.open_group(str(production_zarr), mode='a')
+    staging_root = _reopen_group(staging_zarr, mode='r')
+    production_root = _reopen_group(production_zarr, mode='a')
     _ensure_static_coords_match(staging_root, production_root)
 
     staging_time = _load_time_index(staging_root)
     production_time = _load_time_index(production_root)
     staging_slice = _get_time_slice(staging_time, start_date, end_date)
-    capture_zarr_rollback_from_env(
-        target_zarr=production_zarr,
-        label='production_lfmc',
-        dim_name='time',
-        window_start=start_date,
-        window_end=end_date,
-        reason=f'before_{args.tier}_promotion_{args.mode}',
-    )
-    staging_years = _load_landcover_years(staging_root)
-    if len(staging_years) > 0:
-        capture_zarr_rollback_from_env(
-            target_zarr=production_zarr,
-            label='production_lfmc_landcover',
-            dim_name=OUTPUT_LANDCOVER_YEAR_NAME,
-            window_start=int(np.min(staging_years)),
-            window_end=int(np.max(staging_years)),
-            reason=f'before_{args.tier}_landcover_promotion',
-        )
 
     if args.mode == 'append_time_range':
-        _append_time_range(staging_root, production_root, staging_slice, production_time)
+        _append_time_range(staging_root, production_root, production_zarr, staging_slice, production_time)
     elif args.mode == 'replace_tail_range':
         _replace_tail_range(
             staging_root,
             production_root,
+            production_zarr,
             staging_slice,
             production_time,
             start_date,
@@ -397,7 +440,9 @@ def main():
         production_slice = _get_time_slice(production_time, start_date, end_date)
         _overwrite_time_range(staging_root, production_root, staging_slice, production_slice)
 
-    _copy_landcover_years(staging_root, production_root)
+    production_root = _reopen_group(production_zarr, mode='a')
+    _copy_landcover_years(staging_root, production_root, production_zarr)
+    production_root = _reopen_group(production_zarr, mode='a')
     production_root.attrs['last_promotion_mode'] = args.mode
     production_root.attrs['last_promotion_tier'] = args.tier
     production_root.attrs['last_promotion_at'] = dt.datetime.now().isoformat()

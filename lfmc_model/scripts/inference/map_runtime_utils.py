@@ -309,12 +309,48 @@ def build_landcover_allowed_mask_for_year(
     year: int,
     allowed_classes: Sequence[str] = ALLOWED_DOMINANT_LANDCOVER,
 ) -> xr.DataArray:
+    source_path = str(landcover_ds.encoding.get("source", ""))
     landcover_vars = list(landcover_ds.data_vars)
     missing_classes = [name for name in allowed_classes if name not in landcover_vars]
     if len(missing_classes) > 0:
         raise KeyError(
             f"Missing allowed landcover class(es) in landcover dataset: {missing_classes}"
         )
+    if source_path and os.path.exists(source_path):
+        dims_by_var = {name: tuple(landcover_ds[name].dims) for name in landcover_vars}
+        if all(dims == ("y", "x", "year") for dims in dims_by_var.values()):
+            year_values = pd.to_datetime(landcover_ds["year"].values).year.astype(int)
+            year_matches = np.where(year_values == int(year))[0]
+            if len(year_matches) == 0:
+                raise KeyError(f"Missing landcover year {year}")
+            year_idx = int(year_matches[0])
+            store = zarr.open(source_path, mode="r")
+            height = int(landcover_ds.sizes["y"])
+            width = int(landcover_ds.sizes["x"])
+            allowed_indices = [landcover_vars.index(name) for name in allowed_classes]
+            mask = np.zeros((height, width), dtype=bool)
+            y_block = 256
+            for y0 in range(0, height, y_block):
+                y1 = min(y0 + y_block, height)
+                block = np.stack(
+                    [
+                        np.asarray(store[var_name][y0:y1, :, year_idx], dtype=np.float32)
+                        for var_name in landcover_vars
+                    ],
+                    axis=0,
+                )
+                any_valid = np.isfinite(block).any(axis=0)
+                filled = np.where(np.isfinite(block), block, -np.inf)
+                dominant_idx = np.argmax(filled, axis=0)
+                mask[y0:y1, :] = any_valid & np.isin(dominant_idx, allowed_indices)
+            return xr.DataArray(
+                mask,
+                coords={
+                    "y": landcover_ds["y"].values,
+                    "x": landcover_ds["x"].values,
+                },
+                dims=("y", "x"),
+            )
     year_key = pd.Timestamp(year, 1, 1)
     year_ds = landcover_ds.sel(year=year_key)
     lc_array = year_ds.to_array(dim="landcover")
@@ -333,7 +369,7 @@ def _mask_cache_signature(
     landcover_ds: xr.Dataset,
     grid_path: str,
     allowed_classes: Sequence[str],
-) -> str:
+) -> Tuple[str, Dict[str, object]]:
     def _source_signature(path: str) -> Dict[str, object]:
         out: Dict[str, object] = {"path": str(path)}
         if path and os.path.exists(path):
@@ -342,7 +378,7 @@ def _mask_cache_signature(
             out["size"] = int(stat.st_size)
         return out
 
-    landcover_var = next(iter(landcover_ds.data_vars.values()))
+    landcover_source_path = str(landcover_ds.encoding.get("source", ""))
     payload = {
         "grid_path": grid_path,
         "grid_shape": {k: int(v) for k, v in model_grid.sizes.items()},
@@ -354,13 +390,25 @@ def _mask_cache_signature(
             float(model_grid["y"].values[0]),
             float(model_grid["y"].values[-1]),
         ],
-        "landcover_source": _source_signature(str(landcover_var.encoding.get("source", ""))),
+        "landcover_source": _source_signature(landcover_source_path),
         "landcover_shape": {k: int(v) for k, v in landcover_ds.sizes.items()},
         "landcover_vars": sorted(landcover_ds.data_vars),
         "allowed_classes": list(allowed_classes),
     }
     raw = json.dumps(payload, sort_keys=True).encode("utf-8")
-    return hashlib.sha1(raw).hexdigest()[:16]
+    return hashlib.sha1(raw).hexdigest()[:16], payload
+
+
+def _prediction_mask_cache_enabled(landcover_ds: xr.Dataset) -> bool:
+    source_path = str(landcover_ds.encoding.get("source", ""))
+    if source_path == "":
+        return True
+    source_tokens = (
+        "/inference/tests/",
+        "/staging/",
+        "_test.zarr",
+    )
+    return not any(token in source_path for token in source_tokens)
 
 
 def load_or_build_prediction_mask_for_year(
@@ -371,21 +419,28 @@ def load_or_build_prediction_mask_for_year(
     allowed_classes: Sequence[str] = ALLOWED_DOMINANT_LANDCOVER,
     cache_root: str = DEFAULT_LANDCOVER_MASK_CACHE_DIR,
 ) -> xr.DataArray:
-    cache_sig = _mask_cache_signature(
+    cache_sig, cache_payload = _mask_cache_signature(
         model_grid=model_grid,
         landcover_ds=landcover_ds,
         grid_path=grid_path,
         allowed_classes=allowed_classes,
     )
+    cache_enabled = _prediction_mask_cache_enabled(landcover_ds)
     cache_dir = os.path.join(cache_root, cache_sig)
     cache_path = os.path.join(cache_dir, f"prediction_mask_{year}.npz")
-    if os.path.exists(cache_path):
+    if cache_enabled and os.path.exists(cache_path):
         with np.load(cache_path, allow_pickle=False) as npz:
             mask = np.asarray(npz["mask"], dtype=bool)
             y_vals = np.asarray(npz["y"])
             x_vals = np.asarray(npz["x"])
         print(f"[prediction_mask] year={year} cache hit: {cache_path}")
         return xr.DataArray(mask, coords={"y": y_vals, "x": x_vals}, dims=("y", "x"))
+    if not cache_enabled:
+        source_path = str(landcover_ds.encoding.get("source", ""))
+        print(
+            f"[prediction_mask] year={year} cache bypass for mutable/test landcover "
+            f"source: {source_path}"
+        )
 
     landcover_mask = build_landcover_allowed_mask_for_year(
         landcover_ds=landcover_ds,
@@ -397,14 +452,16 @@ def load_or_build_prediction_mask_for_year(
     mask = np.asarray(prediction_mask.values, dtype=bool)
     y_vals = np.asarray(model_grid["y"].values)
     x_vals = np.asarray(model_grid["x"].values)
-    os.makedirs(cache_dir, exist_ok=True)
-    np.savez_compressed(
-        cache_path,
-        mask=mask,
-        y=y_vals,
-        x=x_vals,
-    )
-    print(f"[prediction_mask] year={year} wrote cache: {cache_path}")
+    if cache_enabled:
+        os.makedirs(cache_dir, exist_ok=True)
+        np.savez_compressed(
+            cache_path,
+            mask=mask,
+            y=y_vals,
+            x=x_vals,
+            cache_payload=json.dumps(cache_payload, sort_keys=True),
+        )
+        print(f"[prediction_mask] year={year} wrote cache: {cache_path}")
     return xr.DataArray(mask, coords={"y": y_vals, "x": x_vals}, dims=("y", "x"))
 
 

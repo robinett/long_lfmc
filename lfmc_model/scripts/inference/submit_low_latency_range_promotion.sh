@@ -100,7 +100,7 @@ end_date = pd.Timestamp(os.environ["END_DATE"]).normalize()
 if not production_zarr.exists():
     print("append_time_range")
     raise SystemExit(0)
-root = zarr.open_group(str(production_zarr), mode="r")
+root = zarr.open_group(str(production_zarr), mode="r", use_consolidated=False)
 if "time" not in root:
     print("append_time_range")
     raise SystemExit(0)
