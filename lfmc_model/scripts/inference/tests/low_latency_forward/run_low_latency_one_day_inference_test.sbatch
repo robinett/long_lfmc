@@ -3,10 +3,10 @@
 #SBATCH --job-name=ll_1day_coord
 #SBATCH --output=/home/users/trobinet/long_lfmc/logs/low_latency_forward_setup/low_latency_one_day_inference_%j.out
 #SBATCH --error=/home/users/trobinet/long_lfmc/logs/low_latency_forward_setup/low_latency_one_day_inference_%j.err
-#SBATCH --time=168:00:00
+#SBATCH --time=24:00:00
 #SBATCH --partition=serc
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=2
 #SBATCH --mem=16G
 
 set -euo pipefail
@@ -33,13 +33,12 @@ GPU_MAX_JOBS="${GPU_MAX_JOBS:-0}" \
 OWNERS_GPU_MAX_JOBS="${OWNERS_GPU_MAX_JOBS:-100}" \
 OWNERS_PARTITION="${OWNERS_PARTITION:-owners}" \
 OWNERS_GPU_CONSTRAINT="${OWNERS_GPU_CONSTRAINT:-}" \
-TODAY_OVERRIDE="${TODAY_OVERRIDE:-2025-01-07}" \
-REQUESTED_START_DATE="${REQUESTED_START_DATE:-2024-01-01}" \
-REQUESTED_END_DATE="${REQUESTED_END_DATE:-2024-01-01}" \
+TODAY_OVERRIDE="${TODAY_OVERRIDE:-2023-01-08}" \
+REQUESTED_START_DATE="${REQUESTED_START_DATE:-2023-01-01}" \
+REQUESTED_END_DATE="${REQUESTED_END_DATE:-2023-01-01}" \
 STRICT_CONFIG_RUN_ROOT=true \
 AUTO_RESUME_COMPLETE_RUN=true \
 CONFIG_PATH="${map_config}" \
 REGISTRY_PATH="${source_registry}" \
 SKIP_OAK_SYNC=1 \
-ENABLE_LOW_LATENCY_ROLLBACK=1 \
 bash "${repo_root}/lfmc_model/scripts/inference/orchestrate_low_latency_daily_update.sh"

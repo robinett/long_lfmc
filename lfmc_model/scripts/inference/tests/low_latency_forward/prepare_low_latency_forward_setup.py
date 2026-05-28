@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -32,9 +33,13 @@ SRC_NLCD_ANNUAL = SCRATCH_ROOT / "nlcd/nlcd_target_grid_2000_2024.zarr"
 SRC_DAYMET_CLIM20 = SCRATCH_ROOT / "daymet/daymet_vars_and_anoms_clim20.zarr"
 SRC_DAYMET_CLIM = SCRATCH_ROOT / "daymet/daymet_vars_and_anoms_clim20_climatology.zarr"
 
-TEST_YEAR = 2024
-PREP_END_DATE = "2023-12-31"
-TODAY_OVERRIDE = "2025-01-07"
+PREP_END_DATE = os.environ.get("PREP_END_DATE", "2023-12-31")
+TEST_START_DATE = os.environ.get("TEST_START_DATE", "2024-01-01")
+TEST_END_DATE = os.environ.get("TEST_END_DATE", "2024-01-01")
+TODAY_OVERRIDE = os.environ.get("TODAY_OVERRIDE", "2025-01-07")
+PREP_END_YEAR = pd.Timestamp(PREP_END_DATE).year
+TEST_START_YEAR = pd.Timestamp(TEST_START_DATE).year
+TEST_END_YEAR = pd.Timestamp(TEST_END_DATE).year
 
 SCRATCH_PRODUCTION_ZARR = SCRATCH_DIR / "production/lfmc_2001_2023_test.zarr"
 SCRATCH_PRODUCTION_METADATA = SCRATCH_DIR / "production/metadata"
@@ -57,12 +62,12 @@ SCRATCH_PRISM_PLOTS_DIR = SCRATCH_DIR / "climate_low_latency/plots/prism"
 SCRATCH_SNODAS_RAW_ROOT = SCRATCH_DIR / "climate_low_latency/snodas_raw"
 SCRATCH_SNODAS_TARGET_ROOT = SCRATCH_DIR / "climate_low_latency/snodas_target_daily"
 SCRATCH_SNODAS_PLOTS_DIR = SCRATCH_DIR / "climate_low_latency/plots/snodas"
-SCRATCH_MAP_RUN_ROOT = SCRATCH_DIR / "map_runs/low_latency_2024"
+SCRATCH_MAP_RUN_ROOT = SCRATCH_DIR / f"map_runs/low_latency_{TEST_START_YEAR}_{TEST_END_YEAR}"
 
 TEST_SOURCE_REGISTRY = LOG_DIR / "source_registry_test.yaml"
 TEST_MAP_CONFIG = LOG_DIR / "map_configs_low_latency_test.yaml"
 TEST_MANIFEST = LOG_DIR / "low_latency_forward_setup_manifest.json"
-RESET_PROCESSING_ROOTS = False
+RESET_PROCESSING_ROOTS = os.environ.get("RESET_PROCESSING_ROOTS", "0").lower() in {"1", "true", "yes"}
 
 
 def ensure_parent(path: Path) -> None:
@@ -92,12 +97,12 @@ def rsync_path(src_path: Path, dst_path: Path) -> None:
 
 def choose_stage_source(scratch_path: Path, label: str) -> Path:
     oak_path = scratch_to_oak(scratch_path)
-    if oak_path.exists():
-        print(f"Using OAK {label}: {oak_path}")
-        return oak_path
     if scratch_path.exists():
         print(f"Using canonical scratch {label}: {scratch_path}")
         return scratch_path
+    if oak_path.exists():
+        print(f"Using OAK {label}: {oak_path}")
+        return oak_path
     raise FileNotFoundError(f"Missing required baseline for {label}: scratch={scratch_path} oak={oak_path}")
 
 
@@ -177,6 +182,16 @@ def copy_is_usable(dst_path: Path) -> bool:
         return False
 
 
+def iter_low_latency_map_roots() -> list[Path]:
+    map_runs_root = SCRATCH_DIR / "map_runs"
+    if not map_runs_root.exists():
+        return [SCRATCH_MAP_RUN_ROOT]
+    roots = list(map_runs_root.glob("low_latency_*"))
+    if SCRATCH_MAP_RUN_ROOT not in roots:
+        roots.append(SCRATCH_MAP_RUN_ROOT)
+    return sorted(roots)
+
+
 def reset_processing_roots() -> None:
     paths = [
         SCRATCH_MODIS_RAW_ROOT,
@@ -194,9 +209,9 @@ def reset_processing_roots() -> None:
         SCRATCH_SNODAS_RAW_ROOT,
         SCRATCH_SNODAS_TARGET_ROOT,
         SCRATCH_SNODAS_PLOTS_DIR,
-        SCRATCH_MAP_RUN_ROOT,
         SCRATCH_PRODUCTION_METADATA,
     ]
+    paths.extend(iter_low_latency_map_roots())
     for path in paths:
         if path.exists():
             print(f"Removing prior test processing path: {path}")
@@ -248,6 +263,12 @@ def write_manifest(payload: dict) -> None:
 def main() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+    print("Low-latency forward setup configuration:")
+    print(f"  prep_end_date={PREP_END_DATE}")
+    print(f"  test_start_date={TEST_START_DATE}")
+    print(f"  test_end_date={TEST_END_DATE}")
+    print(f"  today_override={TODAY_OVERRIDE}")
+    print(f"  scratch_dir={SCRATCH_DIR}")
 
     if RESET_PROCESSING_ROOTS:
         print("RESET_PROCESSING_ROOTS=true; removing prior low-latency processing paths")
@@ -263,20 +284,21 @@ def main() -> None:
     daymet_clim_source = choose_stage_source(SRC_DAYMET_CLIM, "Daymet climatology zarr")
 
     if subset_matches_end_value(SCRATCH_PRODUCTION_ZARR, "time", PREP_END_DATE):
-        print("Scratch LFMC target zarr already stops at 2023-12-31; skipping rebuild")
+        print(f"Scratch LFMC target zarr already stops at {PREP_END_DATE}; skipping rebuild")
     else:
-        print("Preparing scratch LFMC target zarr through 2023")
+        print(f"Preparing scratch LFMC target zarr through {PREP_END_DATE}")
         subset_zarr_time(
             lfmc_source,
             SCRATCH_PRODUCTION_ZARR,
             selector_dim="time",
             end_value=PREP_END_DATE,
+            extra_indexers={"landcover_year": slice(None, PREP_END_YEAR)},
         )
 
     if subset_matches_end_value(SCRATCH_MODIS_CANONICAL_ZARR, "time", PREP_END_DATE):
-        print("Scratch MODIS canonical zarr already stops at 2023-12-31; skipping rebuild")
+        print(f"Scratch MODIS canonical zarr already stops at {PREP_END_DATE}; skipping rebuild")
     else:
-        print("Preparing scratch MODIS canonical zarr through 2023")
+        print(f"Preparing scratch MODIS canonical zarr through {PREP_END_DATE}")
         subset_zarr_time(
             modis_source,
             SCRATCH_MODIS_CANONICAL_ZARR,
@@ -285,9 +307,9 @@ def main() -> None:
         )
 
     if subset_matches_end_value(SCRATCH_NLCD_ANNUAL_ZARR, "year", PREP_END_DATE):
-        print("Scratch NLCD annual zarr already stops at 2023; skipping rebuild")
+        print(f"Scratch NLCD annual zarr already stops at {PREP_END_YEAR}; skipping rebuild")
     else:
-        print("Preparing scratch NLCD annual zarr through 2023")
+        print(f"Preparing scratch NLCD annual zarr through {PREP_END_YEAR}")
         subset_zarr_time(
             nlcd_source,
             SCRATCH_NLCD_ANNUAL_ZARR,
@@ -296,9 +318,9 @@ def main() -> None:
         )
 
     if subset_matches_end_value(SCRATCH_DAYMET_COMBINED_ZARR, "time", PREP_END_DATE):
-        print("Scratch combined weather store already stops at 2023-12-31; skipping rebuild")
+        print(f"Scratch combined weather store already stops at {PREP_END_DATE}; skipping rebuild")
     else:
-        print("Preparing scratch combined weather store through 2023")
+        print(f"Preparing scratch combined weather store through {PREP_END_DATE}")
         subset_zarr_time(
             daymet_combined_source,
             SCRATCH_DAYMET_COMBINED_ZARR,
@@ -360,14 +382,16 @@ def main() -> None:
     map_submission["prepare_failure_threshold"] = 3
     print("Configuring low-latency test for owners-only GPU workers (gpu_max_jobs=0, prepare_failure_threshold=3)")
     map_cfg["sources"]["registry_path"] = str(TEST_SOURCE_REGISTRY)
-    map_cfg["data"]["requested_start_date"] = f"{TEST_YEAR}-01-01"
-    map_cfg["data"]["requested_end_date"] = f"{TEST_YEAR}-12-31"
+    map_cfg["data"]["requested_start_date"] = TEST_START_DATE
+    map_cfg["data"]["requested_end_date"] = TEST_END_DATE
     map_cfg["paths"]["run_root"] = str(SCRATCH_MAP_RUN_ROOT)
     write_yaml(TEST_MAP_CONFIG, map_cfg)
 
     manifest = {
-        "test_year": TEST_YEAR,
+        "prep_end_year": PREP_END_YEAR,
         "prep_end_date": PREP_END_DATE,
+        "test_start_date": TEST_START_DATE,
+        "test_end_date": TEST_END_DATE,
         "today_override": TODAY_OVERRIDE,
         "scratch_dir": str(SCRATCH_DIR),
         "paths": {
@@ -384,7 +408,6 @@ def main() -> None:
             "low_latency_standard_zarr": str(SCRATCH_LL_STANDARD_ZARR),
             "low_latency_regrid_root": str(SCRATCH_LL_REGRID_ROOT),
             "append_coord_dir": str(SCRATCH_LL_APPEND_COORD_DIR),
-            "map_run_root": str(SCRATCH_MAP_RUN_ROOT),
             "source_registry_test": str(TEST_SOURCE_REGISTRY),
             "map_config_test": str(TEST_MAP_CONFIG),
         },
