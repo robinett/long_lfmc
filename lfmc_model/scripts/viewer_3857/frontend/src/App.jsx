@@ -646,6 +646,13 @@ function clampDownloadSiteDates(site, dates) {
   return nextSite;
 }
 
+function showDatePicker(event) {
+  const input = event.currentTarget;
+  if (typeof input.showPicker === "function") {
+    input.showPicker();
+  }
+}
+
 function App() {
   const lfmcDisplayOpacity = 0.75;
   const mapContainerRef = useRef(null);
@@ -1597,10 +1604,13 @@ function App() {
             <input
               className="location-input date-input"
               type="date"
+              readOnly
               value={dates.includes(selectedDate) ? selectedDate : ""}
               min={dates[0] ?? undefined}
               max={dates[dates.length - 1] ?? undefined}
               disabled={!dates.length}
+              onClick={showDatePicker}
+              onFocus={showDatePicker}
               onChange={(event) => requestDateValueTransition(event.target.value)}
             />
           </label>
@@ -1797,11 +1807,16 @@ function App() {
                   <input
                     className="location-input"
                     type="date"
+                    readOnly
                     value={site.startDate}
                     min={dates[0] ?? undefined}
                     max={site.endDate || dates[dates.length - 1] || undefined}
+                    onClick={showDatePicker}
                     onChange={(event) => handleUpdateDownloadSite(index, "startDate", event.target.value)}
-                    onFocus={() => setActiveDownloadSiteIndex(index)}
+                    onFocus={(event) => {
+                      setActiveDownloadSiteIndex(index);
+                      showDatePicker(event);
+                    }}
                   />
                 </label>
                 <label className="location-field">
@@ -1809,6 +1824,7 @@ function App() {
                   <input
                     className="location-input"
                     type="date"
+                    readOnly
                     value={site.endDate}
                     min={site.startDate || dates[0] || undefined}
                     max={
@@ -1816,8 +1832,12 @@ function App() {
                         ? defaultDownloadEndDate(dates, site.startDate)
                         : dates[dates.length - 1] ?? undefined
                     }
+                    onClick={showDatePicker}
                     onChange={(event) => handleUpdateDownloadSite(index, "endDate", event.target.value)}
-                    onFocus={() => setActiveDownloadSiteIndex(index)}
+                    onFocus={(event) => {
+                      setActiveDownloadSiteIndex(index);
+                      showDatePicker(event);
+                    }}
                   />
                 </label>
               </div>

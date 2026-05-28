@@ -331,6 +331,10 @@ body {
   border-color: rgba(114, 80, 51, 0.5);
 }
 
+.location-input[type="date"][readonly] {
+  cursor: pointer;
+}
+
 .location-actions {
   margin-top: 12px;
 }
