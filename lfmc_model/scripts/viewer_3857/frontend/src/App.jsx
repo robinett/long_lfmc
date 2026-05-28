@@ -27,6 +27,7 @@ const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL)
 const MAX_DOWNLOAD_YEARS = 3;
 const DEFAULT_LAYER_KEY = "mean";
 const DEFAULT_TIMESERIES_MODE = "mean";
+const PRODUCT_DOC_URL = "https://docs.google.com/document/d/1b8n4UQ1XYDd_llw2nO0yPj-pN8Ar0BUjXGQiM-G6CvY/edit?usp=sharing";
 
 function apiUrl(pathAndQuery) {
   const normalizedPath = pathAndQuery.startsWith("/") ? pathAndQuery : `/${pathAndQuery}`;
@@ -122,16 +123,18 @@ function buildLegendTicks(layerConfig, layerKey) {
 
   return tickValues.map((value) => {
     let label = `${formatValue(value, 0)}${unitLabel}`;
+    let subLabel = "";
     if (isAnomalyLayer(layerKey)) {
       if (Math.abs(value - minValue) <= endpointTolerance) {
-        label = `Dry ${label}`;
+        subLabel = "Dry";
       } else if (Math.abs(value - maxValue) <= endpointTolerance) {
-        label = `${label} Wet`;
+        subLabel = "Wet";
       }
     }
 
     return {
       label,
+      subLabel,
       position: ((value - minValue) / span) * 100,
     };
   });
@@ -327,8 +330,8 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
     zeroLineY: isAnomalyMode ? yCoord(0) : null,
     xTicks,
     mode,
-    axisLabel: isAnomalyMode ? "LFMC anomaly (%)" : "LFMC (%)",
-    lineLabel: isAnomalyMode ? "Anomaly" : "Prediction",
+    axisLabel: isAnomalyMode ? "LFMC Anomaly (%)" : "LFMC (%)",
+    lineLabel: isAnomalyMode ? "LFMC Anomaly" : "Prediction",
     showBand: !isAnomalyMode,
   };
 }
@@ -352,7 +355,7 @@ function TimeseriesChart({ pointInfo, mode, onModeChange }) {
         disabled={!hasAnomaly}
         onClick={() => onModeChange("anomaly")}
       >
-        Anomaly
+        LFMC Anomaly
       </button>
     </div>
   );
@@ -368,6 +371,7 @@ function TimeseriesChart({ pointInfo, mode, onModeChange }) {
 
   return (
     <div className="timeseries-wrap">
+      {modeControls}
       <svg viewBox={`0 0 ${geometry.width} ${geometry.height}`} className="timeseries-chart" role="img">
         <line
           x1={geometry.axisLeft}
@@ -450,7 +454,6 @@ function TimeseriesChart({ pointInfo, mode, onModeChange }) {
           </div>
         ) : null}
       </div>
-      {modeControls}
     </div>
   );
 }
@@ -590,6 +593,24 @@ function isDownloadRangeWithinLimit(startDate, endDate) {
   return Boolean(maxEnd) && endDate <= maxEnd;
 }
 
+function minDateString(...values) {
+  return values.filter(Boolean).sort()[0] ?? "";
+}
+
+function maxDateString(...values) {
+  const sorted = values.filter(Boolean).sort();
+  return sorted[sorted.length - 1] ?? "";
+}
+
+function createDownloadSite(startDate = "", endDate = "") {
+  return {
+    lat: "",
+    lon: "",
+    startDate,
+    endDate,
+  };
+}
+
 function App() {
   const lfmcDisplayOpacity = 0.75;
   const mapContainerRef = useRef(null);
@@ -614,9 +635,7 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [locationLatInput, setLocationLatInput] = useState("");
   const [locationLonInput, setLocationLonInput] = useState("");
-  const [downloadStartDate, setDownloadStartDate] = useState("");
-  const [downloadEndDate, setDownloadEndDate] = useState("");
-  const [downloadSites, setDownloadSites] = useState([{ lat: "", lon: "" }]);
+  const [downloadSites, setDownloadSites] = useState([createDownloadSite()]);
   const [activeDownloadSiteIndex, setActiveDownloadSiteIndex] = useState(0);
   const [isDownloadingCsv, setIsDownloadingCsv] = useState(false);
   const [pointInfo, setPointInfo] = useState(null);
@@ -673,6 +692,7 @@ function App() {
           currentSites.map((site, siteIndex) =>
             siteIndex === activeDownloadSiteIndexRef.current
               ? {
+                  ...site,
                   lat: formatCoordinateInput(payload.cell_center_lat),
                   lon: formatCoordinateInput(payload.cell_center_lon),
                 }
@@ -1030,9 +1050,12 @@ function App() {
           const initialIndex = Math.max(runtimeManifest.dates.indexOf(runtimeManifest.initial_date), 0);
           setDateIndex(initialIndex);
           dateIndexRef.current = initialIndex;
-          setDownloadStartDate((currentValue) => currentValue || runtimeManifest.dates[0] || "");
-          setDownloadEndDate(
-            (currentValue) => currentValue || runtimeManifest.dates[runtimeManifest.dates.length - 1] || "",
+          setDownloadSites((currentSites) =>
+            currentSites.map((site) => ({
+              ...site,
+              startDate: site.startDate || runtimeManifest.dates[0] || "",
+              endDate: site.endDate || runtimeManifest.dates[runtimeManifest.dates.length - 1] || "",
+            })),
           );
           setStatusText(`Loaded ${runtimeManifest.dataset_label}`);
           return;
@@ -1284,18 +1307,6 @@ function App() {
     if (!manifest) {
       return;
     }
-    if (!downloadStartDate || !downloadEndDate) {
-      setStatusText("Select a start date and end date before downloading CSV");
-      return;
-    }
-    if (downloadEndDate < downloadStartDate) {
-      setStatusText("CSV end date must be on or after the start date");
-      return;
-    }
-    if (!isDownloadRangeWithinLimit(downloadStartDate, downloadEndDate)) {
-      setStatusText(`CSV downloads are limited to ${MAX_DOWNLOAD_YEARS} years at a time`);
-      return;
-    }
 
     const sites = [];
     for (const site of downloadSites) {
@@ -1313,23 +1324,42 @@ function App() {
         setStatusText("All site coordinates must have valid latitude/longitude ranges");
         return;
       }
-      sites.push({ lat: latitude, lon: longitude });
+      if (!site.startDate || !site.endDate) {
+        setStatusText("Each site must have a start date and end date");
+        return;
+      }
+      if (site.endDate < site.startDate) {
+        setStatusText("Each site end date must be on or after its start date");
+        return;
+      }
+      if (!isDownloadRangeWithinLimit(site.startDate, site.endDate)) {
+        setStatusText(`Each site CSV range is limited to ${MAX_DOWNLOAD_YEARS} years`);
+        return;
+      }
+      sites.push({
+        lat: latitude,
+        lon: longitude,
+        startDate: site.startDate,
+        endDate: site.endDate,
+      });
     }
     if (!sites.length) {
       setStatusText("Select a site on the map or enter a site before downloading");
       return;
     }
 
+    const queryStartDate = minDateString(...sites.map((site) => site.startDate));
+    const queryEndDate = maxDateString(...sites.map((site) => site.endDate));
     const query = new URLSearchParams({
-      start_date: downloadStartDate,
-      end_date: downloadEndDate,
+      start_date: queryStartDate,
+      end_date: queryEndDate,
     });
     sites.forEach((site) => {
-      query.append("site", `${site.lat},${site.lon}`);
+      query.append("site", `${site.lat},${site.lon},${site.startDate},${site.endDate}`);
     });
 
     setIsDownloadingCsv(true);
-    setStatusText("Preparing scientific CSV download...");
+    setStatusText("Preparing LFMC CSV download...");
     try {
       const response = await fetch(apiUrl(`/api/download_csv?${query.toString()}`));
       if (!response.ok) {
@@ -1358,7 +1388,7 @@ function App() {
       link.click();
       document.body.removeChild(link);
       window.URL.revokeObjectURL(blobUrl);
-      setStatusText(`Downloaded scientific CSV for ${downloadStartDate} to ${downloadEndDate}`);
+      setStatusText(`Downloaded LFMC CSV for ${sites.length} site${sites.length === 1 ? "" : "s"}`);
     } catch (error) {
       setStatusText(`CSV download failed: ${error.message}`);
     } finally {
@@ -1385,21 +1415,35 @@ function App() {
       if (currentSites.length >= 10) {
         return currentSites;
       }
-      return [...currentSites, { lat: "", lon: "" }];
+      return [
+        ...currentSites,
+        createDownloadSite(
+          activeSite.startDate || dates[0] || "",
+          activeSite.endDate || dates[dates.length - 1] || "",
+        ),
+      ];
     });
     setActiveDownloadSiteIndex((currentValue) => Math.min(currentValue + 1, 9));
   }
 
   function handleUpdateDownloadSite(index, field, value) {
     setDownloadSites((currentSites) =>
-      currentSites.map((site, siteIndex) =>
-        siteIndex === index
-          ? {
-              ...site,
-              [field]: value,
-            }
-          : site,
-      ),
+      currentSites.map((site, siteIndex) => {
+        if (siteIndex !== index) {
+          return site;
+        }
+        const nextSite = {
+          ...site,
+          [field]: value,
+        };
+        if (field === "startDate" && nextSite.endDate) {
+          const maxEnd = minDateString(dates[dates.length - 1] ?? "", maxDownloadEndDate(value) ?? "");
+          if (maxEnd && nextSite.endDate > maxEnd) {
+            nextSite.endDate = maxEnd;
+          }
+        }
+        return nextSite;
+      }),
     );
   }
 
@@ -1407,7 +1451,7 @@ function App() {
     setDownloadSites((currentSites) => {
       const nextSites =
         currentSites.length === 1
-          ? [{ lat: "", lon: "" }]
+          ? [createDownloadSite(dates[0] ?? "", dates[dates.length - 1] ?? "")]
           : currentSites.filter((_, siteIndex) => siteIndex !== index);
       setActiveDownloadSiteIndex((currentValue) => {
         if (nextSites.length === 1) {
@@ -1430,7 +1474,7 @@ function App() {
       <header className="date-bar">
         <div className="date-bar-main">
           <div className="viewer-title-block">
-            <h1>Viewer for long-term LFMC dataset</h1>
+            <h1>Live Fuel Moisture Content Products from Stanford's Remote Sensing Ecohydrology Group</h1>
           </div>
         </div>
         <div className="date-bar-controls">
@@ -1529,6 +1573,23 @@ function App() {
         </div>
       </header>
       <aside className="control-panel">
+        <section className="panel-card information-card">
+          <div className="panel-label">Information about this product</div>
+          <p>
+            Welcome to the viewer for Live Fuel Moisture Content (LFMC) products produced by Stanford's Remote
+            Sensing Ecohydrology Group. Use this site to explore the data products. LFMC is defined as the mass
+            of water in vegetation normalized by its dry biomass, representing how "wet" or "dry" vegetation is
+            in a given location. It is a crucial indicator for wildland fire risk. This viewer allows you to
+            explore both absolute values of LFMC as well as LFMC anomalies, which show how wet or dry vegetation
+            is relative to the average value for that calendar year across 2001 to 2024. For more information
+            about the data products displayed here, as well as instructions for downloading data, please view{" "}
+            <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
+              this document
+            </a>
+            .
+          </p>
+        </section>
+
         <section className="panel-card">
           <div className="panel-label">Map Layer</div>
           <div className="toggle-row layer-toggle-row">
@@ -1556,6 +1617,7 @@ function App() {
               >
                 <span className="legend-tick-mark" />
                 <span className="legend-tick-label">{tick.label}</span>
+                {tick.subLabel ? <span className="legend-tick-sub-label">{tick.subLabel}</span> : null}
               </div>
             ))}
           </div>
@@ -1601,15 +1663,15 @@ function App() {
           {pointInfo ? (
             <div className="stats-grid">
               <div>
-                <span className="stats-key">LFMC</span>
+                <span className="stats-key">LFMC (%)</span>
                 <span className="stats-value">{formatValue(pointInfo.lfmc_ens_mean, 1)}</span>
               </div>
               <div>
-                <span className="stats-key">Anomaly</span>
+                <span className="stats-key">LFMC Anomaly (%)</span>
                 <span className="stats-value">{formatValue(pointInfo.lfmc_anomaly, 1)}</span>
               </div>
               <div>
-                <span className="stats-key">Climatology</span>
+                <span className="stats-key">Average LFMC on this date (%)</span>
                 <span className="stats-value">{formatValue(pointInfo.lfmc_climatology_mean, 1)}</span>
               </div>
               <div>
@@ -1638,7 +1700,7 @@ function App() {
         </section>
 
         <section className="panel-card">
-          <div className="panel-label">Download CSV</div>
+          <div className="panel-label">Download LFMC data</div>
           {downloadSites.map((site, index) => (
             <div
               className={`download-site-block ${index === activeDownloadSiteIndex ? "download-site-block-active" : ""}`}
@@ -1687,38 +1749,38 @@ function App() {
                   />
                 </label>
               </div>
+              <div className="location-grid download-date-grid">
+                <label className="location-field">
+                  <span className="stats-key">Start Date</span>
+                  <input
+                    className="location-input"
+                    type="date"
+                    value={site.startDate}
+                    min={dates[0] ?? undefined}
+                    max={dates[dates.length - 1] ?? undefined}
+                    onChange={(event) => handleUpdateDownloadSite(index, "startDate", event.target.value)}
+                    onFocus={() => setActiveDownloadSiteIndex(index)}
+                  />
+                </label>
+                <label className="location-field">
+                  <span className="stats-key">End Date</span>
+                  <input
+                    className="location-input"
+                    type="date"
+                    value={site.endDate}
+                    min={site.startDate || dates[0] || undefined}
+                    max={
+                      site.startDate
+                        ? minDateString(dates[dates.length - 1], maxDownloadEndDate(site.startDate))
+                        : dates[dates.length - 1] ?? undefined
+                    }
+                    onChange={(event) => handleUpdateDownloadSite(index, "endDate", event.target.value)}
+                    onFocus={() => setActiveDownloadSiteIndex(index)}
+                  />
+                </label>
+              </div>
             </div>
           ))}
-          <div className="location-grid">
-            <label className="location-field">
-              <span className="stats-key">Start Date</span>
-              <input
-                className="location-input"
-                type="date"
-                value={downloadStartDate}
-                min={dates[0] ?? undefined}
-                max={dates[dates.length - 1] ?? undefined}
-                onChange={(event) => setDownloadStartDate(event.target.value)}
-              />
-            </label>
-            <label className="location-field">
-              <span className="stats-key">End Date</span>
-              <input
-                className="location-input"
-                type="date"
-                value={downloadEndDate}
-                min={dates[0] ?? undefined}
-                max={
-                  downloadStartDate
-                    ? [dates[dates.length - 1], maxDownloadEndDate(downloadStartDate)]
-                        .filter(Boolean)
-                        .sort()[0]
-                    : dates[dates.length - 1] ?? undefined
-                }
-                onChange={(event) => setDownloadEndDate(event.target.value)}
-              />
-            </label>
-          </div>
           <div className="location-actions">
             <button
               type="button"
@@ -1744,7 +1806,7 @@ function App() {
                 void handleDownloadCsv();
               }}
             >
-              {isDownloadingCsv ? "Preparing CSV..." : "Download .CSVs For These Sites"}
+              {isDownloadingCsv ? "Preparing CSV..." : "Download CSV For These Sites"}
             </button>
           </div>
         </section>

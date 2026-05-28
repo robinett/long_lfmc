@@ -863,24 +863,28 @@ class ScientificDataset:
 
     def download_csv_bytes_for_sites(
         self,
-        sites: List[Tuple[float, float]],
+        sites: List[Tuple[float, float, str, str]],
         start_date: str,
         end_date: str,
     ) -> Tuple[bytes, str]:
-        start_idx = self._date_index(start_date)
-        end_idx = self._date_index(end_date)
-        if end_idx < start_idx:
-            raise ValueError("end_date must be on or after start_date")
-        if dt.date.fromisoformat(end_date) > max_csv_end_date(start_date):
-            raise ValueError(f"CSV download range must be {MAX_CSV_DOWNLOAD_YEARS} years or less")
         if not sites:
             raise ValueError("At least one site is required for CSV download")
         if len(sites) > 10:
             raise ValueError("CSV download supports at most 10 sites")
 
-        time_slice = slice(start_idx, end_idx + 1)
-        date_values = self.dates[start_idx : end_idx + 1]
-        quality_values = np.asarray(self.ds[self.quality_variable].isel(time=time_slice).values)
+        normalized_sites = []
+        for site_idx, site in enumerate(sites, start=1):
+            lat, lon, site_start_date, site_end_date = site
+            start_idx = self._date_index(site_start_date)
+            end_idx = self._date_index(site_end_date)
+            if end_idx < start_idx:
+                raise ValueError(f"Site {site_idx} end_date must be on or after start_date")
+            if dt.date.fromisoformat(site_end_date) > max_csv_end_date(site_start_date):
+                raise ValueError(
+                    f"Site {site_idx} CSV download range must be {MAX_CSV_DOWNLOAD_YEARS} years or less"
+                )
+            normalized_sites.append((lat, lon, site_start_date, site_end_date, start_idx, end_idx))
+
         buffer = io.StringIO()
         writer = csv.writer(buffer)
         writer.writerow(
@@ -888,6 +892,8 @@ class ScientificDataset:
                 "site_index",
                 "site_lat",
                 "site_lon",
+                "site_start_date",
+                "site_end_date",
                 "date",
                 "lfmc_ens_mean",
                 "lfmc_ens_std",
@@ -895,7 +901,11 @@ class ScientificDataset:
             ]
         )
 
-        for site_idx, (lat, lon) in enumerate(sites, start=1):
+        for site_idx, site in enumerate(normalized_sites, start=1):
+            lat, lon, site_start_date, site_end_date, start_idx, end_idx = site
+            time_slice = slice(start_idx, end_idx + 1)
+            date_values = self.dates[start_idx : end_idx + 1]
+            quality_values = np.asarray(self.ds[self.quality_variable].isel(time=time_slice).values)
             x_idx, y_idx, center_x, center_y = self._cell_for_latlon(lat=lat, lon=lon)
             center_lon, center_lat = self.grid_to_wgs84.transform(center_x, center_y)
             mean_values = np.asarray(
@@ -917,6 +927,8 @@ class ScientificDataset:
                         site_idx,
                         f"{float(center_lat):.6f}",
                         f"{float(center_lon):.6f}",
+                        site_start_date,
+                        site_end_date,
                         date_str,
                         "" if mean_value is None else f"{mean_value:.6f}",
                         "" if uncertainty_value is None else f"{uncertainty_value:.6f}",
@@ -924,7 +936,11 @@ class ScientificDataset:
                     ]
                 )
 
-        filename = f"lfmc_sites_{start_date}_to_{end_date}.csv"
+        ranges = {(site[2], site[3]) for site in normalized_sites}
+        if len(ranges) == 1:
+            filename = f"lfmc_sites_{start_date}_to_{end_date}.csv"
+        else:
+            filename = f"lfmc_sites_{start_date}_to_{end_date}_site_ranges.csv"
         return buffer.getvalue().encode("utf-8"), filename
 
     def close(self) -> None:
@@ -1208,7 +1224,7 @@ def viewer_point_payload_with_refresh(
 
 
 def scientific_csv_with_refresh(
-    sites: List[Tuple[float, float]],
+    sites: List[Tuple[float, float, str, str]],
     start_date: str,
     end_date: str,
 ) -> Tuple[bytes, str]:
@@ -1319,14 +1335,19 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 end_date = self._require_param(query, "end_date")
                 sites = []
                 for raw_site in query.get("site", []):
-                    parts = [value.strip() for value in raw_site.split(",", maxsplit=1)]
-                    if len(parts) != 2:
-                        raise ValueError(f"Invalid site parameter {raw_site!r}; expected 'lat,lon'")
-                    sites.append((float(parts[0]), float(parts[1])))
+                    parts = [value.strip() for value in raw_site.split(",")]
+                    if len(parts) == 2:
+                        sites.append((float(parts[0]), float(parts[1]), start_date, end_date))
+                    elif len(parts) == 4:
+                        sites.append((float(parts[0]), float(parts[1]), parts[2], parts[3]))
+                    else:
+                        raise ValueError(
+                            f"Invalid site parameter {raw_site!r}; expected 'lat,lon' or 'lat,lon,start_date,end_date'"
+                        )
                 if not sites:
                     lat = float(self._require_param(query, "lat"))
                     lon = float(self._require_param(query, "lon"))
-                    sites = [(lat, lon)]
+                    sites = [(lat, lon, start_date, end_date)]
                 csv_bytes, filename = scientific_csv_with_refresh(
                     sites=sites,
                     start_date=start_date,
