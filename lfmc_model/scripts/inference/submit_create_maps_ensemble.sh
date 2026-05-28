@@ -1207,6 +1207,33 @@ PYRESUME_PREP
             done
 
             active_gpu_jobs=$(( running_gpu_jobs + pending_gpu_jobs ))
+            if [[ "${completed_shards}" -ge "${num_fine_tasks}" && "${prepare_complete}" -eq 1 && "${active_gpu_jobs}" -gt 0 ]]; then
+                retired_gpu_jobs=0
+                for (( gpu_task_id=0; gpu_task_id<next_gpu_task_id; gpu_task_id++ )); do
+                    gpu_job_id="${gpu_job_ids[$gpu_task_id]:-}"
+                    if [[ -z "${gpu_job_id}" ]]; then
+                        continue
+                    fi
+                    gpu_pool="${gpu_job_pool[$gpu_task_id]:-unknown}"
+                    if [[ "${gpu_pool}" == "serc" ]]; then
+                        cleanup_lock_for_task "${gpu_task_id}"
+                    fi
+                    scancel "${gpu_job_id}" >/dev/null 2>&1 || true
+                    gpu_job_ids[$gpu_task_id]=""
+                    gpu_job_pool[$gpu_task_id]=""
+                    retired_gpu_jobs=$(( retired_gpu_jobs + 1 ))
+                done
+                if [[ "${retired_gpu_jobs}" -gt 0 ]]; then
+                    echo "All ${num_fine_tasks} shards are present; retired ${retired_gpu_jobs} leftover dynamic GPU worker job(s) before merge."
+                fi
+                active_gpu_jobs=0
+                running_gpu_jobs=0
+                pending_gpu_jobs=0
+                active_owner_jobs=0
+                running_serc_jobs=0
+                pending_serc_jobs=0
+                progress_made=1
+            fi
             if [[ "${completed_shards}" -ge "${num_fine_tasks}" && "${prepare_complete}" -eq 1 && "${active_gpu_jobs}" -eq 0 ]]; then
                 break
             fi
