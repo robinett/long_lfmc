@@ -103,33 +103,38 @@ function buildLegendTicks(layerConfig, layerKey) {
   const span = maxValue - minValue;
   const step = niceLegendTickStep(span);
   const unitLabel = layerUnitLabel(layerConfig);
-  const ticks = [];
+  const tickValues = [minValue];
   const firstTick = Math.ceil((minValue - step * 0.001) / step) * step;
   const lastTick = maxValue + step * 0.001;
   const endpointTolerance = Math.max(Math.abs(step) * 1e-6, 1e-6);
 
   for (let value = firstTick; value <= lastTick; value += step) {
     const roundedValue = Number(value.toFixed(6));
-    if (roundedValue < minValue - endpointTolerance || roundedValue > maxValue + endpointTolerance) {
+    if (
+      roundedValue <= minValue + endpointTolerance ||
+      roundedValue >= maxValue - endpointTolerance
+    ) {
       continue;
     }
+    tickValues.push(roundedValue);
+  }
+  tickValues.push(maxValue);
 
-    let label = `${formatValue(roundedValue, 0)}${unitLabel}`;
+  return tickValues.map((value) => {
+    let label = `${formatValue(value, 0)}${unitLabel}`;
     if (isAnomalyLayer(layerKey)) {
-      if (Math.abs(roundedValue - minValue) <= endpointTolerance) {
+      if (Math.abs(value - minValue) <= endpointTolerance) {
         label = `Dry ${label}`;
-      } else if (Math.abs(roundedValue - maxValue) <= endpointTolerance) {
+      } else if (Math.abs(value - maxValue) <= endpointTolerance) {
         label = `${label} Wet`;
       }
     }
 
-    ticks.push({
+    return {
       label,
-      position: ((roundedValue - minValue) / span) * 100,
-    });
-  }
-
-  return ticks;
+      position: ((value - minValue) / span) * 100,
+    };
+  });
 }
 
 function niceTickStep(span, targetTickCount) {

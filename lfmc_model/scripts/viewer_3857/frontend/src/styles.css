@@ -244,6 +244,7 @@ body {
   color: #645a4e;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: 0.72rem;
+  overflow: visible;
 }
 
 .legend-tick {
@@ -257,16 +258,6 @@ body {
   white-space: nowrap;
 }
 
-.legend-tick:first-child {
-  transform: translateX(0);
-  align-items: flex-start;
-}
-
-.legend-tick:last-child {
-  transform: translateX(-100%);
-  align-items: flex-end;
-}
-
 .legend-tick-mark {
   width: 1px;
   height: 8px;
@@ -275,6 +266,7 @@ body {
 
 .legend-tick-label {
   line-height: 1.1;
+  text-align: center;
 }
 
 .stats-grid {
