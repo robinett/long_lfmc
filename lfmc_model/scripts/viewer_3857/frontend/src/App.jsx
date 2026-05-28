@@ -71,6 +71,24 @@ function layerUnitLabel(layerConfig) {
   return layerConfig?.unit === "percent" ? "%" : (layerConfig?.unit ?? "");
 }
 
+function niceLegendTickStep(span, targetTickCount = 5) {
+  const roughStep = span / Math.max(targetTickCount - 1, 1);
+  const magnitude = 10 ** Math.floor(Math.log10(Math.max(roughStep, 1e-6)));
+  const candidates = [1, 2, 4, 5, 10].map((value) => value * magnitude);
+
+  return candidates.reduce((best, candidate) => {
+    const candidateDistance = Math.abs(candidate - roughStep);
+    const bestDistance = Math.abs(best - roughStep);
+    if (candidateDistance < bestDistance) {
+      return candidate;
+    }
+    if (candidateDistance === bestDistance && candidate < best) {
+      return candidate;
+    }
+    return best;
+  }, candidates[0]);
+}
+
 function buildLegendTicks(layerConfig, layerKey) {
   if (!layerConfig) {
     return [];
@@ -82,35 +100,36 @@ function buildLegendTicks(layerConfig, layerKey) {
     return [];
   }
 
+  const span = maxValue - minValue;
+  const step = niceLegendTickStep(span);
   const unitLabel = layerUnitLabel(layerConfig);
-  const rawStops = layerConfig.stops?.length ? layerConfig.stops : [0, 0.25, 0.5, 0.75, 1];
-  const seenPositions = new Set();
+  const ticks = [];
+  const firstTick = Math.ceil((minValue - step * 0.001) / step) * step;
+  const lastTick = maxValue + step * 0.001;
+  const endpointTolerance = Math.max(Math.abs(step) * 1e-6, 1e-6);
 
-  return rawStops
-    .map((stop) => Math.min(Math.max(Number(stop), 0), 1))
-    .filter((stop) => Number.isFinite(stop))
-    .filter((stop) => {
-      const positionKey = stop.toFixed(4);
-      if (seenPositions.has(positionKey)) {
-        return false;
-      }
-      seenPositions.add(positionKey);
-      return true;
-    })
-    .map((stop) => {
-      const value = minValue + stop * (maxValue - minValue);
-      let label = `${formatValue(value, 0)}${unitLabel}`;
-      if (isAnomalyLayer(layerKey) && stop === 0) {
+  for (let value = firstTick; value <= lastTick; value += step) {
+    const roundedValue = Number(value.toFixed(6));
+    if (roundedValue < minValue - endpointTolerance || roundedValue > maxValue + endpointTolerance) {
+      continue;
+    }
+
+    let label = `${formatValue(roundedValue, 0)}${unitLabel}`;
+    if (isAnomalyLayer(layerKey)) {
+      if (Math.abs(roundedValue - minValue) <= endpointTolerance) {
         label = `Dry ${label}`;
-      } else if (isAnomalyLayer(layerKey) && stop === 1) {
+      } else if (Math.abs(roundedValue - maxValue) <= endpointTolerance) {
         label = `${label} Wet`;
       }
+    }
 
-      return {
-        label,
-        position: stop * 100,
-      };
+    ticks.push({
+      label,
+      position: ((roundedValue - minValue) / span) * 100,
     });
+  }
+
+  return ticks;
 }
 
 function niceTickStep(span, targetTickCount) {
