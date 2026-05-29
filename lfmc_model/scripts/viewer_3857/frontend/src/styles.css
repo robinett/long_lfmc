@@ -231,6 +231,13 @@ body {
 .play-button {
   min-width: 84px;
   flex-shrink: 0;
+  background: #d3c6b5;
+  color: #493929;
+}
+
+.play-button.toggle-button-active {
+  background: #725033;
+  color: #fff5e9;
 }
 
 .slider-extents {

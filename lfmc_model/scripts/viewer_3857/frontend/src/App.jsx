@@ -1573,6 +1573,22 @@ function App() {
               type="button"
               className="toggle-button date-step-button"
               disabled={!dates.length}
+              onClick={() => handleDateStep(-1, "month")}
+            >
+              -1 month
+            </button>
+            <button
+              type="button"
+              className="toggle-button date-step-button"
+              disabled={!dates.length}
+              onClick={() => handleDateStep(-1, "week")}
+            >
+              -1 week
+            </button>
+            <button
+              type="button"
+              className="toggle-button date-step-button"
+              disabled={!dates.length}
               onClick={() => handleDateStep(-1, "day")}
             >
               -1 day
@@ -1589,25 +1605,9 @@ function App() {
               type="button"
               className="toggle-button date-step-button"
               disabled={!dates.length}
-              onClick={() => handleDateStep(-1, "week")}
-            >
-              -1 week
-            </button>
-            <button
-              type="button"
-              className="toggle-button date-step-button"
-              disabled={!dates.length}
               onClick={() => handleDateStep(1, "week")}
             >
               +1 week
-            </button>
-            <button
-              type="button"
-              className="toggle-button date-step-button"
-              disabled={!dates.length}
-              onClick={() => handleDateStep(-1, "month")}
-            >
-              -1 month
             </button>
             <button
               type="button"
