@@ -1524,7 +1524,22 @@ function App() {
         </div>
         <div className="date-bar-controls">
           <div className="date-slider-control">
-            <div className="date-value">{selectedDate}</div>
+            <label className="date-input-field">
+              <input
+                className="location-input date-input picker-only-date"
+                type="date"
+                value={dates.includes(selectedDate) ? selectedDate : ""}
+                min={dates[0] ?? undefined}
+                max={dates[dates.length - 1] ?? undefined}
+                disabled={!dates.length}
+                onClick={showDatePicker}
+                onBeforeInput={preventManualDateEdit}
+                onChange={(event) => requestDateValueTransition(event.target.value)}
+                onDrop={preventManualDateEdit}
+                onKeyDown={preventManualDateEdit}
+                onPaste={preventManualDateEdit}
+              />
+            </label>
             <div className="date-slider-stack">
               <input
                 className="date-slider"
@@ -1603,23 +1618,6 @@ function App() {
               +1 month
             </button>
           </div>
-          <label className="date-input-field">
-            <span className="stats-key">Enter Date</span>
-            <input
-              className="location-input date-input picker-only-date"
-              type="date"
-              value={dates.includes(selectedDate) ? selectedDate : ""}
-              min={dates[0] ?? undefined}
-              max={dates[dates.length - 1] ?? undefined}
-              disabled={!dates.length}
-              onClick={showDatePicker}
-              onBeforeInput={preventManualDateEdit}
-              onChange={(event) => requestDateValueTransition(event.target.value)}
-              onDrop={preventManualDateEdit}
-              onKeyDown={preventManualDateEdit}
-              onPaste={preventManualDateEdit}
-            />
-          </label>
         </div>
       </header>
       <aside className="control-panel">
@@ -1631,8 +1629,8 @@ function App() {
             biomass, representing how "wet" or "dry" vegetation is in a given location. It is a crucial indicator
             for wildland fire risk. This viewer allows you to explore both absolute values of LFMC as well as LFMC
             anomalies, which show how wet or dry vegetation is relative to the average value for that calendar
-            year. For more information about the data products displayed here, as well as instructions for
-            downloading data, please view{" "}
+            day for that location. For more information about the data products displayed here, as well as
+            instructions for downloading data, please view{" "}
             <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
               this document
             </a>

@@ -53,7 +53,7 @@ body {
 
 .date-bar-controls {
   display: grid;
-  grid-template-columns: minmax(320px, 1fr) auto minmax(360px, auto) auto;
+  grid-template-columns: minmax(420px, 1fr) auto minmax(360px, auto);
   align-items: center;
   gap: 12px;
   margin-top: 11px;
@@ -65,7 +65,7 @@ body {
 
 .date-slider-control {
   display: grid;
-  grid-template-columns: auto minmax(220px, 1fr);
+  grid-template-columns: 152px minmax(220px, 1fr);
   align-items: center;
   gap: 12px;
   min-width: 0;
