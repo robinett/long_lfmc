@@ -14,7 +14,7 @@ data:
   uncertainty_variable: lfmc_ens_std
   quality_variable: quality_flag
   landcover_variable: dominant_landcover_code
-  initial_date: 2024-12-31
+  initial_date: 2024-06-01
 
 scientific_data:
   data_source: source

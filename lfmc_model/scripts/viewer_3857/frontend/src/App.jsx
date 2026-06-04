@@ -1093,7 +1093,10 @@ function App() {
           };
           setManifest(runtimeManifest);
           manifestRef.current = runtimeManifest;
-          const initialIndex = Math.max(runtimeManifest.dates.indexOf(runtimeManifest.initial_date), 0);
+          const configuredInitialDate = runtimeManifest.dates.includes(metadata.initial_date)
+            ? metadata.initial_date
+            : runtimeManifest.initial_date;
+          const initialIndex = Math.max(runtimeManifest.dates.indexOf(configuredInitialDate), 0);
           setDateIndex(initialIndex);
           dateIndexRef.current = initialIndex;
           setDownloadSites((currentSites) =>

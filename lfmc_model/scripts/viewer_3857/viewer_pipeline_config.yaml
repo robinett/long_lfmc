@@ -9,7 +9,7 @@ dataset:
   uncertainty_variable: lfmc_ens_std
   quality_variable: quality_flag
   landcover_variable: dominant_landcover_code
-  initial_date: latest
+  initial_date: 2024-06-01
 
 output:
   viewer_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857.zarr
