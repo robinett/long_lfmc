@@ -9,11 +9,24 @@ import pandas as pd
 from map_runtime_utils import (
     build_reference_tensor_payload,
     build_static_superset_runtime,
-    get_inference_datasets,
     load_ensemble_runtimes,
     load_tile_payload,
     save_prepared_tensor_payload,
 )
+from input_source_resolver import open_inference_datasets_from_resolution
+
+
+def _open_inference_datasets(run_config):
+    source_resolution = run_config.get("source_resolution")
+    if source_resolution is None:
+        raise KeyError(
+            "run_config is missing source_resolution; refusing to use default inference paths"
+        )
+    print(
+        "[prepare_map_task] opening inference datasets from persisted source_resolution "
+        f"registry={run_config.get('source_registry_path')}"
+    )
+    return open_inference_datasets_from_resolution(source_resolution)
 
 
 def get_args():
@@ -81,8 +94,11 @@ def main():
         print(
             f"[prepare_map_task] feature-layout rebuild members: {differing_member_indices}"
         )
-    dss = get_inference_datasets()
+    dss = _open_inference_datasets(run_config)
     prepared_dir = run_config["prepared_dir"]
+    landcover_year_mapping = (
+        run_config.get("source_resolution", {}).get("nlcd_output_year_to_source_year") or {}
+    )
 
     for row_idx in range(len(task_rows)):
         task_row = task_rows.iloc[row_idx]
@@ -100,6 +116,7 @@ def main():
             dss=dss,
             start_date=block_start,
             end_date=block_end,
+            landcover_year_mapping=landcover_year_mapping,
         )
         reference_path = _prepared_paths(prepared_dir, fine_task_id)
         save_prepared_tensor_payload(reference_path, reference_payload)
@@ -112,6 +129,7 @@ def main():
                 dss=dss,
                 start_date=block_start,
                 end_date=block_end,
+                landcover_year_mapping=landcover_year_mapping,
             )
             member_path = _prepared_paths(prepared_dir, fine_task_id, member_idx=member_idx)
             save_prepared_tensor_payload(member_path, member_payload)

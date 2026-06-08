@@ -15,13 +15,26 @@ from map_runtime_utils import (
     build_static_superset_runtime,
     convert_tensor_payload_to_runtime_bounded,
     densify_tile_predictions,
-    get_inference_datasets,
     load_ensemble_runtimes,
     load_tile_payload,
     save_tile_shard,
     run_runtime_forward,
     timestamped_message,
 )
+from input_source_resolver import open_inference_datasets_from_resolution
+
+
+def _open_inference_datasets(run_config):
+    source_resolution = run_config.get("source_resolution")
+    if source_resolution is None:
+        raise KeyError(
+            "run_config is missing source_resolution; refusing to use default inference paths"
+        )
+    print(timestamped_message(
+        "[run_map_task] opening inference datasets from persisted source_resolution "
+        f"registry={run_config.get('source_registry_path')}"
+    ))
+    return open_inference_datasets_from_resolution(source_resolution)
 
 
 def get_args():
@@ -53,6 +66,7 @@ def process_task_row(
     forward_batch_size,
     use_cuda_autocast,
     progress_label,
+    landcover_year_mapping,
 ):
     task_t0 = time.perf_counter()
     shard_path = str(task_row["shard_path"])
@@ -75,6 +89,7 @@ def process_task_row(
         dss=dss,
         start_date=block_start,
         end_date=block_end,
+        landcover_year_mapping=landcover_year_mapping,
     )
     print(timestamped_message(
         f"[run_map_task] built reference tensors for tile {task_row['tile_name']} "
@@ -105,6 +120,7 @@ def process_task_row(
                 dss=dss,
                 start_date=block_start,
                 end_date=block_end,
+                landcover_year_mapping=landcover_year_mapping,
             )
         preds_df = run_runtime_forward(
             runtime=runtime,
@@ -168,7 +184,10 @@ def main():
     model_type = args.model_type if args.model_type is not None else run_config.get("model_type", DEFAULT_MODEL_TYPE)
     forward_batch_size = int(run_config.get("forward_batch_size", 512))
     use_cuda_autocast = bool(run_config.get("use_cuda_autocast", True))
-    dss = get_inference_datasets()
+    dss = _open_inference_datasets(run_config)
+    landcover_year_mapping = (
+        run_config.get("source_resolution", {}).get("nlcd_output_year_to_source_year") or {}
+    )
     job_t0 = time.perf_counter()
     total_fine_tasks = len(manifest_df)
     completed_elapsed = []
@@ -207,6 +226,7 @@ def main():
             forward_batch_size=forward_batch_size,
             use_cuda_autocast=use_cuda_autocast,
             progress_label=progress_label,
+            landcover_year_mapping=landcover_year_mapping,
         )
         completed_elapsed.append(task_elapsed)
     total_elapsed = time.perf_counter() - job_t0

@@ -877,7 +877,16 @@ def _map_coords_to_source_indices(
     lookup: Dict[float, int] = {}
     source_coords = np.asarray(source_coords, dtype=np.float64)
     for coord_val in unique_targets:
-        idx = _nearest_index(source_coords, float(coord_val))
+        try:
+            idx = _nearest_index(source_coords, float(coord_val))
+        except ValueError as exc:
+            finite_count = int(np.isfinite(source_coords).sum())
+            raise ValueError(
+                f"{source_name} {coord_name}-coordinate array must be strictly monotonic "
+                f"for tile-native inference; size={source_coords.size}, "
+                f"finite_count={finite_count}, first={source_coords[0] if source_coords.size else 'NA'}, "
+                f"last={source_coords[-1] if source_coords.size else 'NA'}"
+            ) from exc
         if not np.isclose(source_coords[idx], coord_val, atol=atol, rtol=0.0):
             raise ValueError(
                 f"{source_name} {coord_name}-coordinate mismatch for tile-native inference: "
@@ -989,6 +998,7 @@ def _tile_native_tensor_payload(
     dss: Dict[str, xr.Dataset],
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
+    landcover_year_mapping: Optional[Dict[str, int]] = None,
     pixel_batch_size: int = 2048,
     day_batch_size: int = 31,
 ) -> Dict[str, object]:
@@ -1142,11 +1152,27 @@ def _tile_native_tensor_payload(
         else np.asarray([], dtype=np.int64)
     )
     landcover_year_lookup = {int(year): idx for idx, year in enumerate(landcover_years)}
+    landcover_output_to_source_year = {
+        int(output_year): int(source_year)
+        for output_year, source_year in (landcover_year_mapping or {}).items()
+    }
 
     pred_years = pred_dates.year.to_numpy(dtype=np.int64)
+    pred_source_years = np.asarray(
+        [
+            landcover_output_to_source_year.get(int(year), int(year))
+            for year in pred_years
+        ],
+        dtype=np.int64,
+    )
     for year in np.unique(pred_years):
-        if len(landcover_vars) > 0 and int(year) not in landcover_year_lookup:
-            raise KeyError(f"Missing landcover year {year} for tile-native inference")
+        source_year = landcover_output_to_source_year.get(int(year), int(year))
+        if len(landcover_vars) > 0 and source_year not in landcover_year_lookup:
+            available_years = ",".join(str(int(value)) for value in landcover_years)
+            raise KeyError(
+                f"Missing landcover source year {source_year} for output year {int(year)} "
+                f"for tile-native inference; available landcover years: {available_years}"
+            )
 
     short_pred_offsets = np.arange(short_max_lag, short_max_lag + n_days, dtype=np.int64)
     long_pred_offsets = np.arange(long_max_lag, long_max_lag + n_days, dtype=np.int64)
@@ -1208,7 +1234,7 @@ def _tile_native_tensor_payload(
         for day_start in range(0, n_days, day_batch_size):
             day_end = min(day_start + day_batch_size, n_days)
             day_slice = slice(day_start, day_end)
-            day_years = pred_years[day_slice]
+            day_source_years = pred_source_years[day_slice]
 
             for s_idx, s_var in enumerate(short_vars):
                 this_norm_mean = float(norm_params["train_short_mean"][s_idx])
@@ -1251,8 +1277,8 @@ def _tile_native_tensor_payload(
                 elif _static_var_is_landcover(st_var):
                     var_idx = landcover_var_lookup[st_var]
                     out = np.empty((pix_end - pix_start, day_end - day_start), dtype=np.float32)
-                    for offset, year in enumerate(day_years):
-                        year_idx = landcover_year_lookup[int(year)]
+                    for offset, source_year in enumerate(day_source_years):
+                        year_idx = landcover_year_lookup[int(source_year)]
                         out[:, offset] = landcover_series[year_idx, var_idx, :]
                     vals = out
                 else:
@@ -1300,6 +1326,7 @@ def build_reference_tensor_payload(
     dss: Dict[str, xr.Dataset],
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
+    landcover_year_mapping: Optional[Dict[str, int]] = None,
 ) -> Dict[str, object]:
     return _tile_native_tensor_payload(
         tile_payload=tile_payload,
@@ -1307,6 +1334,7 @@ def build_reference_tensor_payload(
         dss=dss,
         start_date=start_date,
         end_date=end_date,
+        landcover_year_mapping=landcover_year_mapping,
     )
 
 
