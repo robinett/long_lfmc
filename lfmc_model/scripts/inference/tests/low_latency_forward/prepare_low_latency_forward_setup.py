@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import xarray as xr
 import yaml
@@ -33,24 +34,49 @@ SRC_NLCD_ANNUAL = SCRATCH_ROOT / "nlcd/nlcd_target_grid_2000_2024.zarr"
 SRC_DAYMET_CLIM20 = SCRATCH_ROOT / "daymet/daymet_vars_and_anoms_clim20.zarr"
 SRC_DAYMET_CLIM = SCRATCH_ROOT / "daymet/daymet_vars_and_anoms_clim20_climatology.zarr"
 
-PREP_END_DATE = os.environ.get("PREP_END_DATE", "2023-12-31")
+LFMC_BASELINE_START_DATE = os.environ.get("LFMC_BASELINE_START_DATE", "2023-01-01")
+LFMC_BASELINE_END_DATE = os.environ.get(
+    "LFMC_BASELINE_END_DATE",
+    os.environ.get("PREP_END_DATE", "2023-12-31"),
+)
+SOURCE_BASELINE_START_DATE = os.environ.get("SOURCE_BASELINE_START_DATE", "2022-01-01")
+SOURCE_BASELINE_END_DATE = os.environ.get("SOURCE_BASELINE_END_DATE", "2022-12-31")
+NLCD_BASELINE_START_DATE = os.environ.get("NLCD_BASELINE_START_DATE", LFMC_BASELINE_START_DATE)
+NLCD_BASELINE_END_DATE = os.environ.get("NLCD_BASELINE_END_DATE", LFMC_BASELINE_END_DATE)
 TEST_START_DATE = os.environ.get("TEST_START_DATE", "2024-01-01")
-TEST_END_DATE = os.environ.get("TEST_END_DATE", "2024-01-01")
+TEST_END_DATE = os.environ.get("TEST_END_DATE", "2024-12-31")
+SOURCE_PREWARM_START_DATE = os.environ.get("SOURCE_PREWARM_START_DATE", "2023-01-01")
+SOURCE_PREWARM_END_DATE = os.environ.get("SOURCE_PREWARM_END_DATE", "2023-12-31")
 TODAY_OVERRIDE = os.environ.get("TODAY_OVERRIDE", "2025-01-07")
-PREP_END_YEAR = pd.Timestamp(PREP_END_DATE).year
+LFMC_BASELINE_START_YEAR = pd.Timestamp(LFMC_BASELINE_START_DATE).year
+LFMC_BASELINE_END_YEAR = pd.Timestamp(LFMC_BASELINE_END_DATE).year
+SOURCE_BASELINE_START_YEAR = pd.Timestamp(SOURCE_BASELINE_START_DATE).year
+SOURCE_BASELINE_END_YEAR = pd.Timestamp(SOURCE_BASELINE_END_DATE).year
+NLCD_BASELINE_START_YEAR = pd.Timestamp(NLCD_BASELINE_START_DATE).year
+NLCD_BASELINE_END_YEAR = pd.Timestamp(NLCD_BASELINE_END_DATE).year
 TEST_START_YEAR = pd.Timestamp(TEST_START_DATE).year
 TEST_END_YEAR = pd.Timestamp(TEST_END_DATE).year
 
-SCRATCH_PRODUCTION_ZARR = SCRATCH_DIR / "production/lfmc_2001_2023_test.zarr"
+SCRATCH_PRODUCTION_ZARR = (
+    SCRATCH_DIR / f"production/lfmc_{LFMC_BASELINE_START_YEAR}_{LFMC_BASELINE_END_YEAR}_archive_test.zarr"
+)
 SCRATCH_PRODUCTION_METADATA = SCRATCH_DIR / "production/metadata"
-SCRATCH_MODIS_CANONICAL_ZARR = SCRATCH_DIR / "modis/modis_interp_5d_2001_2023_test.zarr"
+SCRATCH_MODIS_CANONICAL_ZARR = (
+    SCRATCH_DIR
+    / f"modis/modis_interp_5d_{SOURCE_BASELINE_START_YEAR}_{SOURCE_BASELINE_END_YEAR}_baseline_test.zarr"
+)
 SCRATCH_MODIS_RAW_ROOT = SCRATCH_DIR / "modis/modis_earthaccess"
 SCRATCH_MODIS_MOSAIC_ROOT = SCRATCH_DIR / "modis/modis_combined"
 SCRATCH_MODIS_REGRID_ROOT = SCRATCH_DIR / "modis/modis_regrid"
 SCRATCH_MODIS_STAGING_ROOT = SCRATCH_DIR / "modis/modis_interp_staging"
 SCRATCH_MODIS_PLOTS_DIR = SCRATCH_DIR / "modis/plots"
-SCRATCH_NLCD_ANNUAL_ZARR = SCRATCH_DIR / "nlcd/nlcd_target_grid_2000_2023_test.zarr"
-SCRATCH_DAYMET_COMBINED_ZARR = SCRATCH_DIR / "weather/daymet_vars_and_anoms_clim20_2000_2023_test.zarr"
+SCRATCH_NLCD_ANNUAL_ZARR = (
+    SCRATCH_DIR / f"nlcd/nlcd_target_grid_{NLCD_BASELINE_START_YEAR}_{NLCD_BASELINE_END_YEAR}_test.zarr"
+)
+SCRATCH_DAYMET_COMBINED_ZARR = (
+    SCRATCH_DIR
+    / f"weather/daymet_vars_and_anoms_clim20_{SOURCE_BASELINE_START_YEAR}_{SOURCE_BASELINE_END_YEAR}_baseline_test.zarr"
+)
 SCRATCH_DAYMET_CLIM_ZARR = SCRATCH_DIR / "weather/daymet_vars_and_anoms_clim20_climatology_test.zarr"
 SCRATCH_LL_REGRID_ROOT = SCRATCH_DIR / "climate_low_latency/regridded_daily"
 SCRATCH_LL_STANDARD_ZARR = SCRATCH_DIR / "climate_low_latency/prism_snodas_low_latency_all_vars_test.zarr"
@@ -117,6 +143,10 @@ def open_zarr_nonconsolidated(path: Path) -> xr.Dataset:
     return xr.open_zarr(path, consolidated=False)
 
 
+def open_zarr_consolidated(path: Path) -> xr.Dataset:
+    return xr.open_zarr(path, consolidated=True)
+
+
 def strip_zarr_encoding(ds: xr.Dataset) -> xr.Dataset:
     cleaned = ds.copy(deep=False)
     cleaned.encoding = {}
@@ -127,13 +157,38 @@ def strip_zarr_encoding(ds: xr.Dataset) -> xr.Dataset:
     return cleaned
 
 
-def subset_zarr_time(src_path: Path, dst_path: Path, selector_dim: str, end_value, extra_indexers=None) -> None:
+def rechunk_subset_for_zarr(ds: xr.Dataset) -> xr.Dataset:
+    chunk_map = {}
+    for dim_name, dim_size in ds.sizes.items():
+        dim_size = int(dim_size)
+        if dim_size <= 0:
+            continue
+        if dim_name == "time":
+            chunk_map[dim_name] = min(128, dim_size)
+        elif dim_name in {"year", "landcover_year"}:
+            chunk_map[dim_name] = min(1, dim_size)
+    if len(chunk_map) == 0:
+        return ds
+    print(f"Rechunking staged subset before zarr write: {chunk_map}")
+    return ds.chunk(chunk_map)
+
+
+def subset_zarr_coord(
+    src_path: Path,
+    dst_path: Path,
+    selector_dim: str,
+    start_value,
+    end_value,
+    extra_indexers=None,
+    use_consolidated_source: bool = False,
+    validate_xy_coords: bool = False,
+) -> None:
     print(f"Opening source zarr: {src_path}")
-    ds = open_zarr_nonconsolidated(src_path)
-    indexers = {selector_dim: slice(None, end_value)}
+    ds = open_zarr_consolidated(src_path) if use_consolidated_source else open_zarr_nonconsolidated(src_path)
+    indexers = {selector_dim: slice(start_value, end_value)}
     if extra_indexers is not None:
         indexers.update(extra_indexers)
-    subset = strip_zarr_encoding(ds.sel(**indexers))
+    subset = rechunk_subset_for_zarr(strip_zarr_encoding(ds.sel(**indexers)))
     print(f"Subset sizes for {dst_path.name}: {dict(subset.sizes)}")
     ensure_parent(dst_path)
     if dst_path.exists():
@@ -142,7 +197,56 @@ def subset_zarr_time(src_path: Path, dst_path: Path, selector_dim: str, end_valu
     zarr.consolidate_metadata(str(dst_path))
     ds.close()
     subset.close()
+    if validate_xy_coords and not zarr_xy_coords_are_valid(dst_path, use_consolidated_source=False):
+        raise ValueError(f"Staged zarr failed x/y coordinate validation: {dst_path}")
     print(f"Wrote subset zarr: {dst_path}")
+
+
+def coord_value_matches(value, expected_value, compare_as_year: bool = False) -> bool:
+    if compare_as_year:
+        return pd.Timestamp(value).year == pd.Timestamp(expected_value).year
+    return pd.Timestamp(value) == pd.Timestamp(expected_value)
+
+
+def coord_is_finite_unique(ds: xr.Dataset, coord_name: str, path: Path) -> bool:
+    if coord_name not in ds.coords:
+        print(f"Coordinate validation failed for {path}: missing coord {coord_name}")
+        return False
+    values = np.asarray(ds[coord_name].values)
+    if values.ndim != 1:
+        print(f"Coordinate validation failed for {path}: coord {coord_name} is not 1D")
+        return False
+    if values.size == 0:
+        print(f"Coordinate validation failed for {path}: coord {coord_name} is empty")
+        return False
+    if np.issubdtype(values.dtype, np.floating) and not np.isfinite(values).all():
+        missing_count = int((~np.isfinite(values)).sum())
+        print(
+            f"Coordinate validation failed for {path}: "
+            f"coord {coord_name} has {missing_count} non-finite values"
+        )
+        return False
+    unique_count = int(np.unique(values).size)
+    if unique_count != values.size:
+        print(
+            f"Coordinate validation failed for {path}: "
+            f"coord {coord_name} has {values.size - unique_count} duplicate values"
+        )
+        return False
+    return True
+
+
+def zarr_xy_coords_are_valid(dst_path: Path, use_consolidated_source: bool = False) -> bool:
+    if not dst_path.exists():
+        return False
+    try:
+        ds = open_zarr_consolidated(dst_path) if use_consolidated_source else open_zarr_nonconsolidated(dst_path)
+        valid = coord_is_finite_unique(ds, "x", dst_path) and coord_is_finite_unique(ds, "y", dst_path)
+        ds.close()
+        return valid
+    except Exception as exc:
+        print(f"Coordinate validation failed for {dst_path}: {exc}")
+        return False
 
 
 def copy_tree(src_path: Path, dst_path: Path, label: str, reset_existing: bool = True) -> None:
@@ -153,18 +257,36 @@ def copy_tree(src_path: Path, dst_path: Path, label: str, reset_existing: bool =
     rsync_path(src_path, dst_path)
 
 
-def subset_matches_end_value(dst_path: Path, selector_dim: str, expected_end_value) -> bool:
+def subset_matches_bounds(
+    dst_path: Path,
+    selector_dim: str,
+    expected_start_value,
+    expected_end_value,
+    use_consolidated_source: bool = False,
+    compare_as_year: bool = False,
+    require_valid_xy: bool = False,
+) -> bool:
     if not dst_path.exists():
         return False
     try:
-        ds = open_zarr_nonconsolidated(dst_path)
+        ds = open_zarr_consolidated(dst_path) if use_consolidated_source else open_zarr_nonconsolidated(dst_path)
         coord = ds[selector_dim]
         if int(coord.sizes.get(selector_dim, 0)) == 0:
             ds.close()
             return False
+        first_value = coord.values[0]
         last_value = coord.values[-1]
         ds.close()
-        return pd.Timestamp(last_value) == pd.Timestamp(expected_end_value)
+        matches_bounds = coord_value_matches(first_value, expected_start_value, compare_as_year) and coord_value_matches(
+            last_value,
+            expected_end_value,
+            compare_as_year,
+        )
+        if not matches_bounds:
+            return False
+        if require_valid_xy and not zarr_xy_coords_are_valid(dst_path, use_consolidated_source=use_consolidated_source):
+            return False
+        return True
     except Exception as exc:
         print(f"Subset state check failed for {dst_path}: {exc}")
         return False
@@ -194,6 +316,10 @@ def iter_low_latency_map_roots() -> list[Path]:
 
 def reset_processing_roots() -> None:
     paths = [
+        SCRATCH_DIR / "production/lfmc_2001_2023_test.zarr",
+        SCRATCH_DIR / "modis/modis_interp_5d_2001_2023_test.zarr",
+        SCRATCH_DIR / "nlcd/nlcd_target_grid_2000_2023_test.zarr",
+        SCRATCH_DIR / "weather/daymet_vars_and_anoms_clim20_2000_2023_test.zarr",
         SCRATCH_MODIS_RAW_ROOT,
         SCRATCH_MODIS_MOSAIC_ROOT,
         SCRATCH_MODIS_REGRID_ROOT,
@@ -264,9 +390,16 @@ def main() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
     print("Low-latency forward setup configuration:")
-    print(f"  prep_end_date={PREP_END_DATE}")
+    print(f"  lfmc_baseline_start_date={LFMC_BASELINE_START_DATE}")
+    print(f"  lfmc_baseline_end_date={LFMC_BASELINE_END_DATE}")
+    print(f"  source_baseline_start_date={SOURCE_BASELINE_START_DATE}")
+    print(f"  source_baseline_end_date={SOURCE_BASELINE_END_DATE}")
+    print(f"  nlcd_baseline_start_date={NLCD_BASELINE_START_DATE}")
+    print(f"  nlcd_baseline_end_date={NLCD_BASELINE_END_DATE}")
     print(f"  test_start_date={TEST_START_DATE}")
     print(f"  test_end_date={TEST_END_DATE}")
+    print(f"  source_prewarm_start_date={SOURCE_PREWARM_START_DATE}")
+    print(f"  source_prewarm_end_date={SOURCE_PREWARM_END_DATE}")
     print(f"  today_override={TODAY_OVERRIDE}")
     print(f"  scratch_dir={SCRATCH_DIR}")
 
@@ -283,49 +416,85 @@ def main() -> None:
     daymet_combined_source = choose_stage_source(SRC_DAYMET_CLIM20, "Daymet combined clim20 zarr")
     daymet_clim_source = choose_stage_source(SRC_DAYMET_CLIM, "Daymet climatology zarr")
 
-    if subset_matches_end_value(SCRATCH_PRODUCTION_ZARR, "time", PREP_END_DATE):
-        print(f"Scratch LFMC target zarr already stops at {PREP_END_DATE}; skipping rebuild")
+    if subset_matches_bounds(SCRATCH_PRODUCTION_ZARR, "time", LFMC_BASELINE_START_DATE, LFMC_BASELINE_END_DATE):
+        print(
+            f"Scratch LFMC target zarr already spans "
+            f"{LFMC_BASELINE_START_DATE} -> {LFMC_BASELINE_END_DATE}; skipping rebuild"
+        )
     else:
-        print(f"Preparing scratch LFMC target zarr through {PREP_END_DATE}")
-        subset_zarr_time(
+        print(f"Preparing scratch LFMC target zarr for {LFMC_BASELINE_START_DATE} -> {LFMC_BASELINE_END_DATE}")
+        subset_zarr_coord(
             lfmc_source,
             SCRATCH_PRODUCTION_ZARR,
             selector_dim="time",
-            end_value=PREP_END_DATE,
-            extra_indexers={"landcover_year": slice(None, PREP_END_YEAR)},
+            start_value=LFMC_BASELINE_START_DATE,
+            end_value=LFMC_BASELINE_END_DATE,
+            extra_indexers={"landcover_year": slice(LFMC_BASELINE_START_YEAR, LFMC_BASELINE_END_YEAR)},
         )
 
-    if subset_matches_end_value(SCRATCH_MODIS_CANONICAL_ZARR, "time", PREP_END_DATE):
-        print(f"Scratch MODIS canonical zarr already stops at {PREP_END_DATE}; skipping rebuild")
+    if subset_matches_bounds(
+        SCRATCH_MODIS_CANONICAL_ZARR,
+        "time",
+        SOURCE_BASELINE_START_DATE,
+        SOURCE_BASELINE_END_DATE,
+    ):
+        print(
+            f"Scratch MODIS canonical zarr already spans "
+            f"{SOURCE_BASELINE_START_DATE} -> {SOURCE_BASELINE_END_DATE}; skipping rebuild"
+        )
     else:
-        print(f"Preparing scratch MODIS canonical zarr through {PREP_END_DATE}")
-        subset_zarr_time(
+        print(f"Preparing scratch MODIS canonical zarr for {SOURCE_BASELINE_START_DATE} -> {SOURCE_BASELINE_END_DATE}")
+        subset_zarr_coord(
             modis_source,
             SCRATCH_MODIS_CANONICAL_ZARR,
             selector_dim="time",
-            end_value=PREP_END_DATE,
+            start_value=SOURCE_BASELINE_START_DATE,
+            end_value=SOURCE_BASELINE_END_DATE,
         )
 
-    if subset_matches_end_value(SCRATCH_NLCD_ANNUAL_ZARR, "year", PREP_END_DATE):
-        print(f"Scratch NLCD annual zarr already stops at {PREP_END_YEAR}; skipping rebuild")
+    if subset_matches_bounds(
+        SCRATCH_NLCD_ANNUAL_ZARR,
+        "year",
+        NLCD_BASELINE_START_DATE,
+        NLCD_BASELINE_END_DATE,
+        use_consolidated_source=True,
+        compare_as_year=True,
+        require_valid_xy=True,
+    ):
+        print(
+            f"Scratch NLCD annual zarr already spans "
+            f"{NLCD_BASELINE_START_YEAR} -> {NLCD_BASELINE_END_YEAR}; skipping rebuild"
+        )
     else:
-        print(f"Preparing scratch NLCD annual zarr through {PREP_END_YEAR}")
-        subset_zarr_time(
+        print(f"Preparing scratch NLCD annual zarr for {NLCD_BASELINE_START_YEAR} -> {NLCD_BASELINE_END_YEAR}")
+        subset_zarr_coord(
             nlcd_source,
             SCRATCH_NLCD_ANNUAL_ZARR,
             selector_dim="year",
-            end_value=PREP_END_DATE,
+            start_value=f"{NLCD_BASELINE_START_YEAR}-01-01",
+            end_value=f"{NLCD_BASELINE_END_YEAR}-12-31",
+            use_consolidated_source=True,
+            validate_xy_coords=True,
         )
 
-    if subset_matches_end_value(SCRATCH_DAYMET_COMBINED_ZARR, "time", PREP_END_DATE):
-        print(f"Scratch combined weather store already stops at {PREP_END_DATE}; skipping rebuild")
+    if subset_matches_bounds(
+        SCRATCH_DAYMET_COMBINED_ZARR,
+        "time",
+        SOURCE_BASELINE_START_DATE,
+        SOURCE_BASELINE_END_DATE,
+    ):
+        print(
+            f"Scratch combined weather store already spans "
+            f"{SOURCE_BASELINE_START_DATE} -> {SOURCE_BASELINE_END_DATE}; skipping rebuild"
+        )
     else:
-        print(f"Preparing scratch combined weather store through {PREP_END_DATE}")
-        subset_zarr_time(
+        print(f"Preparing scratch combined weather store for {SOURCE_BASELINE_START_DATE} -> {SOURCE_BASELINE_END_DATE}")
+        subset_zarr_coord(
             daymet_combined_source,
             SCRATCH_DAYMET_COMBINED_ZARR,
             selector_dim="time",
-            end_value=PREP_END_DATE,
+            start_value=SOURCE_BASELINE_START_DATE,
+            end_value=SOURCE_BASELINE_END_DATE,
         )
 
     if copy_is_usable(SCRATCH_DAYMET_CLIM_ZARR):
@@ -349,6 +518,7 @@ def main() -> None:
     registry_cfg["processing"]["modis"]["regrid_root"] = str(SCRATCH_MODIS_REGRID_ROOT)
     registry_cfg["processing"]["modis"]["staging_root"] = str(SCRATCH_MODIS_STAGING_ROOT)
     registry_cfg["processing"]["modis"]["plots_dir"] = str(SCRATCH_MODIS_PLOTS_DIR)
+    registry_cfg["processing"]["modis"]["quality_flag"] = 1
     registry_cfg["processing"]["prism"]["raw_root"] = str(SCRATCH_PRISM_RAW_ROOT)
     registry_cfg["processing"]["prism"]["extracted_root"] = str(SCRATCH_PRISM_EXTRACTED_ROOT)
     registry_cfg["processing"]["prism"]["target_daily_root"] = str(SCRATCH_PRISM_TARGET_ROOT)
@@ -388,11 +558,18 @@ def main() -> None:
     write_yaml(TEST_MAP_CONFIG, map_cfg)
 
     manifest = {
-        "prep_end_year": PREP_END_YEAR,
-        "prep_end_date": PREP_END_DATE,
+        "lfmc_baseline_start_date": LFMC_BASELINE_START_DATE,
+        "lfmc_baseline_end_date": LFMC_BASELINE_END_DATE,
+        "source_baseline_start_date": SOURCE_BASELINE_START_DATE,
+        "source_baseline_end_date": SOURCE_BASELINE_END_DATE,
+        "nlcd_baseline_start_date": NLCD_BASELINE_START_DATE,
+        "nlcd_baseline_end_date": NLCD_BASELINE_END_DATE,
         "test_start_date": TEST_START_DATE,
         "test_end_date": TEST_END_DATE,
+        "source_prewarm_start_date": SOURCE_PREWARM_START_DATE,
+        "source_prewarm_end_date": SOURCE_PREWARM_END_DATE,
         "today_override": TODAY_OVERRIDE,
+        "modis_quality_flag": registry_cfg["processing"]["modis"]["quality_flag"],
         "scratch_dir": str(SCRATCH_DIR),
         "paths": {
             "production_zarr": str(SCRATCH_PRODUCTION_ZARR),

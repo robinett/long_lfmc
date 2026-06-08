@@ -3,11 +3,11 @@
 #SBATCH --job-name=stage_ll_fwd
 #SBATCH --output=/home/users/trobinet/long_lfmc/logs/low_latency_forward_setup/stage_low_latency_forward_setup_%j.out
 #SBATCH --error=/home/users/trobinet/long_lfmc/logs/low_latency_forward_setup/stage_low_latency_forward_setup_%j.err
-#SBATCH --time=48:00:00
+#SBATCH --time=12:00:00
 #SBATCH --partition=serc
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=256G
+#SBATCH --mem=96G
 
 set -euo pipefail
 

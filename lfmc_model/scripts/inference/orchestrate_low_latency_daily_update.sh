@@ -17,6 +17,7 @@ climate_worker_script="${repo_root}/data_processing/climate_low_latency/run_low_
 combined_weather_worker_script="${repo_root}/data_processing/climate_low_latency/run_combined_weather_append_worker.sbatch"
 promotion_script="${script_dir}/submit_low_latency_range_promotion.sh"
 skip_oak_sync="${SKIP_OAK_SYNC:-0}"
+skip_inference="${SKIP_INFERENCE:-0}"
 today_override="${TODAY_OVERRIDE:-}"
 safe_end_date_override="${SAFE_END_DATE_OVERRIDE:-}"
 
@@ -374,6 +375,7 @@ echo "Running low-latency daily orchestration"
 echo "  active_model_label=${active_model_label}"
 echo "  ensemble_outputs_root=${ensemble_outputs_root}"
 echo "  input_data_name=${input_data_name}"
+echo "  skip_inference=${skip_inference}"
 
 if ! mkdir "${lock_dir}" 2>/dev/null; then
     final_status="failed_lock_exists"
@@ -504,6 +506,28 @@ else
     write_status >/dev/null
     echo "${message}"
     exit 1
+fi
+
+if [[ "${skip_inference}" == "1" ]]; then
+    inference_status="skipped"
+    if [[ "${skip_oak_sync}" == "1" ]]; then
+        sync_back_status="skipped"
+        echo "Skipping OAK sync because SKIP_OAK_SYNC=1"
+    else
+        sync_to_oak "${modis_path}" "canonical MODIS zarr"
+        sync_to_oak "${modis_regrid_root}" "MODIS regrid root"
+        sync_to_oak "${low_latency_climate_path}" "low-latency climate zarr"
+        sync_to_oak "${daymet_combined_path}" "Daymet clim20 zarr"
+        sync_to_oak "${daymet_climatology_path}" "Daymet clim20 climatology zarr"
+        sync_back_status="completed"
+    fi
+    final_status="completed"
+    message="Low-latency source update completed without inference for ${requested_start_date} -> ${requested_end_date}"
+    update_status_env
+    write_status >/dev/null
+    echo "${message}"
+    echo "  status_path=${status_path}"
+    exit 0
 fi
 
 source "${model_env}"

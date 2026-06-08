@@ -1,12 +1,12 @@
 #!/bin/bash
 
-#SBATCH --job-name=ll_fwd_coord
-#SBATCH --output=/home/users/trobinet/long_lfmc/logs/low_latency_forward_setup/low_latency_forward_inference_%j.out
-#SBATCH --error=/home/users/trobinet/long_lfmc/logs/low_latency_forward_setup/low_latency_forward_inference_%j.err
+#SBATCH --job-name=ll_src_prewarm
+#SBATCH --output=/home/users/trobinet/long_lfmc/logs/low_latency_forward_setup/low_latency_source_prewarm_%j.out
+#SBATCH --error=/home/users/trobinet/long_lfmc/logs/low_latency_forward_setup/low_latency_source_prewarm_%j.err
 #SBATCH --time=168:00:00
 #SBATCH --partition=serc
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=8
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 
 set -euo pipefail
@@ -29,16 +29,14 @@ if [[ -d "${test_lock_dir}" ]]; then
     rmdir "${test_lock_dir}" || true
 fi
 
-GPU_MAX_JOBS="${GPU_MAX_JOBS:-0}" \
-OWNERS_GPU_MAX_JOBS="${OWNERS_GPU_MAX_JOBS:-100}" \
-OWNERS_PARTITION="${OWNERS_PARTITION:-owners}" \
-OWNERS_GPU_CONSTRAINT="${OWNERS_GPU_CONSTRAINT:-}" \
+GPU_MAX_JOBS=0 \
+OWNERS_GPU_MAX_JOBS=0 \
 TODAY_OVERRIDE="${TODAY_OVERRIDE:-2025-01-07}" \
-REQUESTED_START_DATE="${REQUESTED_START_DATE:-2024-01-01}" \
-REQUESTED_END_DATE="${REQUESTED_END_DATE:-2024-12-31}" \
+REQUESTED_START_DATE="${REQUESTED_START_DATE:-2023-01-01}" \
+REQUESTED_END_DATE="${REQUESTED_END_DATE:-2023-12-31}" \
 STRICT_CONFIG_RUN_ROOT=true \
-AUTO_RESUME_COMPLETE_RUN=true \
 CONFIG_PATH="${map_config}" \
 REGISTRY_PATH="${source_registry}" \
+SKIP_INFERENCE=1 \
 SKIP_OAK_SYNC=1 \
 bash "${repo_root}/lfmc_model/scripts/inference/orchestrate_low_latency_daily_update.sh"
