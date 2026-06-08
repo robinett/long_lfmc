@@ -35,8 +35,8 @@ processing:
     staging_root: /scratch/users/trobinet/long_lfmc/final_lfmc/modis/modis_regrid_interpolated/staging
     plots_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/modis/plots/monthly_updates
     low_latency_tail_context_days: 5
-    interpolation_max_days: 15
-    interpolation_buffer_days: 15
+    interpolation_max_days: 5
+    interpolation_buffer_days: 5
     interpolation_xy_chunk_size: 128
     interpolation_time_chunk_size: 32
     interpolation_num_workers: 32
@@ -47,7 +47,7 @@ processing:
     regrid_chunk_buffer: 100
     regrid_chunk_size: 2000
     retain_staging_after_success: true
-    quality_flag: 0
+    quality_flag: 1
   daymet:
     earthaccess_root: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_earthaccess
     daily_root: /scratch/users/trobinet/long_lfmc/final_lfmc/daymet/daymet_earthaccess_daily

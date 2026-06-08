@@ -138,6 +138,18 @@ def _span_summary(spans: list[tuple[pd.Timestamp, pd.Timestamp]], max_items: int
     return ', '.join(pieces) if pieces else 'none'
 
 
+def _split_span_by_month(start_date: pd.Timestamp, end_date: pd.Timestamp) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    spans = []
+    current = pd.Timestamp(start_date).normalize()
+    final = pd.Timestamp(end_date).normalize()
+    while current <= final:
+        next_month = (current.replace(day=1) + pd.offsets.MonthBegin(1)).normalize()
+        month_end = min(final, next_month - pd.Timedelta(days=1))
+        spans.append((current, month_end))
+        current = month_end + pd.Timedelta(days=1)
+    return spans
+
+
 def _daily_file_is_readable(path: Path, required_vars: list[str] | None = None) -> bool:
     if not path.exists() or path.stat().st_size == 0:
         return False
@@ -467,15 +479,25 @@ def ensure_regridded_files_for_dates(
             path = daily_regrid_path(regrid_root, ts)
             if path.exists():
                 path.unlink()
-        ensure_regridded_files(
-            start_date,
-            end_date,
-            grid_path,
-            mosaic_root,
-            regrid_root,
-            chunk_size,
-            chunk_buffer,
+        monthly_spans = _split_span_by_month(start_date, end_date)
+        print(
+            f'Regridded MODIS subprocess plan for {start_date.date()} -> {end_date.date()}: '
+            f'{len(monthly_spans)} monthly batch(es): {_span_summary(monthly_spans)}'
         )
+        for batch_idx, (batch_start, batch_end) in enumerate(monthly_spans, start=1):
+            print(
+                f'Regridded MODIS monthly batch {batch_idx}/{len(monthly_spans)}: '
+                f'{batch_start.date()} -> {batch_end.date()}'
+            )
+            ensure_regridded_files(
+                batch_start,
+                batch_end,
+                grid_path,
+                mosaic_root,
+                regrid_root,
+                chunk_size,
+                chunk_buffer,
+            )
 
 
 def validate_regridded_grid(

@@ -91,18 +91,25 @@ def truncate_store_before_date(combined_zarr: Path, combined_ds: xr.Dataset, sta
     )
 
 
-def main() -> None:
-    args = parse_args()
-    start_date = pd.Timestamp(args.start_date).normalize()
-    end_date = pd.Timestamp(args.end_date).normalize()
-    if end_date < start_date:
-        raise ValueError(f"end_date {end_date.date()} is before start_date {start_date.date()}")
+def monthly_spans(start_date: pd.Timestamp, end_date: pd.Timestamp) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    spans = []
+    current = pd.Timestamp(start_date).normalize()
+    final = pd.Timestamp(end_date).normalize()
+    while current <= final:
+        month_end = current + pd.offsets.MonthEnd(0)
+        chunk_end = min(pd.Timestamp(month_end).normalize(), final)
+        spans.append((current, chunk_end))
+        current = chunk_end + pd.Timedelta(days=1)
+    return spans
 
+
+def append_chunk(args: argparse.Namespace, start_date: pd.Timestamp, end_date: pd.Timestamp) -> None:
     combined_ds = xr.open_zarr(args.combined_zarr, consolidated=False)
     standard_ds = xr.open_zarr(args.standard_zarr, consolidated=False)
     clim_ds = xr.open_zarr(args.climatology_zarr, consolidated=False)
 
     try:
+        print(f"Appending combined weather chunk {start_date.date()} -> {end_date.date()}")
         standard_range = standard_ds.sel(time=slice(str(start_date.date()), str(end_date.date())))
         if int(standard_range.sizes.get("time", 0)) == 0:
             raise ValueError(
@@ -210,15 +217,57 @@ def main() -> None:
             consolidated=False,
             safe_chunks=False,
         )
-        zarr.consolidate_metadata(str(args.combined_zarr))
         print(
-            f"Appended low-latency combined climate/weather range "
+            f"Appended low-latency combined climate/weather chunk "
             f"{start_date.date()} -> {end_date.date()} into {args.combined_zarr}"
         )
     finally:
         combined_ds.close()
         standard_ds.close()
         clim_ds.close()
+
+
+def verify_requested_range(combined_zarr: Path, start_date: pd.Timestamp, end_date: pd.Timestamp) -> None:
+    ds = xr.open_zarr(combined_zarr, consolidated=False)
+    try:
+        times = pd.to_datetime(ds["time"].values).normalize()
+        requested = pd.date_range(start_date, end_date, freq="D")
+        missing = requested.difference(pd.DatetimeIndex(times))
+        if len(missing) > 0:
+            raise RuntimeError(
+                f"Combined weather store is missing {len(missing)} requested dates; "
+                f"first missing={missing[0].date()}"
+            )
+        print(
+            f"Verified combined weather store covers "
+            f"{start_date.date()} -> {end_date.date()}"
+        )
+    finally:
+        ds.close()
+
+
+def main() -> None:
+    args = parse_args()
+    start_date = pd.Timestamp(args.start_date).normalize()
+    end_date = pd.Timestamp(args.end_date).normalize()
+    if end_date < start_date:
+        raise ValueError(f"end_date {end_date.date()} is before start_date {start_date.date()}")
+
+    spans = monthly_spans(start_date, end_date)
+    print(
+        f"Appending low-latency combined climate/weather range "
+        f"{start_date.date()} -> {end_date.date()} in {len(spans)} monthly chunk(s)"
+    )
+    for index, (chunk_start, chunk_end) in enumerate(spans, start=1):
+        print(f"Monthly chunk {index}/{len(spans)}")
+        append_chunk(args, chunk_start, chunk_end)
+
+    verify_requested_range(args.combined_zarr, start_date, end_date)
+    zarr.consolidate_metadata(str(args.combined_zarr))
+    print(
+        f"Appended low-latency combined climate/weather range "
+        f"{start_date.date()} -> {end_date.date()} into {args.combined_zarr}"
+    )
 
 
 if __name__ == "__main__":

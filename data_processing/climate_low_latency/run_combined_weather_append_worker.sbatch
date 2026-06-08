@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
-#SBATCH --time=4:00:00
+#SBATCH --time=12:00:00
 #SBATCH -o /home/users/trobinet/long_lfmc/logs/low_latency_parallel/combined_weather_%j.out
 #SBATCH -e /home/users/trobinet/long_lfmc/logs/low_latency_parallel/combined_weather_%j.err
 
