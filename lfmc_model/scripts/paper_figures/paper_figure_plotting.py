@@ -1640,6 +1640,8 @@ def plot_scatter_triptych(
     colorbar_tick_fontsize: Optional[int] = None,
     stats_fontsize: Optional[int] = None,
     panel_label_fontsize: Optional[int] = None,
+    subplot_wspace: Optional[float] = None,
+    subplot_hspace: Optional[float] = None,
 ) -> None:
     if len(panels) not in {2, 3, 4, 5}:
         raise ValueError("Scatter layout expects exactly 2, 3, 4, or 5 panels")
@@ -1814,13 +1816,39 @@ def plot_scatter_triptych(
         for ax in axes[len(panels):]:
             ax.set_visible(False)
         if len(panels) == 5:
-            fig.subplots_adjust(left=0.095, right=0.985, bottom=0.065, top=0.955, wspace=0.78, hspace=0.56)
+            fig.subplots_adjust(
+                left=0.095,
+                right=0.985,
+                bottom=0.065,
+                top=0.955,
+                wspace=0.78 if subplot_wspace is None else float(subplot_wspace),
+                hspace=0.56 if subplot_hspace is None else float(subplot_hspace),
+            )
         elif len(panels) == 4:
-            fig.subplots_adjust(left=0.08, right=0.985, bottom=0.09, top=0.94, wspace=0.42, hspace=0.34)
+            fig.subplots_adjust(
+                left=0.08,
+                right=0.985,
+                bottom=0.09,
+                top=0.94,
+                wspace=0.42 if subplot_wspace is None else float(subplot_wspace),
+                hspace=0.34 if subplot_hspace is None else float(subplot_hspace),
+            )
         elif len(panels) == 2:
-            fig.subplots_adjust(left=0.08, right=0.985, bottom=0.14, top=0.92, wspace=0.34)
+            fig.subplots_adjust(
+                left=0.08,
+                right=0.985,
+                bottom=0.14,
+                top=0.92,
+                wspace=0.34 if subplot_wspace is None else float(subplot_wspace),
+            )
         else:
-            fig.subplots_adjust(left=0.06, right=0.985, bottom=0.14, top=0.92, wspace=0.34)
+            fig.subplots_adjust(
+                left=0.06,
+                right=0.985,
+                bottom=0.14,
+                top=0.92,
+                wspace=0.34 if subplot_wspace is None else float(subplot_wspace),
+            )
         _save_figure_outputs(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 

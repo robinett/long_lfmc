@@ -109,17 +109,16 @@ figures:
     enabled: true
     model_key: multitask_16
     hexbin_gridsize: 60
-    dry_site_min_obs: 10
-    dry_site_quantile: 0.20
-    dry_worst_error_fraction: 0.10
-    title_fontsize: 48
+    title_fontsize: 36
     axis_label_fontsize: 28
     tick_label_fontsize: 26
     colorbar_label_fontsize: 28
     colorbar_tick_fontsize: 26
     stats_fontsize: 30
     panel_label_fontsize: 30
-    figsize: [21.0, 22.0]
+    subplot_wspace: 0.56
+    subplot_hspace: 0.48
+    figsize: [21.0, 18.0]
     filename: figure_04_performance_scatters.png
 
   figure_5:

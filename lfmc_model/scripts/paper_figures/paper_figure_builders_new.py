@@ -3198,6 +3198,7 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
     )
     if len(month_anom_df) == 0 or len(valid_month_groups) == 0:
         raise ValueError("No source-centered monthly anomaly rows available for Figure 4")
+
     def mean_bias(obs_values, pred_values) -> float:
         obs_arr = np.asarray(obs_values, dtype=float)
         pred_arr = np.asarray(pred_values, dtype=float)
@@ -3206,81 +3207,6 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
             return float("nan")
         return float(np.mean(pred_arr[mask] - obs_arr[mask]))
 
-    def dry_diagnostics(obs_values, pred_values, worst_error_fraction: float) -> Dict[str, float]:
-        obs_arr = np.asarray(obs_values, dtype=float)
-        pred_arr = np.asarray(pred_values, dtype=float)
-        mask = np.isfinite(obs_arr) & np.isfinite(pred_arr)
-        obs_arr = obs_arr[mask]
-        pred_arr = pred_arr[mask]
-        if obs_arr.size == 0:
-            return {
-                "n_observations": 0,
-                "pearson_r": np.nan,
-                "full_r2": np.nan,
-                "bias": np.nan,
-                "r2_bias_removed": np.nan,
-                "worst_error_fraction": float(worst_error_fraction),
-                "worst_error_n_removed": 0,
-                "worst_error_sse_share": np.nan,
-                "r2_without_worst_error_fraction": np.nan,
-            }
-        residual = pred_arr - obs_arr
-        bias = float(np.mean(residual))
-        full_metrics = compute_basic_metrics(obs_arr, pred_arr)
-        bias_removed_metrics = compute_basic_metrics(obs_arr, pred_arr - bias)
-        if obs_arr.size > 1 and np.std(obs_arr) > 0.0 and np.std(pred_arr) > 0.0:
-            pearson_r = float(np.corrcoef(obs_arr, pred_arr)[0, 1])
-        else:
-            pearson_r = np.nan
-        squared_error = residual ** 2
-        worst_n = max(1, int(round(obs_arr.size * float(worst_error_fraction))))
-        worst_n = min(worst_n, int(obs_arr.size))
-        worst_order = np.argsort(squared_error)[::-1]
-        worst_idx = worst_order[:worst_n]
-        keep_mask = np.ones(obs_arr.size, dtype=bool)
-        keep_mask[worst_idx] = False
-        if np.any(keep_mask):
-            trimmed_metrics = compute_basic_metrics(obs_arr[keep_mask], pred_arr[keep_mask])
-        else:
-            trimmed_metrics = {"r2": np.nan}
-        total_sse = float(np.sum(squared_error))
-        if total_sse > 0.0:
-            worst_sse_share = float(np.sum(squared_error[worst_idx]) / total_sse)
-        else:
-            worst_sse_share = np.nan
-        return {
-            "n_observations": int(obs_arr.size),
-            "pearson_r": pearson_r,
-            "full_r2": full_metrics.get("r2", np.nan),
-            "bias": bias,
-            "r2_bias_removed": bias_removed_metrics.get("r2", np.nan),
-            "worst_error_fraction": float(worst_error_fraction),
-            "worst_error_n_removed": int(worst_n),
-            "worst_error_sse_share": worst_sse_share,
-            "r2_without_worst_error_fraction": trimmed_metrics.get("r2", np.nan),
-        }
-
-    dry_site_min_obs = int(fig_cfg.get("dry_site_min_obs", 10))
-    dry_quantile = float(fig_cfg.get("dry_site_quantile", 0.20))
-    dry_worst_error_fraction = float(fig_cfg.get("dry_worst_error_fraction", 0.10))
-    dry_eligible_df = lfmc_y2y_df.copy()
-    dry_eligible_df["site_key"] = dry_eligible_df["site_key"].astype(str)
-    site_counts = dry_eligible_df.groupby("site_key", dropna=False).size()
-    eligible_site_keys = set(site_counts[site_counts >= dry_site_min_obs].index.astype(str))
-    dry_eligible_df = dry_eligible_df[dry_eligible_df["site_key"].isin(eligible_site_keys)].copy()
-    dry_chunks = []
-    for site_key, site_df in dry_eligible_df.groupby("site_key", dropna=False):
-        site_df = site_df.sort_values(["obs", "date"], ascending=[True, True], kind="mergesort")
-        dry_n = max(1, int(np.ceil(dry_quantile * len(site_df))))
-        dry_site_df = site_df.iloc[:dry_n].copy()
-        dry_site_df["dry_rank_within_site"] = np.arange(1, len(dry_site_df) + 1)
-        dry_site_df["dry_n_within_site"] = dry_n
-        dry_site_df["site_n_observations"] = len(site_df)
-        dry_site_df["dry_lfmc_threshold"] = float(dry_site_df["obs"].max())
-        dry_chunks.append(dry_site_df)
-    if len(dry_chunks) == 0:
-        raise ValueError("No LFMC rows were available for the Figure 4 driest-observation panel")
-    dry_lfmc_df = pd.concat(dry_chunks, ignore_index=True)
     overall_metrics = compute_basic_metrics(lfmc_df["obs"].values, lfmc_df["pred"].values)
     site_mean_metrics = compute_basic_metrics(
         site_summary_df["obs_mean"].values,
@@ -3293,22 +3219,6 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
     month_anom_metrics = compute_basic_metrics(
         month_anom_df["obs_dev"].values,
         month_anom_df["pred_dev"].values,
-    )
-    dry_lfmc_metrics = compute_basic_metrics(
-        dry_lfmc_df["obs"].values,
-        dry_lfmc_df["pred"].values,
-    )
-    dry_diagnostic_row = {
-        "model_key": str(fig_cfg["model_key"]),
-        "dry_site_min_obs": int(dry_site_min_obs),
-        "dry_site_quantile": float(dry_quantile),
-    }
-    dry_diagnostic_row.update(
-        dry_diagnostics(
-            dry_lfmc_df["obs"].values,
-            dry_lfmc_df["pred"].values,
-            worst_error_fraction=dry_worst_error_fraction,
-        )
     )
     print("Prepared Figure 4 metrics and bias annotations")
     panels = [
@@ -3371,6 +3281,7 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
             "cmap": "viridis",
             "cbar_vmax": 200,
             "cbar_extend": "max",
+            "s": 45,
         },
         {
             "title": "Deviation from\nmonthly average",
@@ -3395,30 +3306,9 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
             "xlim": (-100, 100),
             "ylim": (-100, 100),
         },
-        {
-            "title": f"Driest {dry_quantile * 100:.0f}%\nwithin site",
-            "panel_label": "e",
-            "kind": "hexbin",
-            "x": dry_lfmc_df["obs"].values,
-            "y": dry_lfmc_df["pred"].values,
-            "xlabel": "Observed LFMC (%)",
-            "ylabel": "Predicted LFMC (%)",
-            "metrics": {
-                "n": dry_lfmc_metrics["n"],
-                "rmse": dry_lfmc_metrics["rmse"],
-                "r2": dry_lfmc_metrics["r2"],
-                "bias": mean_bias(dry_lfmc_df["obs"].values, dry_lfmc_df["pred"].values),
-                "rmse_std": np.nan,
-                "r2_std": np.nan,
-            },
-            "cbar_label": "Count",
-            "gridsize": int(fig_cfg.get("hexbin_gridsize", 60)),
-        },
     ]
     save_path = _figure_output_path(runtime, str(fig_cfg["filename"]))
     table_path = _table_output_path(runtime, "figure_04_site_tables")
-    dry_table_path = _table_output_path(runtime, "figure_04_driest_lfmc_points")
-    dry_diagnostics_path = _table_output_path(runtime, "figure_04_driest_lfmc_diagnostics")
     combined_table = site_summary_df.merge(
         anomaly_df.groupby(["latitude", "longitude"], as_index=False).agg(
             n_anomaly_rows=("obs_anom", "size")
@@ -3436,11 +3326,7 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
         how="left",
     )
     combined_table.to_csv(table_path, index=False)
-    dry_lfmc_df.to_csv(dry_table_path, index=False)
-    pd.DataFrame.from_records([dry_diagnostic_row]).to_csv(dry_diagnostics_path, index=False)
     print(f"Wrote Figure 4 site table: {table_path}")
-    print(f"Wrote Figure 4 driest LFMC point table: {dry_table_path}")
-    print(f"Wrote Figure 4 driest LFMC diagnostics table: {dry_diagnostics_path}")
     print(f"Plotting Figure 4 to {save_path}")
     plot_scatter_triptych(
         panels=panels,
@@ -3455,6 +3341,8 @@ def build_figure_4(runtime: Dict[str, object]) -> str:
         colorbar_tick_fontsize=int(fig_cfg.get("colorbar_tick_fontsize", 26)),
         stats_fontsize=int(fig_cfg.get("stats_fontsize", 20)),
         panel_label_fontsize=int(fig_cfg.get("panel_label_fontsize", 30)),
+        subplot_wspace=fig_cfg.get("subplot_wspace"),
+        subplot_hspace=fig_cfg.get("subplot_hspace"),
     )
     return save_path
 
