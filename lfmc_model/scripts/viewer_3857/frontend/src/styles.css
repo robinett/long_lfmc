@@ -95,17 +95,6 @@ body {
   white-space: nowrap;
 }
 
-.dataset-notice {
-  margin-top: 9px;
-  padding: 9px 12px;
-  border-radius: 14px;
-  background: rgba(234, 214, 179, 0.92);
-  color: #4c311d;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: 0.8rem;
-  line-height: 1.35;
-}
-
 .date-slider-control {
   display: grid;
   grid-template-columns: 152px minmax(220px, 1fr);

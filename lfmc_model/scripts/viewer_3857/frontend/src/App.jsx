@@ -849,7 +849,8 @@ function App() {
     }
   }
 
-  function requestDatasetDate(datasetKey, targetDate, direction = "nearest") {
+  function requestDatasetDate(datasetKey, targetDate, direction = "nearest", options = {}) {
+    const { forceDataset = false } = options;
     const targetManifest = datasetManifests[datasetKey];
     const targetDates = targetManifest?.dates ?? [];
     if (!targetDates.length || !targetDate) {
@@ -858,6 +859,16 @@ function App() {
     const targetStart = targetDates[0];
     const targetEnd = targetDates[targetDates.length - 1];
     if (targetDate < targetStart || targetDate > targetEnd) {
+      if (forceDataset) {
+        const forcedResolution = dateResolutionForDataset(datasetKey, targetDate, "nearest");
+        if (forcedResolution) {
+          applyResolvedSelection(
+            forcedResolution,
+            `${targetManifest.dataset_label} is unavailable on ${targetDate}; snapped to ${forcedResolution.date}.`,
+          );
+        }
+        return;
+      }
       const alternateKey = alternateDatasetKey(datasetKey);
       const alternateResolution = dateResolutionForDataset(alternateKey, targetDate, "nearest");
       if (canUseResolution(alternateResolution)) {
@@ -874,7 +885,7 @@ function App() {
     }
     const resolvedDate = targetDates[targetIndex];
     const distanceDays = dateDiffDays(resolvedDate, targetDate);
-    if (datasetKey === SENTINEL_DATASET_KEY && distanceDays > SENTINEL_DATE_TOLERANCE_DAYS) {
+    if (!forceDataset && datasetKey === SENTINEL_DATASET_KEY && distanceDays > SENTINEL_DATE_TOLERANCE_DAYS) {
       const modisResolution = dateResolutionForDataset(DEFAULT_DATASET_KEY, targetDate);
       if (modisResolution) {
         applyResolvedSelection(
@@ -1907,7 +1918,7 @@ function App() {
                   type="button"
                   className={`toggle-button dataset-toggle-button ${activeDatasetKey === datasetKey ? "toggle-button-active" : ""}`}
                   disabled={!runtimeManifest}
-                  onClick={() => requestDatasetDate(datasetKey, selectedDate)}
+                  onClick={() => requestDatasetDate(datasetKey, selectedDate, "nearest", { forceDataset: true })}
                 >
                   {label}
                 </button>
@@ -1918,7 +1929,6 @@ function App() {
             Which dataset should I use?
           </a>
         </div>
-        {noticeText ? <div className="dataset-notice">{noticeText}</div> : null}
       </header>
       <aside className="control-panel">
         <section className="panel-card information-card">

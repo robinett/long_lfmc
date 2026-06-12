@@ -479,7 +479,9 @@ class ViewerDataset:
         historical_specs = []
         all_indices = set(current_indices)
         if include_history:
-            for year in range(first_year, last_year + 1):
+            comparison_start_year = max(first_year, selected_year - 3)
+            comparison_end_year = min(last_year, selected_year + 3)
+            for year in range(comparison_start_year, comparison_end_year + 1):
                 if year == selected_year:
                     continue
                 hist_end = shift_year(selected_date, year)
