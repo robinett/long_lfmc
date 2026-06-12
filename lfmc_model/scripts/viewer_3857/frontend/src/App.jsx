@@ -555,6 +555,16 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
     }));
   const firstDate = dates[0] ?? "";
   const lastDate = dates[dates.length - 1] ?? "";
+  const middleOffset = (TIMESERIES_WINDOW_DAYS - 1) / 2;
+  const middlePoint = currentPoints
+    .filter((point) => point.date && Number.isFinite(point.offset))
+    .reduce((best, point) => {
+      if (!best) {
+        return point;
+      }
+      return Math.abs(point.offset - middleOffset) < Math.abs(best.offset - middleOffset) ? point : best;
+    }, null);
+  const middleDate = middlePoint?.date ?? dates[Math.floor(dates.length / 2)] ?? "";
 
   return {
     width,
@@ -573,7 +583,7 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
     zeroLineY: isAnomalyMode ? yCoord(0) : null,
     xTicks: [
       { x: padding.left, label: firstDate, anchor: "start" },
-      { x: padding.left + innerWidth / 2, label: "45 days", anchor: "middle" },
+      { x: padding.left + innerWidth / 2, label: middleDate, anchor: "middle" },
       { x: width - padding.right, label: lastDate, anchor: "end" },
     ],
     mode,
