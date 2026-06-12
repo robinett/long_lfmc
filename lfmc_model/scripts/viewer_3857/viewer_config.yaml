@@ -2,33 +2,55 @@ server:
   host: 0.0.0.0
   port: 8001
 
-data:
-  dataset_label: Long LFMC Viewer 3857
-  data_source: source
-  consolidated: true
-  local_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857.zarr
-  source_store: s3://rseg/long-lfmc-test/viewer_3857/lfmc_maps_3857_t32.zarr
-  source_endpoint_url: https://data.source.coop
-  grid_crs: EPSG:3857
-  display_variable: lfmc_ens_mean
-  uncertainty_variable: lfmc_ens_std
-  quality_variable: quality_flag
-  landcover_variable: dominant_landcover_code
-  initial_date: 2024-06-01
+default_dataset: modis
 
-scientific_data:
-  data_source: source
-  consolidated: true
-  local_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/inference/final_products/lfmc_vh_vv_365_multisource_fusion_clim20_2001_2024.zarr
-  source_store: s3://rseg/long-lfmc-test/lfmc_maps.zarr
-  source_endpoint_url: https://data.source.coop
-  grid_crs: EPSG:5070
-  display_variable: lfmc_ens_mean
-  uncertainty_variable: lfmc_ens_std
-  quality_variable: quality_flag
+datasets:
+  modis:
+    label: MODIS-based LFMC
+    data:
+      dataset_label: MODIS-based LFMC
+      data_source: source
+      consolidated: true
+      local_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857.zarr
+      source_store: s3://rseg/long-lfmc-test/viewer_3857/lfmc_maps_3857_t32.zarr
+      source_endpoint_url: https://data.source.coop
+      grid_crs: EPSG:3857
+      display_variable: lfmc_ens_mean
+      uncertainty_variable: lfmc_ens_std
+      quality_variable: quality_flag
+      landcover_variable: dominant_landcover_code
+      climatology_variable: lfmc_climatology_mean_point
+      initial_date: 2024-06-01
+      layer_keys:
+        - mean
+        - anomaly
+    assets:
+      asset_mode: source
+      local_asset_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_assets/web_mercator_3857
+      source_asset_base_url: https://data.source.coop/rseg/long-lfmc-test/viewer_3857/assets/web_mercator_3857
+      manifest_filename: manifest.json
 
-assets:
-  asset_mode: source
-  local_asset_root: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_assets/web_mercator_3857
-  source_asset_base_url: https://data.source.coop/rseg/long-lfmc-test/viewer_3857/assets/web_mercator_3857
-  manifest_filename: manifest.json
+  sentinel1:
+    label: Sentinel-1 based LFMC
+    data:
+      dataset_label: Sentinel-1 based LFMC
+      data_source: source
+      consolidated: true
+      local_dataset_path: /oak/stanford/groups/konings/projects/rao_2020/data/source_products/viewer_3857/rao_s1_lfmc_3857.zarr
+      source_store: s3://rseg/sentinel1-lfmc/viewer_3857/lfmc_maps_3857.zarr
+      source_endpoint_url: https://data.source.coop
+      grid_crs: EPSG:3857
+      display_variable: lfmc
+      uncertainty_variable: ""
+      quality_variable: quality_flag
+      landcover_variable: ""
+      climatology_variable: ""
+      landcover_source_dataset: modis
+      initial_date: 2024-06-01
+      layer_keys:
+        - lfmc
+    assets:
+      asset_mode: source
+      local_asset_root: /oak/stanford/groups/konings/projects/rao_2020/data/source_products/viewer_3857/assets
+      source_asset_base_url: https://data.source.coop/rseg/sentinel1-lfmc/viewer_3857/assets/web_mercator_3857
+      manifest_filename: manifest.json

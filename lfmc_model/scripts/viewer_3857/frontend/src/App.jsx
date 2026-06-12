@@ -25,8 +25,11 @@ register(proj4);
 const DEFAULT_API_BASE_URL = "https://long-lfmc-api.onrender.com";
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, "");
 const MAX_DOWNLOAD_YEARS = 3;
-const DEFAULT_LAYER_KEY = "mean";
+const DEFAULT_DATASET_KEY = "modis";
+const SENTINEL_DATASET_KEY = "sentinel1";
 const DEFAULT_TIMESERIES_MODE = "mean";
+const TIMESERIES_WINDOW_DAYS = 90;
+const SENTINEL_DATE_TOLERANCE_DAYS = 20;
 const PRODUCT_DOC_URL = "https://docs.google.com/document/d/1b8n4UQ1XYDd_llw2nO0yPj-pN8Ar0BUjXGQiM-G6CvY/edit?usp=sharing";
 
 function apiUrl(pathAndQuery) {
@@ -52,8 +55,8 @@ function formatLabel(label) {
 }
 
 function legendGradient(layerConfig) {
-  const stops = layerConfig.stops ?? [];
-  const palette = layerConfig.palette ?? [];
+  const stops = layerConfig?.stops ?? [];
+  const palette = layerConfig?.palette ?? [];
   if (!stops.length || !palette.length) {
     return "linear-gradient(to right, #6d271d 0%, #c9794a 24%, #d2c487 52%, #6d8e60 76%, #253b36 100%)";
   }
@@ -185,320 +188,6 @@ function buildAxisTicks(minValue, maxValue, count = 4) {
   return ticks;
 }
 
-function buildDateTicks(dates) {
-  if (!dates.length) {
-    return [];
-  }
-
-  const candidateIndices = [0, Math.floor((dates.length - 1) / 2), dates.length - 1];
-  const seen = new Set();
-
-  return candidateIndices
-    .filter((idx) => {
-      if (seen.has(idx)) {
-        return false;
-      }
-      seen.add(idx);
-      return true;
-    })
-    .map((idx) => ({
-      idx,
-      label: dates[idx],
-      anchor: idx === 0 ? "start" : idx === dates.length - 1 ? "end" : "middle",
-    }));
-}
-
-function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
-  if (!pointInfo?.timeseries) {
-    return null;
-  }
-
-  const dates = pointInfo.timeseries.dates ?? [];
-  const isAnomalyMode = mode === "anomaly";
-  const values = isAnomalyMode
-    ? (pointInfo.timeseries.lfmc_anomaly ?? [])
-    : (pointInfo.timeseries.lfmc_ens_mean ?? []);
-  const stds = isAnomalyMode ? [] : (pointInfo.timeseries.lfmc_ens_std ?? []);
-  const validLinePoints = [];
-  const validBandPoints = [];
-  const bandSegments = [];
-  let currentBandSegment = [];
-
-  for (let idx = 0; idx < dates.length; idx += 1) {
-    const meanValue = values[idx];
-    const stdValue = stds[idx];
-    const meanNumber = Number(meanValue);
-    const stdNumber = Number(stdValue);
-    const hasMean = meanValue !== null && meanValue !== undefined && Number.isFinite(meanNumber);
-    const hasStd = !isAnomalyMode && stdValue !== null && stdValue !== undefined && Number.isFinite(stdNumber);
-    if (hasMean) {
-      validLinePoints.push({
-        idx,
-        mean: meanNumber,
-      });
-      if (hasStd) {
-        const bandPoint = {
-          idx,
-          mean: meanNumber,
-          low: meanNumber - stdNumber,
-          high: meanNumber + stdNumber,
-        };
-        validBandPoints.push(bandPoint);
-        currentBandSegment.push(bandPoint);
-      } else if (currentBandSegment.length > 0) {
-        bandSegments.push(currentBandSegment);
-        currentBandSegment = [];
-      }
-    } else if (currentBandSegment.length > 0) {
-      bandSegments.push(currentBandSegment);
-      currentBandSegment = [];
-    }
-  }
-  if (currentBandSegment.length > 0) {
-    bandSegments.push(currentBandSegment);
-  }
-
-  if (validLinePoints.length < 2) {
-    return null;
-  }
-
-  const width = 352;
-  const height = 210;
-  const padding = { left: 48, right: 24, top: 18, bottom: 38 };
-  const innerWidth = width - padding.left - padding.right;
-  const innerHeight = height - padding.top - padding.bottom;
-
-  const yValues = [
-    ...validLinePoints.map((point) => point.mean),
-    ...validBandPoints.flatMap((point) => [point.low, point.high]),
-  ];
-  const dataYMin = isAnomalyMode ? Math.min(...yValues, 0) : Math.min(...yValues);
-  const dataYMax = isAnomalyMode ? Math.max(...yValues, 0) : Math.max(...yValues);
-  const yTicks = buildAxisTicks(dataYMin, dataYMax);
-  const yMin = yTicks[0].value;
-  const yMax = yTicks[yTicks.length - 1].value;
-  const ySpan = Math.max(yMax - yMin, 1e-6);
-  const xDenominator = Math.max(dates.length - 1, 1);
-
-  const xCoord = (index) => padding.left + (index / xDenominator) * innerWidth;
-  const yCoord = (value) => padding.top + ((yMax - value) / ySpan) * innerHeight;
-
-  let lineStarted = false;
-  const linePathParts = [];
-
-  for (let idx = 0; idx < dates.length; idx += 1) {
-    const meanValue = values[idx];
-    if (meanValue === null || Number.isNaN(meanValue)) {
-      lineStarted = false;
-      continue;
-    }
-    linePathParts.push(`${lineStarted ? "L" : "M"} ${xCoord(idx)} ${yCoord(Number(meanValue))}`);
-    lineStarted = true;
-  }
-
-  const linePath = linePathParts.join(" ");
-  const areaPaths = bandSegments
-    .filter((segment) => segment.length >= 2)
-    .map((segment) =>
-      [
-        segment
-          .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xCoord(point.idx)} ${yCoord(point.high)}`)
-          .join(" "),
-        ...[...segment].reverse().map((point) => `L ${xCoord(point.idx)} ${yCoord(point.low)}`),
-        "Z",
-      ].join(" "),
-    );
-  const xTicks = buildDateTicks(dates).map((tick) => ({
-    ...tick,
-    x: xCoord(tick.idx),
-  }));
-
-  return {
-    width,
-    height,
-    padding,
-    linePath,
-    areaPaths,
-    axisLeft: padding.left,
-    axisRight: width - padding.right,
-    axisTop: padding.top,
-    axisBottom: height - padding.bottom,
-    yTicks: yTicks.map((tick) => ({
-      ...tick,
-      y: padding.top + tick.fraction * innerHeight,
-    })),
-    zeroLineY: isAnomalyMode ? yCoord(0) : null,
-    xTicks,
-    mode,
-    axisLabel: isAnomalyMode ? "LFMC Anomaly (%)" : "LFMC (%)",
-    lineLabel: isAnomalyMode ? "LFMC Anomaly" : "Prediction",
-    showBand: !isAnomalyMode,
-  };
-}
-
-function TimeseriesChart({ pointInfo, mode, onModeChange }) {
-  const hasAnomaly = Boolean(pointInfo?.timeseries?.lfmc_anomaly?.some((value) => value !== null && value !== undefined));
-  const activeMode = mode === "anomaly" && hasAnomaly ? "anomaly" : DEFAULT_TIMESERIES_MODE;
-  const geometry = buildTimeseriesGeometry(pointInfo, activeMode);
-  const modeControls = (
-    <div className="timeseries-mode-row" aria-label="Timeseries mode">
-      <button
-        type="button"
-        className={`toggle-button timeseries-mode-button ${activeMode === "mean" ? "toggle-button-active" : ""}`}
-        onClick={() => onModeChange("mean")}
-      >
-        LFMC
-      </button>
-      <button
-        type="button"
-        className={`toggle-button timeseries-mode-button ${activeMode === "anomaly" ? "toggle-button-active" : ""}`}
-        disabled={!hasAnomaly}
-        onClick={() => onModeChange("anomaly")}
-      >
-        LFMC Anomaly
-      </button>
-    </div>
-  );
-
-  if (!geometry) {
-    return (
-      <div className="timeseries-wrap">
-        {modeControls}
-        <p className="panel-note">Click the map to load the previous 90 days of daily values.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="timeseries-wrap">
-      {modeControls}
-      <svg viewBox={`0 0 ${geometry.width} ${geometry.height}`} className="timeseries-chart" role="img">
-        <line
-          x1={geometry.axisLeft}
-          x2={geometry.axisLeft}
-          y1={geometry.axisTop}
-          y2={geometry.axisBottom}
-          className="chart-axis"
-        />
-        <line
-          x1={geometry.axisLeft}
-          x2={geometry.axisRight}
-          y1={geometry.axisBottom}
-          y2={geometry.axisBottom}
-          className="chart-axis"
-        />
-        {geometry.areaPaths.map((areaPath, idx) => (
-          <path key={`band-${idx}`} d={areaPath} className="chart-band" />
-        ))}
-        {geometry.zeroLineY !== null ? (
-          <line
-            x1={geometry.axisLeft}
-            x2={geometry.axisRight}
-            y1={geometry.zeroLineY}
-            y2={geometry.zeroLineY}
-            className="chart-zero-line"
-          />
-        ) : null}
-        <path d={geometry.linePath} className={`chart-line chart-line-${geometry.mode}`} />
-        {geometry.yTicks.map((tick) => (
-          <g key={`y-${tick.label}`}>
-            <line
-              x1={geometry.axisLeft - 5}
-              x2={geometry.axisLeft}
-              y1={tick.y}
-              y2={tick.y}
-              className="chart-tick"
-            />
-            <text x={geometry.axisLeft - 9} y={tick.y + 4} className="chart-label chart-label-y">
-              {tick.label}
-            </text>
-          </g>
-        ))}
-        {geometry.xTicks.map((tick) => (
-          <g key={`x-${tick.idx}`}>
-            <line
-              x1={tick.x}
-              x2={tick.x}
-              y1={geometry.axisBottom}
-              y2={geometry.axisBottom + 5}
-              className="chart-tick"
-            />
-            <text
-              x={tick.x}
-              y={geometry.axisBottom + 18}
-              textAnchor={tick.anchor}
-              className="chart-label chart-label-x"
-            >
-              {tick.label}
-            </text>
-          </g>
-        ))}
-        <text
-          x="16"
-          y={geometry.axisTop + (geometry.axisBottom - geometry.axisTop) / 2}
-          transform={`rotate(-90 16 ${geometry.axisTop + (geometry.axisBottom - geometry.axisTop) / 2})`}
-          className="chart-label chart-label-axis"
-        >
-          {geometry.axisLabel}
-        </text>
-      </svg>
-      <div className="timeseries-legend" aria-label="Timeseries legend">
-        <div className="timeseries-legend-item">
-          <span className={`timeseries-legend-swatch timeseries-legend-swatch-line timeseries-legend-swatch-${geometry.mode}`} />
-          <span className="timeseries-legend-label">{geometry.lineLabel}</span>
-        </div>
-        {geometry.showBand ? (
-          <div className="timeseries-legend-item">
-            <span className="timeseries-legend-swatch timeseries-legend-swatch-band" />
-            <span className="timeseries-legend-label">Ensemble-based uncertainty</span>
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function cellPolygonCoordinates(cellBounds) {
-  return [[
-    [cellBounds.west, cellBounds.south],
-    [cellBounds.east, cellBounds.south],
-    [cellBounds.east, cellBounds.north],
-    [cellBounds.west, cellBounds.north],
-    [cellBounds.west, cellBounds.south],
-  ]];
-}
-
-function cellBoundsFromIndex(cellIndex, manifest) {
-  const dx = Number(manifest.grid_resolution.dx);
-  const dy = Number(manifest.grid_resolution.dy);
-  const west = Number(manifest.grid_extent.west) + cellIndex.x * dx;
-  const east = west + dx;
-  const north = Number(manifest.grid_extent.north) - cellIndex.y * dy;
-  const south = north - dy;
-  return { west, east, south, north };
-}
-
-function tileUrlForCoord(assetBaseUrl, tileTemplate, selectedDate, z, x, y) {
-  const relpath = tileTemplate
-    .replace("{date}", selectedDate)
-    .replace("{z}", String(z))
-    .replace("{x}", String(x))
-    .replace("{y}", String(y));
-  return `${assetBaseUrl.replace(/\/$/, "")}/${relpath}`;
-}
-
-function formatCoordinateInput(value) {
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return "";
-  }
-  return Number(value).toFixed(4);
-}
-
-function parseCoordinateInput(value) {
-  const parsed = Number(String(value).trim());
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function parseDateString(dateStr) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr));
   if (!match) {
@@ -522,6 +211,15 @@ function formatDateString(date) {
   return date.toISOString().slice(0, 10);
 }
 
+function dateDiffDays(left, right) {
+  const leftDate = parseDateString(left);
+  const rightDate = parseDateString(right);
+  if (!leftDate || !rightDate) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.round(Math.abs(leftDate - rightDate) / 86400000);
+}
+
 function shiftDateString(dateStr, amount, unit) {
   const date = parseDateString(dateStr);
   if (!date) {
@@ -536,8 +234,7 @@ function shiftDateString(dateStr, amount, unit) {
     ).getUTCDate();
     date.setUTCDate(Math.min(originalDay, lastDayOfTargetMonth));
   } else {
-    const dayMultiplier = unit === "week" ? 7 : 1;
-    date.setUTCDate(date.getUTCDate() + amount * dayMultiplier);
+    date.setUTCDate(date.getUTCDate() + amount);
   }
   return formatDateString(date);
 }
@@ -567,13 +264,9 @@ function findDateIndex(dates, targetDate, direction = "nearest") {
   if (direction === "forward") {
     return afterIdx;
   }
-  const beforeDate = parseDateString(dates[beforeIdx]);
-  const afterDate = parseDateString(dates[afterIdx]);
-  const target = parseDateString(targetDate);
-  if (!beforeDate || !afterDate || !target) {
-    return afterIdx;
-  }
-  return target - beforeDate <= afterDate - target ? beforeIdx : afterIdx;
+  return dateDiffDays(dates[beforeIdx], targetDate) <= dateDiffDays(dates[afterIdx], targetDate)
+    ? beforeIdx
+    : afterIdx;
 }
 
 function maxDownloadEndDate(startDate) {
@@ -657,6 +350,350 @@ function preventManualDateEdit(event) {
   event.preventDefault();
 }
 
+function cellPolygonCoordinates(cellBounds) {
+  return [[
+    [cellBounds.west, cellBounds.south],
+    [cellBounds.east, cellBounds.south],
+    [cellBounds.east, cellBounds.north],
+    [cellBounds.west, cellBounds.north],
+    [cellBounds.west, cellBounds.south],
+  ]];
+}
+
+function tileUrlForCoord(assetBaseUrl, tileTemplate, selectedDate, z, x, y) {
+  const relpath = tileTemplate
+    .replace("{date}", selectedDate)
+    .replace("{z}", String(z))
+    .replace("{x}", String(x))
+    .replace("{y}", String(y));
+  return `${assetBaseUrl.replace(/\/$/, "")}/${relpath}`;
+}
+
+function formatCoordinateInput(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "";
+  }
+  return Number(value).toFixed(4);
+}
+
+function parseCoordinateInput(value) {
+  const parsed = Number(String(value).trim());
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hasUsableValue(values) {
+  return Boolean(values?.some((value) => value !== null && value !== undefined && Number.isFinite(Number(value))));
+}
+
+function seriesPath(points, xCoord, yCoord) {
+  let lineStarted = false;
+  const parts = [];
+  for (const point of points) {
+    if (point.value === null || point.value === undefined || Number.isNaN(point.value)) {
+      lineStarted = false;
+      continue;
+    }
+    parts.push(`${lineStarted ? "L" : "M"} ${xCoord(point.offset)} ${yCoord(Number(point.value))}`);
+    lineStarted = true;
+  }
+  return parts.join(" ");
+}
+
+function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
+  if (!pointInfo?.timeseries) {
+    return null;
+  }
+
+  const timeseries = pointInfo.timeseries;
+  const dates = timeseries.dates ?? [];
+  const offsets = timeseries.day_offsets ?? dates.map((_, idx) => idx);
+  const isAnomalyMode = mode === "anomaly";
+  const values = isAnomalyMode ? (timeseries.lfmc_anomaly ?? []) : (timeseries.lfmc_ens_mean ?? []);
+  const stds = isAnomalyMode ? [] : (timeseries.lfmc_ens_std ?? []);
+  const currentPoints = dates.map((date, idx) => ({
+    date,
+    offset: Number(offsets[idx]),
+    value: values[idx] === null || values[idx] === undefined ? null : Number(values[idx]),
+    std: stds[idx] === null || stds[idx] === undefined ? null : Number(stds[idx]),
+    year: date.slice(0, 4),
+    current: true,
+  }));
+  const historicalSeries = (timeseries.historical_windows ?? [])
+    .map((window) => {
+      const windowValues = isAnomalyMode ? (window.lfmc_anomaly ?? []) : (window.lfmc_ens_mean ?? []);
+      const windowDates = window.dates ?? [];
+      const windowOffsets = window.day_offsets ?? windowDates.map((_, idx) => idx);
+      return {
+        year: window.year,
+        points: windowDates.map((date, idx) => ({
+          date,
+          offset: Number(windowOffsets[idx]),
+          value: windowValues[idx] === null || windowValues[idx] === undefined ? null : Number(windowValues[idx]),
+          year: String(window.year ?? date.slice(0, 4)),
+          current: false,
+        })),
+      };
+    })
+    .filter((series) => series.points.filter((point) => Number.isFinite(point.value)).length >= 2);
+
+  const validCurrentPoints = currentPoints.filter((point) => Number.isFinite(point.value));
+  if (validCurrentPoints.length < 2) {
+    return null;
+  }
+
+  const width = 352;
+  const height = 210;
+  const padding = { left: 48, right: 24, top: 18, bottom: 38 };
+  const innerWidth = width - padding.left - padding.right;
+  const innerHeight = height - padding.top - padding.bottom;
+  const validBandPoints = currentPoints.filter(
+    (point) => !isAnomalyMode && Number.isFinite(point.value) && Number.isFinite(point.std),
+  );
+  const allYValues = [
+    ...validCurrentPoints.map((point) => point.value),
+    ...validBandPoints.flatMap((point) => [point.value - point.std, point.value + point.std]),
+    ...historicalSeries.flatMap((series) =>
+      series.points.filter((point) => Number.isFinite(point.value)).map((point) => point.value),
+    ),
+  ];
+  const dataYMin = isAnomalyMode ? Math.min(...allYValues, 0) : Math.min(...allYValues);
+  const dataYMax = isAnomalyMode ? Math.max(...allYValues, 0) : Math.max(...allYValues);
+  const yTicks = buildAxisTicks(dataYMin, dataYMax);
+  const yMin = yTicks[0].value;
+  const yMax = yTicks[yTicks.length - 1].value;
+  const ySpan = Math.max(yMax - yMin, 1e-6);
+  const xCoord = (offset) => padding.left + (Math.max(0, Math.min(TIMESERIES_WINDOW_DAYS - 1, offset)) / (TIMESERIES_WINDOW_DAYS - 1)) * innerWidth;
+  const yCoord = (value) => padding.top + ((yMax - value) / ySpan) * innerHeight;
+  const linePath = seriesPath(currentPoints, xCoord, yCoord);
+  const historicalPaths = historicalSeries.map((series) => ({
+    year: series.year,
+    path: seriesPath(series.points, xCoord, yCoord),
+  }));
+
+  const bandSegments = [];
+  let currentBandSegment = [];
+  for (const point of currentPoints) {
+    if (Number.isFinite(point.value) && Number.isFinite(point.std)) {
+      currentBandSegment.push({
+        offset: point.offset,
+        low: point.value - point.std,
+        high: point.value + point.std,
+      });
+    } else if (currentBandSegment.length > 0) {
+      bandSegments.push(currentBandSegment);
+      currentBandSegment = [];
+    }
+  }
+  if (currentBandSegment.length > 0) {
+    bandSegments.push(currentBandSegment);
+  }
+  const areaPaths = bandSegments
+    .filter((segment) => segment.length >= 2)
+    .map((segment) =>
+      [
+        segment
+          .map((point, idx) => `${idx === 0 ? "M" : "L"} ${xCoord(point.offset)} ${yCoord(point.high)}`)
+          .join(" "),
+        ...[...segment].reverse().map((point) => `L ${xCoord(point.offset)} ${yCoord(point.low)}`),
+        "Z",
+      ].join(" "),
+    );
+  const hoverPoints = [
+    ...currentPoints,
+    ...historicalSeries.flatMap((series) => series.points),
+  ]
+    .filter((point) => Number.isFinite(point.value))
+    .map((point) => ({
+      ...point,
+      x: xCoord(point.offset),
+      y: yCoord(point.value),
+      label: `${point.year} ${point.date}: ${formatValue(point.value, 1)}%`,
+    }));
+  const firstDate = dates[0] ?? "";
+  const lastDate = dates[dates.length - 1] ?? "";
+
+  return {
+    width,
+    height,
+    linePath,
+    historicalPaths,
+    areaPaths,
+    axisLeft: padding.left,
+    axisRight: width - padding.right,
+    axisTop: padding.top,
+    axisBottom: height - padding.bottom,
+    yTicks: yTicks.map((tick) => ({
+      ...tick,
+      y: padding.top + tick.fraction * innerHeight,
+    })),
+    zeroLineY: isAnomalyMode ? yCoord(0) : null,
+    xTicks: [
+      { x: padding.left, label: firstDate, anchor: "start" },
+      { x: padding.left + innerWidth / 2, label: "45 days", anchor: "middle" },
+      { x: width - padding.right, label: lastDate, anchor: "end" },
+    ],
+    mode,
+    axisLabel: isAnomalyMode ? "LFMC Anomaly (%)" : "LFMC (%)",
+    lineLabel: isAnomalyMode ? "Selected-year LFMC anomaly" : "Selected-year LFMC",
+    showBand: !isAnomalyMode && areaPaths.length > 0,
+    hoverPoints,
+  };
+}
+
+function TimeseriesChart({ pointInfo, mode, onModeChange, supportsAnomaly }) {
+  const [hoverPoint, setHoverPoint] = useState(null);
+  const hasAnomaly = supportsAnomaly && hasUsableValue(pointInfo?.timeseries?.lfmc_anomaly);
+  const activeMode = mode === "anomaly" && hasAnomaly ? "anomaly" : DEFAULT_TIMESERIES_MODE;
+  const geometry = buildTimeseriesGeometry(pointInfo, activeMode);
+  const modeControls = (
+    <div className="timeseries-mode-row" aria-label="Timeseries mode">
+      <button
+        type="button"
+        className={`toggle-button timeseries-mode-button ${activeMode === "mean" ? "toggle-button-active" : ""}`}
+        onClick={() => onModeChange("mean")}
+      >
+        LFMC
+      </button>
+      <button
+        type="button"
+        className={`toggle-button timeseries-mode-button ${activeMode === "anomaly" ? "toggle-button-active" : ""}`}
+        disabled={!hasAnomaly}
+        onClick={() => onModeChange("anomaly")}
+      >
+        LFMC Anomaly
+      </button>
+    </div>
+  );
+
+  if (!geometry) {
+    return (
+      <div className="timeseries-wrap">
+        {modeControls}
+        <p className="panel-note">Click the map to load the previous 90 days of values.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="timeseries-wrap">
+      {modeControls}
+      <div className="timeseries-chart-wrap" onMouseLeave={() => setHoverPoint(null)}>
+        <svg viewBox={`0 0 ${geometry.width} ${geometry.height}`} className="timeseries-chart" role="img">
+          <line
+            x1={geometry.axisLeft}
+            x2={geometry.axisLeft}
+            y1={geometry.axisTop}
+            y2={geometry.axisBottom}
+            className="chart-axis"
+          />
+          <line
+            x1={geometry.axisLeft}
+            x2={geometry.axisRight}
+            y1={geometry.axisBottom}
+            y2={geometry.axisBottom}
+            className="chart-axis"
+          />
+          {geometry.historicalPaths.map((historicalPath) => (
+            <path key={`hist-${historicalPath.year}`} d={historicalPath.path} className="chart-line-history" />
+          ))}
+          {geometry.areaPaths.map((areaPath, idx) => (
+            <path key={`band-${idx}`} d={areaPath} className="chart-band" />
+          ))}
+          {geometry.zeroLineY !== null ? (
+            <line
+              x1={geometry.axisLeft}
+              x2={geometry.axisRight}
+              y1={geometry.zeroLineY}
+              y2={geometry.zeroLineY}
+              className="chart-zero-line"
+            />
+          ) : null}
+          <path d={geometry.linePath} className={`chart-line chart-line-${geometry.mode}`} />
+          {geometry.yTicks.map((tick) => (
+            <g key={`y-${tick.label}`}>
+              <line
+                x1={geometry.axisLeft - 5}
+                x2={geometry.axisLeft}
+                y1={tick.y}
+                y2={tick.y}
+                className="chart-tick"
+              />
+              <text x={geometry.axisLeft - 9} y={tick.y + 4} className="chart-label chart-label-y">
+                {tick.label}
+              </text>
+            </g>
+          ))}
+          {geometry.xTicks.map((tick) => (
+            <g key={`x-${tick.label}-${tick.x}`}>
+              <line
+                x1={tick.x}
+                x2={tick.x}
+                y1={geometry.axisBottom}
+                y2={geometry.axisBottom + 5}
+                className="chart-tick"
+              />
+              <text
+                x={tick.x}
+                y={geometry.axisBottom + 18}
+                textAnchor={tick.anchor}
+                className="chart-label chart-label-x"
+              >
+                {tick.label}
+              </text>
+            </g>
+          ))}
+          <text
+            x="16"
+            y={geometry.axisTop + (geometry.axisBottom - geometry.axisTop) / 2}
+            transform={`rotate(-90 16 ${geometry.axisTop + (geometry.axisBottom - geometry.axisTop) / 2})`}
+            className="chart-label chart-label-axis"
+          >
+            {geometry.axisLabel}
+          </text>
+          {geometry.hoverPoints.map((point, idx) => (
+            <circle
+              key={`hover-${idx}-${point.date}-${point.year}`}
+              cx={point.x}
+              cy={point.y}
+              r="7"
+              className="chart-hover-target"
+              onMouseEnter={() => setHoverPoint(point)}
+              onMouseMove={() => setHoverPoint(point)}
+            />
+          ))}
+        </svg>
+        {hoverPoint ? (
+          <div
+            className="timeseries-tooltip"
+            style={{
+              left: `${(hoverPoint.x / geometry.width) * 100}%`,
+              top: `${(hoverPoint.y / geometry.height) * 100}%`,
+            }}
+          >
+            {hoverPoint.label}
+          </div>
+        ) : null}
+      </div>
+      <div className="timeseries-legend" aria-label="Timeseries legend">
+        <div className="timeseries-legend-item">
+          <span className={`timeseries-legend-swatch timeseries-legend-swatch-line timeseries-legend-swatch-${geometry.mode}`} />
+          <span className="timeseries-legend-label">{geometry.lineLabel}</span>
+        </div>
+        <div className="timeseries-legend-item">
+          <span className="timeseries-legend-swatch timeseries-legend-swatch-history" />
+          <span className="timeseries-legend-label">Previous years</span>
+        </div>
+        {geometry.showBand ? (
+          <div className="timeseries-legend-item">
+            <span className="timeseries-legend-swatch timeseries-legend-swatch-band" />
+            <span className="timeseries-legend-label">Ensemble-based uncertainty</span>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const lfmcDisplayOpacity = 0.75;
   const mapContainerRef = useRef(null);
@@ -666,17 +703,22 @@ function App() {
   const selectionSourceRef = useRef(null);
   const manifestRef = useRef(null);
   const dateIndexRef = useRef(0);
-  const selectedLayerKeyRef = useRef(DEFAULT_LAYER_KEY);
+  const selectedLayerKeyRef = useRef("mean");
+  const activeDatasetKeyRef = useRef(DEFAULT_DATASET_KEY);
   const pointRef = useRef(null);
   const transitionTokenRef = useRef(0);
   const queuedDateIndexRef = useRef(null);
   const transitionInFlightRef = useRef(false);
   const playbackTimeoutRef = useRef(null);
   const activeDownloadSiteIndexRef = useRef(0);
+  const noticeTimeoutRef = useRef(null);
 
+  const [metadata, setMetadata] = useState(null);
+  const [datasetManifests, setDatasetManifests] = useState({});
+  const [activeDatasetKey, setActiveDatasetKey] = useState(DEFAULT_DATASET_KEY);
   const [manifest, setManifest] = useState(null);
   const [dateIndex, setDateIndex] = useState(0);
-  const [selectedLayerKey, setSelectedLayerKey] = useState(DEFAULT_LAYER_KEY);
+  const [selectedLayerKey, setSelectedLayerKey] = useState("mean");
   const [timeseriesMode, setTimeseriesMode] = useState(DEFAULT_TIMESERIES_MODE);
   const [isPlaying, setIsPlaying] = useState(false);
   const [locationLatInput, setLocationLatInput] = useState("");
@@ -686,21 +728,125 @@ function App() {
   const [isDownloadingCsv, setIsDownloadingCsv] = useState(false);
   const [pointInfo, setPointInfo] = useState(null);
   const [statusText, setStatusText] = useState("Loading viewer manifest...");
+  const [noticeText, setNoticeText] = useState("");
   const [isMapLoading, setIsMapLoading] = useState(false);
   const [isPointLoading, setIsPointLoading] = useState(false);
+
   const dates = manifest?.dates ?? [];
   const selectedDate = dates[dateIndex] ?? "NA";
+  const datasetMeta = metadata?.datasets?.[activeDatasetKey] ?? {};
+  const supportsAnomaly = Boolean(datasetMeta.supports_anomaly);
   const layerEntries = Object.entries(manifest?.layers ?? {});
-  const activeLayer = manifest?.layers?.[selectedLayerKey] ?? manifest?.layers?.[DEFAULT_LAYER_KEY] ?? null;
-  const activeLayerKey = manifest?.layers?.[selectedLayerKey] ? selectedLayerKey : DEFAULT_LAYER_KEY;
+  const activeLayer = manifest?.layers?.[selectedLayerKey] ?? null;
+  const activeLayerKey = activeLayer ? selectedLayerKey : Object.keys(manifest?.layers ?? {})[0] ?? "";
+  const datasetKeys = Object.keys(metadata?.datasets ?? {});
+
+  function showNotice(message) {
+    setNoticeText(message);
+    if (noticeTimeoutRef.current) {
+      window.clearTimeout(noticeTimeoutRef.current);
+    }
+    noticeTimeoutRef.current = window.setTimeout(() => {
+      setNoticeText("");
+      noticeTimeoutRef.current = null;
+    }, 5200);
+  }
+
+  function preferredLayerForDataset(datasetKey, targetManifest) {
+    if (datasetKey === SENTINEL_DATASET_KEY) {
+      return targetManifest?.layers?.lfmc ? "lfmc" : Object.keys(targetManifest?.layers ?? {})[0] ?? "";
+    }
+    return targetManifest?.layers?.mean ? "mean" : Object.keys(targetManifest?.layers ?? {})[0] ?? "";
+  }
+
+  function dateResolutionForDataset(datasetKey, targetDate) {
+    const targetManifest = datasetManifests[datasetKey];
+    const targetDates = targetManifest?.dates ?? [];
+    if (!targetDates.length || !targetDate) {
+      return null;
+    }
+    const targetIndex = findDateIndex(targetDates, targetDate);
+    if (targetIndex < 0) {
+      return null;
+    }
+    const resolvedDate = targetDates[targetIndex];
+    return {
+      datasetKey,
+      manifest: targetManifest,
+      index: targetIndex,
+      date: resolvedDate,
+      distanceDays: dateDiffDays(resolvedDate, targetDate),
+    };
+  }
+
+  function applyResolvedSelection(resolution, message = "") {
+    const nextManifest = resolution.manifest;
+    const nextLayerKey = preferredLayerForDataset(resolution.datasetKey, nextManifest);
+    setIsPlaying(false);
+    setActiveDatasetKey(resolution.datasetKey);
+    activeDatasetKeyRef.current = resolution.datasetKey;
+    setManifest(nextManifest);
+    manifestRef.current = nextManifest;
+    setDateIndex(resolution.index);
+    dateIndexRef.current = resolution.index;
+    setSelectedLayerKey(nextLayerKey);
+    selectedLayerKeyRef.current = nextLayerKey;
+    setTimeseriesMode(DEFAULT_TIMESERIES_MODE);
+    pointRef.current = null;
+    setPointInfo(null);
+    setDownloadSites((currentSites) =>
+      currentSites.map((site) => clampDownloadSiteDates(site, nextManifest.dates ?? [])),
+    );
+    setStatusText(`Showing ${nextManifest.dataset_label} for ${resolution.date}`);
+    if (message) {
+      showNotice(message);
+    }
+  }
+
+  function requestDatasetDate(datasetKey, targetDate, direction = "nearest") {
+    const targetManifest = datasetManifests[datasetKey];
+    const targetDates = targetManifest?.dates ?? [];
+    if (!targetDates.length || !targetDate) {
+      return;
+    }
+    let targetIndex = findDateIndex(targetDates, targetDate, direction);
+    if (targetIndex < 0) {
+      return;
+    }
+    const resolvedDate = targetDates[targetIndex];
+    const distanceDays = dateDiffDays(resolvedDate, targetDate);
+    if (datasetKey === SENTINEL_DATASET_KEY && distanceDays > SENTINEL_DATE_TOLERANCE_DAYS) {
+      const modisResolution = dateResolutionForDataset(DEFAULT_DATASET_KEY, targetDate);
+      if (modisResolution) {
+        applyResolvedSelection(
+          modisResolution,
+          `Sentinel-1 LFMC has no prediction within ${SENTINEL_DATE_TOLERANCE_DAYS} days of ${targetDate}; switched to MODIS-based LFMC.`,
+        );
+      }
+      return;
+    }
+    const message = resolvedDate !== targetDate
+      ? `${targetManifest.dataset_label} is only available on ${resolvedDate}; snapped from ${targetDate}.`
+      : "";
+    if (datasetKey !== activeDatasetKeyRef.current) {
+      applyResolvedSelection({ datasetKey, manifest: targetManifest, index: targetIndex, date: resolvedDate }, message);
+      return;
+    }
+    if (message) {
+      showNotice(message);
+    }
+    setIsPlaying(false);
+    requestDateTransition(targetIndex);
+  }
 
   async function queryPoint(x, y, dateStr) {
     const query = new URLSearchParams({
+      dataset: activeDatasetKeyRef.current,
       date: dateStr,
       x: String(x),
       y: String(y),
       include_timeseries: "true",
-      timeseries_days: "90",
+      timeseries_days: String(TIMESERIES_WINDOW_DAYS),
     });
     const maxAttempts = 30;
     const retryDelayMs = 2000;
@@ -746,7 +892,7 @@ function App() {
           ),
         );
       }
-      updateSelectionFeatures(payload, manifestRef.current);
+      updateSelectionFeatures(payload);
       if (recenter && mapRef.current) {
         mapRef.current.getView().animate({
           center: [payload.requested_grid_x, payload.requested_grid_y],
@@ -1007,11 +1153,17 @@ function App() {
     if (!manifestPayload?.layers?.[layerKey]) {
       return;
     }
+    if (isAnomalyLayer(layerKey) && !supportsAnomaly) {
+      showNotice("Sentinel-1 LFMC does not include anomalies, so the anomaly layer is unavailable.");
+      return;
+    }
     setIsPlaying(false);
     setSelectedLayerKey(layerKey);
     selectedLayerKeyRef.current = layerKey;
     if (isAnomalyLayer(layerKey)) {
       setTimeseriesMode("anomaly");
+    } else if (!supportsAnomaly) {
+      setTimeseriesMode(DEFAULT_TIMESERIES_MODE);
     }
     void transitionToDateIndex(dateIndexRef.current, { force: true, layerKey });
   }
@@ -1020,12 +1172,7 @@ function App() {
     if (!dates.length || !targetDate) {
       return;
     }
-    const targetIndex = findDateIndex(dates, targetDate, direction);
-    if (targetIndex < 0) {
-      return;
-    }
-    setIsPlaying(false);
-    requestDateTransition(targetIndex);
+    requestDatasetDate(activeDatasetKeyRef.current, targetDate, direction);
   }
 
   function handleDateStep(amount, unit) {
@@ -1036,12 +1183,11 @@ function App() {
     requestDateValueTransition(targetDate, amount < 0 ? "backward" : "forward");
   }
 
-  function updateSelectionFeatures(payload, manifestPayload) {
+  function updateSelectionFeatures(payload) {
     const selectionSource = selectionSourceRef.current;
     if (!selectionSource) {
       return;
     }
-    const cellBounds = cellBoundsFromIndex(payload.cell_index, manifestPayload);
     selectionSource.clear();
     selectionSource.addFeature(
       new Feature({
@@ -1051,7 +1197,7 @@ function App() {
     );
     selectionSource.addFeature(
       new Feature({
-        geometry: new Polygon(cellPolygonCoordinates(cellBounds)),
+        geometry: new Polygon(cellPolygonCoordinates(payload.cell_bounds)),
         role: "cell_outline",
       }),
     );
@@ -1062,7 +1208,7 @@ function App() {
     const maxAttempts = 120;
     const retryDelayMs = 2000;
 
-    async function loadManifest() {
+    async function loadManifests() {
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         try {
           setStatusText("Starting viewer...");
@@ -1077,38 +1223,56 @@ function App() {
             }
             throw new Error(metadataError);
           }
-          const metadata = await metadataResponse.json();
-          const manifestResponse = await fetch(metadata.asset_manifest_url, { cache: "no-store" });
-          if (!manifestResponse.ok) {
-            throw new Error(`Manifest HTTP ${manifestResponse.status}`);
+          const metadataPayload = await metadataResponse.json();
+          const nextManifests = {};
+          for (const [datasetKey, datasetConfig] of Object.entries(metadataPayload.datasets ?? {})) {
+            const manifestResponse = await fetch(datasetConfig.asset_manifest_url, { cache: "no-store" });
+            if (!manifestResponse.ok) {
+              throw new Error(`${datasetConfig.dataset_label} manifest HTTP ${manifestResponse.status}`);
+            }
+            const manifestPayload = await manifestResponse.json();
+            nextManifests[datasetKey] = {
+              ...manifestPayload,
+              ...datasetConfig,
+              dataset_key: datasetKey,
+              dataset_label: datasetConfig.dataset_label,
+              asset_base_url: datasetConfig.asset_base_url,
+              asset_manifest_url: datasetConfig.asset_manifest_url,
+              supports_anomaly: Boolean(datasetConfig.supports_anomaly),
+              supports_uncertainty: Boolean(datasetConfig.supports_uncertainty),
+              supports_climatology: Boolean(datasetConfig.supports_climatology),
+            };
           }
-          const payload = await manifestResponse.json();
           if (cancelled) {
             return;
           }
-          const runtimeManifest = {
-            ...payload,
-            asset_base_url: metadata.asset_base_url,
-            asset_manifest_url: metadata.asset_manifest_url,
-          };
-          setManifest(runtimeManifest);
-          manifestRef.current = runtimeManifest;
-          const configuredInitialDate = runtimeManifest.dates.includes(metadata.initial_date)
-            ? metadata.initial_date
-            : runtimeManifest.initial_date;
-          const initialIndex = Math.max(runtimeManifest.dates.indexOf(configuredInitialDate), 0);
+          const defaultKey = metadataPayload.default_dataset || DEFAULT_DATASET_KEY;
+          const initialManifest = nextManifests[defaultKey] ?? nextManifests[Object.keys(nextManifests)[0]];
+          const configuredInitialDate = initialManifest.dates.includes(initialManifest.initial_date)
+            ? initialManifest.initial_date
+            : initialManifest.dates[initialManifest.dates.length - 1];
+          const initialIndex = Math.max(initialManifest.dates.indexOf(configuredInitialDate), 0);
+          const initialLayerKey = preferredLayerForDataset(defaultKey, initialManifest);
+          setMetadata(metadataPayload);
+          setDatasetManifests(nextManifests);
+          setActiveDatasetKey(defaultKey);
+          activeDatasetKeyRef.current = defaultKey;
+          setManifest(initialManifest);
+          manifestRef.current = initialManifest;
           setDateIndex(initialIndex);
           dateIndexRef.current = initialIndex;
+          setSelectedLayerKey(initialLayerKey);
+          selectedLayerKeyRef.current = initialLayerKey;
           setDownloadSites((currentSites) =>
             currentSites.map((site) => ({
               ...site,
-              startDate: site.startDate || runtimeManifest.dates[0] || "",
+              startDate: site.startDate || initialManifest.dates[0] || "",
               endDate:
                 site.endDate ||
-                defaultDownloadEndDate(runtimeManifest.dates, site.startDate || runtimeManifest.dates[0] || ""),
+                defaultDownloadEndDate(initialManifest.dates, site.startDate || initialManifest.dates[0] || ""),
             })),
           );
-          setStatusText(`Loaded ${runtimeManifest.dataset_label}`);
+          setStatusText(`Loaded ${initialManifest.dataset_label}`);
           return;
         } catch (error) {
           if (cancelled) {
@@ -1124,22 +1288,18 @@ function App() {
       }
     }
 
-    loadManifest();
+    loadManifests();
 
     return () => {
       cancelled = true;
+      if (noticeTimeoutRef.current) {
+        window.clearTimeout(noticeTimeoutRef.current);
+      }
     };
   }, []);
 
   useEffect(() => {
     manifestRef.current = manifest;
-    if (manifest && !manifest.layers?.[selectedLayerKeyRef.current]) {
-      const nextLayerKey = manifest.layers?.[DEFAULT_LAYER_KEY] ? DEFAULT_LAYER_KEY : Object.keys(manifest.layers ?? {})[0];
-      if (nextLayerKey) {
-        selectedLayerKeyRef.current = nextLayerKey;
-        setSelectedLayerKey(nextLayerKey);
-      }
-    }
   }, [manifest]);
 
   useEffect(() => {
@@ -1151,12 +1311,16 @@ function App() {
   }, [selectedLayerKey]);
 
   useEffect(() => {
+    activeDatasetKeyRef.current = activeDatasetKey;
+  }, [activeDatasetKey]);
+
+  useEffect(() => {
     activeDownloadSiteIndexRef.current = activeDownloadSiteIndex;
   }, [activeDownloadSiteIndex]);
 
   useEffect(() => {
-    if (!manifest || mapRef.current || !mapContainerRef.current) {
-      return;
+    if (!manifest || !mapContainerRef.current) {
+      return undefined;
     }
 
     const extent = [
@@ -1169,7 +1333,7 @@ function App() {
     const projection = getProjection(projectionCode);
     if (!projection) {
       setStatusText(`Unsupported map projection ${projectionCode}`);
-      return;
+      return undefined;
     }
     const isWebMercator = projectionCode === "EPSG:3857";
     if (!isWebMercator) {
@@ -1246,18 +1410,18 @@ function App() {
 
     map.on("click", async (event) => {
       const currentManifest = manifestRef.current;
-      const selectedDate = currentManifest.dates[dateIndexRef.current];
+      const currentSelectedDate = currentManifest.dates[dateIndexRef.current];
       const [x, y] = event.coordinate;
       setIsPlaying(false);
       try {
-        await loadPointAtCoordinate(x, y, selectedDate);
+        await loadPointAtCoordinate(x, y, currentSelectedDate);
       } catch (error) {
         setStatusText(`Point query failed: ${error.message}`);
       }
     });
 
     mapRef.current = map;
-    void transitionToDateIndex(dateIndexRef.current, { immediate: true });
+    void transitionToDateIndex(dateIndexRef.current, { immediate: true, force: true });
 
     return () => {
       if (playbackTimeoutRef.current) {
@@ -1269,17 +1433,17 @@ function App() {
       rasterTileLayersRef.current = [];
       selectionSourceRef.current = null;
     };
-  }, [manifest]);
+  }, [manifest?.dataset_key]);
 
   useEffect(() => {
     if (!pointRef.current || !manifest || isPlaying) {
       return;
     }
 
-    const selectedDate = manifest.dates[dateIndex];
-    loadPointAtCoordinate(pointRef.current.x, pointRef.current.y, selectedDate)
+    const currentSelectedDate = manifest.dates[dateIndex];
+    loadPointAtCoordinate(pointRef.current.x, pointRef.current.y, currentSelectedDate)
       .then((payload) => {
-        updateSelectionFeatures(payload, manifest);
+        updateSelectionFeatures(payload);
       })
       .catch((error) => {
         setStatusText(`Point refresh failed: ${error.message}`);
@@ -1294,7 +1458,8 @@ function App() {
 
     async function runPlayback() {
       while (!cancelled) {
-        const nextIndex = (dateIndexRef.current + 7) % dates.length;
+        const increment = activeDatasetKeyRef.current === SENTINEL_DATASET_KEY ? 1 : 7;
+        const nextIndex = (dateIndexRef.current + increment) % dates.length;
         if (nextIndex === dateIndexRef.current) {
           break;
         }
@@ -1347,7 +1512,6 @@ function App() {
       const [x, y] = transformCoordinate([longitude, latitude], "EPSG:4326", manifest.grid_crs);
       await loadPointAtCoordinate(x, y, selectedDate, {
         recenter: true,
-        statusPrefix: `Snapping ${latitude.toFixed(4)}, ${longitude.toFixed(4)} to`,
       });
     } catch (error) {
       setStatusText(`Location lookup failed: ${error.message}`);
@@ -1402,6 +1566,7 @@ function App() {
     const queryStartDate = minDateString(...sites.map((site) => site.startDate));
     const queryEndDate = maxDateString(...sites.map((site) => site.endDate));
     const query = new URLSearchParams({
+      dataset: activeDatasetKey,
       start_date: queryStartDate,
       end_date: queryEndDate,
     });
@@ -1410,7 +1575,7 @@ function App() {
     });
 
     setIsDownloadingCsv(true);
-    setStatusText("Preparing LFMC CSV download...");
+    setStatusText(`Preparing ${manifest.dataset_label} CSV download...`);
     try {
       const response = await fetch(apiUrl(`/api/download_csv?${query.toString()}`));
       if (!response.ok) {
@@ -1439,7 +1604,7 @@ function App() {
       link.click();
       document.body.removeChild(link);
       window.URL.revokeObjectURL(blobUrl);
-      setStatusText(`Downloaded LFMC CSV for ${sites.length} site${sites.length === 1 ? "" : "s"}`);
+      setStatusText(`Downloaded ${manifest.dataset_label} CSV for ${sites.length} site${sites.length === 1 ? "" : "s"}`);
     } catch (error) {
       setStatusText(`CSV download failed: ${error.message}`);
     } finally {
@@ -1517,6 +1682,24 @@ function App() {
     });
   }
 
+  const dateStepControls = activeDatasetKey === SENTINEL_DATASET_KEY
+    ? [
+        [-3, "month", "-3 months"],
+        [-1, "month", "-1 month"],
+        [-15, "day", "-15 days"],
+        [15, "day", "+15 days"],
+        [1, "month", "+1 month"],
+        [3, "month", "+3 months"],
+      ]
+    : [
+        [-3, "month", "-3 months"],
+        [-1, "month", "-1 month"],
+        [-1, "day", "-1 day"],
+        [1, "day", "+1 day"],
+        [1, "month", "+1 month"],
+        [3, "month", "+3 months"],
+      ];
+
   return (
     <div className="app-shell">
       <header className="date-bar">
@@ -1572,56 +1755,42 @@ function App() {
             {isPlaying ? "Pause" : "Play"}
           </button>
           <div className="date-step-controls" aria-label="Date step controls">
-            <button
-              type="button"
-              className="toggle-button date-step-button"
-              disabled={!dates.length}
-              onClick={() => handleDateStep(-1, "month")}
-            >
-              -1 month
-            </button>
-            <button
-              type="button"
-              className="toggle-button date-step-button"
-              disabled={!dates.length}
-              onClick={() => handleDateStep(-1, "week")}
-            >
-              -1 week
-            </button>
-            <button
-              type="button"
-              className="toggle-button date-step-button"
-              disabled={!dates.length}
-              onClick={() => handleDateStep(-1, "day")}
-            >
-              -1 day
-            </button>
-            <button
-              type="button"
-              className="toggle-button date-step-button"
-              disabled={!dates.length}
-              onClick={() => handleDateStep(1, "day")}
-            >
-              +1 day
-            </button>
-            <button
-              type="button"
-              className="toggle-button date-step-button"
-              disabled={!dates.length}
-              onClick={() => handleDateStep(1, "week")}
-            >
-              +1 week
-            </button>
-            <button
-              type="button"
-              className="toggle-button date-step-button"
-              disabled={!dates.length}
-              onClick={() => handleDateStep(1, "month")}
-            >
-              +1 month
-            </button>
+            {dateStepControls.map(([amount, unit, label]) => (
+              <button
+                type="button"
+                className="toggle-button date-step-button"
+                disabled={!dates.length}
+                onClick={() => handleDateStep(amount, unit)}
+                key={`${amount}-${unit}-${label}`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
         </div>
+        <div className="dataset-bar">
+          <div className="dataset-toggle-row" aria-label="Dataset selector">
+            {datasetKeys.map((datasetKey) => {
+              const runtimeManifest = datasetManifests[datasetKey];
+              const label = metadata?.datasets?.[datasetKey]?.dataset_label ?? formatLabel(datasetKey);
+              return (
+                <button
+                  key={datasetKey}
+                  type="button"
+                  className={`toggle-button dataset-toggle-button ${activeDatasetKey === datasetKey ? "toggle-button-active" : ""}`}
+                  disabled={!runtimeManifest}
+                  onClick={() => requestDatasetDate(datasetKey, selectedDate)}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+          <a className="dataset-help-link" href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
+            Which dataset should I use
+          </a>
+        </div>
+        {noticeText ? <div className="dataset-notice">{noticeText}</div> : null}
       </header>
       <aside className="control-panel">
         <section className="panel-card information-card">
@@ -1630,10 +1799,9 @@ function App() {
             Welcome to the viewer for Live Fuel Moisture Content (LFMC) products produced by Stanford's Remote
             Sensing Ecohydrology Group. LFMC is defined as the mass of water in vegetation normalized by its dry
             biomass, representing how "wet" or "dry" vegetation is in a given location. It is a crucial indicator
-            for wildland fire risk. This viewer allows you to explore both absolute values of LFMC as well as LFMC
-            anomalies, which show how wet or dry vegetation is relative to the average value for that calendar
-            day for that location. For more information about the data products displayed here, as well as
-            instructions for downloading data, please view{" "}
+            for wildland fire risk. This viewer allows you to explore absolute values of LFMC and, for the
+            MODIS-based product, LFMC anomalies. For more information about the data products displayed here, as
+            well as instructions for downloading data, please view{" "}
             <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
               this document
             </a>
@@ -1644,16 +1812,29 @@ function App() {
         <section className="panel-card">
           <div className="panel-label">Map Layer</div>
           <div className="toggle-row layer-toggle-row">
-            {layerEntries.map(([layerKey, layer]) => (
+            {layerEntries.map(([layerKey, layer]) => {
+              const disabled = isAnomalyLayer(layerKey) && !supportsAnomaly;
+              return (
+                <button
+                  key={layerKey}
+                  type="button"
+                  className={`toggle-button layer-toggle-button ${activeLayerKey === layerKey ? "toggle-button-active" : ""}`}
+                  disabled={disabled}
+                  onClick={() => handleLayerChange(layerKey)}
+                >
+                  {layer.label ?? formatLabel(layerKey)}
+                </button>
+              );
+            })}
+            {!supportsAnomaly ? (
               <button
-                key={layerKey}
                 type="button"
-                className={`toggle-button layer-toggle-button ${activeLayerKey === layerKey ? "toggle-button-active" : ""}`}
-                onClick={() => handleLayerChange(layerKey)}
+                className="toggle-button layer-toggle-button"
+                disabled
               >
-                {layer.label ?? formatLabel(layerKey)}
+                LFMC anomaly
               </button>
-            ))}
+            ) : null}
           </div>
           <div
             className="legend-bar"
@@ -1719,11 +1900,11 @@ function App() {
               </div>
               <div>
                 <span className="stats-key">LFMC Anomaly (%)</span>
-                <span className="stats-value">{formatValue(pointInfo.lfmc_anomaly, 1)}</span>
+                <span className="stats-value">{supportsAnomaly ? formatValue(pointInfo.lfmc_anomaly, 1) : "Unavailable"}</span>
               </div>
               <div>
                 <span className="stats-key">Average LFMC on this date (%)</span>
-                <span className="stats-value">{formatValue(pointInfo.lfmc_climatology_mean, 1)}</span>
+                <span className="stats-value">{supportsAnomaly ? formatValue(pointInfo.lfmc_climatology_mean, 1) : "Unavailable"}</span>
               </div>
               <div>
                 <span className="stats-key">Land Cover</span>
@@ -1742,7 +1923,12 @@ function App() {
         <section className="panel-card">
           <div className="panel-label">Time Series</div>
           <div className="timeseries-shell">
-            <TimeseriesChart pointInfo={pointInfo} mode={timeseriesMode} onModeChange={setTimeseriesMode} />
+            <TimeseriesChart
+              pointInfo={pointInfo}
+              mode={timeseriesMode}
+              onModeChange={setTimeseriesMode}
+              supportsAnomaly={supportsAnomaly}
+            />
             {isPointLoading ? <div className="timeseries-play-overlay">loading</div> : null}
             {!isPointLoading && isPlaying ? (
               <div className="timeseries-play-overlay">will update after play</div>
@@ -1753,8 +1939,8 @@ function App() {
         <section className="panel-card">
           <div className="panel-label">Download LFMC data</div>
           <p className="panel-note download-note">
-            This tool allows you to download LFMC data for up to 10 sites and up to three years at each site. For
-            larger downloads, please see{" "}
+            This tool downloads the currently selected LFMC dataset for up to 10 sites and up to three years at
+            each site. For larger downloads, please see{" "}
             <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
               this information document
             </a>
@@ -1821,7 +2007,7 @@ function App() {
                     onBeforeInput={preventManualDateEdit}
                     onChange={(event) => handleUpdateDownloadSite(index, "startDate", event.target.value)}
                     onDrop={preventManualDateEdit}
-                    onFocus={(event) => {
+                    onFocus={() => {
                       setActiveDownloadSiteIndex(index);
                     }}
                     onKeyDown={preventManualDateEdit}
@@ -1844,7 +2030,7 @@ function App() {
                     onBeforeInput={preventManualDateEdit}
                     onChange={(event) => handleUpdateDownloadSite(index, "endDate", event.target.value)}
                     onDrop={preventManualDateEdit}
-                    onFocus={(event) => {
+                    onFocus={() => {
                       setActiveDownloadSiteIndex(index);
                     }}
                     onKeyDown={preventManualDateEdit}
@@ -1879,7 +2065,7 @@ function App() {
                 void handleDownloadCsv();
               }}
             >
-              {isDownloadingCsv ? "Preparing CSV..." : "Download CSV For These Sites"}
+              {isDownloadingCsv ? "Preparing CSV..." : `Download ${manifest?.dataset_label ?? "LFMC"} CSV`}
             </button>
           </div>
         </section>
@@ -1887,6 +2073,8 @@ function App() {
 
       <main className="map-stage">
         <div className="map-frame">
+          {noticeText ? <div className="map-notice">{noticeText}</div> : null}
+          {isMapLoading ? <div className="map-loading">loading</div> : null}
           <div ref={mapContainerRef} className="map-container" />
         </div>
       </main>

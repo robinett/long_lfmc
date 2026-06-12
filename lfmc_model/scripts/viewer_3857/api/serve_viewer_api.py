@@ -34,46 +34,23 @@ here = Path(__file__).resolve().parent
 viewer_root = here.parent
 config_path = viewer_root / "viewer_config.yaml"
 DATASET_LOAD_WAIT_SECONDS = 45.0
+DEFAULT_DATASET_KEY = "modis"
 DEFAULT_POINT_TIMESERIES_DAYS = 90
-MAX_POINT_TIMESERIES_DAYS = 91
+MAX_POINT_TIMESERIES_DAYS = 90
 MAX_CSV_DOWNLOAD_YEARS = 3
 DEFAULT_POINT_CLIMATOLOGY_VARIABLE = "lfmc_climatology_mean_point"
 
-dask = None
 fsspec = None
 np = None
-xr = None
 yaml = None
 zarr = None
 Transformer = None
 runtime_dependencies_loaded = False
 runtime_dependencies_lock = threading.Lock()
-point_dependencies_loaded = False
-point_dependencies_lock = threading.Lock()
-
-
-def load_point_dependencies() -> None:
-    global fsspec, np, zarr, point_dependencies_loaded
-
-    if point_dependencies_loaded:
-        return
-
-    with point_dependencies_lock:
-        if point_dependencies_loaded:
-            return
-
-        import fsspec as fsspec_module
-        import numpy as np_module
-        import zarr as zarr_module
-
-        fsspec = fsspec_module
-        np = np_module
-        zarr = zarr_module
-        point_dependencies_loaded = True
 
 
 def load_runtime_dependencies() -> None:
-    global dask, np, xr, yaml, Transformer, runtime_dependencies_loaded
+    global fsspec, np, yaml, zarr, Transformer, runtime_dependencies_loaded
 
     if runtime_dependencies_loaded:
         return
@@ -82,15 +59,17 @@ def load_runtime_dependencies() -> None:
         if runtime_dependencies_loaded:
             return
 
-        import dask as dask_module
-        import xarray as xr_module
+        import fsspec as fsspec_module
+        import numpy as np_module
+        import yaml as yaml_module
+        import zarr as zarr_module
         from pyproj import Transformer as transformer_class
 
-        load_point_dependencies()
-        dask = dask_module
-        xr = xr_module
+        fsspec = fsspec_module
+        np = np_module
+        yaml = yaml_module
+        zarr = zarr_module
         Transformer = transformer_class
-        dask.config.set(scheduler="synchronous")
         runtime_dependencies_loaded = True
 
 
@@ -98,23 +77,23 @@ def timestamped_message(message: str) -> str:
     return time.strftime("[%Y-%m-%d %H:%M:%S] ") + message
 
 
-def load_config() -> Dict[str, object]:
-    global yaml
-
-    if yaml is None:
-        import yaml as yaml_module
-
-        yaml = yaml_module
-    with config_path.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
 def log(message: str) -> None:
     print(timestamped_message(message), flush=True)
 
 
+def load_config() -> Dict[str, object]:
+    load_runtime_dependencies()
+    with config_path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
 def safe_float(value):
-    return float(value) if np.isfinite(value) else None
+    if value is None:
+        return None
+    try:
+        return float(value) if np.isfinite(value) else None
+    except TypeError:
+        return None
 
 
 def safe_difference(left, right):
@@ -142,82 +121,71 @@ def max_csv_end_date(start_date: str) -> dt.date:
         return parsed_start.replace(year=parsed_start.year + MAX_CSV_DOWNLOAD_YEARS, day=28)
 
 
+def shift_year(date_value: dt.date, year: int) -> dt.date:
+    try:
+        return date_value.replace(year=year)
+    except ValueError:
+        return date_value.replace(year=year, day=28)
+
+
 def join_url_parts(base_url: str, relpath: str) -> str:
     return f"{base_url.rstrip('/')}/{relpath.lstrip('/')}"
 
 
-def nearest_index(sorted_values, target_value: float) -> int:
-    values = np.asarray(sorted_values, dtype=np.float64)
-    if values.ndim != 1 or values.size == 0:
-        raise ValueError("nearest_index requires a non-empty 1D coordinate array")
-
-    ascending = values[0] <= values[-1]
-    work_values = values if ascending else values[::-1]
-    insert_idx = int(np.searchsorted(work_values, target_value, side="left"))
-
-    if insert_idx <= 0:
-        nearest_work_idx = 0
-    elif insert_idx >= work_values.size:
-        nearest_work_idx = work_values.size - 1
-    else:
-        left_idx = insert_idx - 1
-        right_idx = insert_idx
-        left_diff = abs(target_value - work_values[left_idx])
-        right_diff = abs(work_values[right_idx] - target_value)
-        nearest_work_idx = left_idx if left_diff <= right_diff else right_idx
-
-    if ascending:
-        return nearest_work_idx
-    return values.size - 1 - nearest_work_idx
+def zarr_attrs(array_or_group) -> Dict[str, object]:
+    attrs = getattr(array_or_group, "attrs", {})
+    if hasattr(attrs, "asdict"):
+        return attrs.asdict()
+    return dict(attrs)
 
 
-def open_dataset_for_config(data_cfg: Dict[str, object]):
-    data_source = str(data_cfg.get("data_source", "local")).strip().lower()
-    local_dataset_path = str(data_cfg.get("local_dataset_path", "")).strip()
-    source_store = str(data_cfg.get("source_store", "")).strip()
-    source_endpoint_url = str(data_cfg.get("source_endpoint_url", "")).strip()
-
-    if data_source == "source":
-        if not source_store:
-            raise ValueError("source_store is required when data_source=source")
-        storage_options = {"anon": True}
-        if source_endpoint_url:
-            storage_options["client_kwargs"] = {"endpoint_url": source_endpoint_url}
-        consolidated = bool(data_cfg.get("consolidated", False))
-        return xr.open_zarr(
-            source_store,
-            consolidated=consolidated,
-            storage_options=storage_options,
-        )
-
-    if data_source == "local":
-        if not local_dataset_path:
-            raise ValueError("local_dataset_path is required when data_source=local")
-        consolidated = bool(data_cfg.get("consolidated", False))
-        return xr.open_zarr(local_dataset_path, consolidated=consolidated)
-
-    raise ValueError(f"Unsupported data_source {data_source!r}; expected 'local' or 'source'")
+def dataset_entries(cfg: Dict[str, object]) -> Dict[str, Dict[str, object]]:
+    if "datasets" in cfg:
+        return dict(cfg["datasets"])
+    return {
+        DEFAULT_DATASET_KEY: {
+            "label": str(cfg["data"]["dataset_label"]),
+            "data": cfg["data"],
+            "assets": cfg["assets"],
+        }
+    }
 
 
-class ViewerPointDataset:
-    def __init__(self, cfg: Dict[str, object]):
-        load_point_dependencies()
+def default_dataset_key(cfg: Dict[str, object]) -> str:
+    return str(cfg.get("default_dataset", DEFAULT_DATASET_KEY))
 
+
+def normalize_dataset_key(cfg: Dict[str, object], dataset_key: Optional[str]) -> str:
+    entries = dataset_entries(cfg)
+    key = str(dataset_key or default_dataset_key(cfg)).strip() or default_dataset_key(cfg)
+    if key not in entries:
+        raise ValueError(f"Unknown dataset {key!r}; expected one of {sorted(entries)}")
+    return key
+
+
+class ViewerDataset:
+    def __init__(self, dataset_key: str, cfg: Dict[str, object]):
+        load_runtime_dependencies()
+
+        self.dataset_key = dataset_key
+        self.entry_cfg = cfg
         data_cfg = cfg["data"]
         assets_cfg = cfg["assets"]
 
-        self.dataset_label = str(data_cfg["dataset_label"])
+        self.dataset_label = str(data_cfg.get("dataset_label") or cfg.get("label") or dataset_key)
         self.data_source = str(data_cfg.get("data_source", "local")).strip().lower()
         self.local_dataset_path = str(data_cfg.get("local_dataset_path", "")).strip()
         self.source_store = str(data_cfg.get("source_store", "")).strip()
         self.source_endpoint_url = str(data_cfg.get("source_endpoint_url", "")).strip()
         self.grid_crs = str(data_cfg["grid_crs"])
         self.display_variable = str(data_cfg["display_variable"])
-        self.uncertainty_variable = str(data_cfg["uncertainty_variable"])
-        self.quality_variable = str(data_cfg["quality_variable"])
-        self.landcover_variable = str(data_cfg["landcover_variable"])
-        self.climatology_variable = str(data_cfg.get("climatology_variable", DEFAULT_POINT_CLIMATOLOGY_VARIABLE))
+        self.uncertainty_variable = str(data_cfg.get("uncertainty_variable", "")).strip()
+        self.quality_variable = str(data_cfg.get("quality_variable", "")).strip()
+        self.landcover_variable = str(data_cfg.get("landcover_variable", "")).strip()
+        self.climatology_variable = str(data_cfg.get("climatology_variable", DEFAULT_POINT_CLIMATOLOGY_VARIABLE)).strip()
+        self.landcover_source_dataset = str(data_cfg.get("landcover_source_dataset", "")).strip()
         self.initial_date = str(data_cfg["initial_date"])
+        self.layer_keys = list(data_cfg.get("layer_keys", []))
 
         self.asset_mode = str(assets_cfg.get("asset_mode", "local")).strip().lower()
         self.asset_root = Path(str(assets_cfg["local_asset_root"])).resolve()
@@ -227,46 +195,53 @@ class ViewerPointDataset:
         self.dataset_path = self._dataset_path_label()
         self.manifest = self._load_manifest()
         self.root = self._open_zarr_root()
-        self.mean_array = self.root[self.display_variable]
-        self.uncertainty_array = self.root[self.uncertainty_variable]
-        self.quality_array = self.root[self.quality_variable]
-        self.landcover_array = self.root[self.landcover_variable]
-        self.landcover_year_array = self.root["landcover_year"]
-        self.lat_array = self.root["lat"]
-        self.lon_array = self.root["lon"]
-        try:
-            self.climatology_array = self.root[self.climatology_variable]
-        except KeyError:
-            self.climatology_array = None
-            log(
-                f"Viewer climatology variable {self.climatology_variable!r} not found; "
-                "point anomaly values will be null"
-            )
+        self.display_array = self.root[self.display_variable]
+        self.uncertainty_array = self._optional_array(self.uncertainty_variable)
+        self.quality_array = self._optional_array(self.quality_variable)
+        self.landcover_array = self._optional_array(self.landcover_variable)
+        self.landcover_year_array = self._optional_array("landcover_year") if self.landcover_array is not None else None
+        self.climatology_array = self._optional_array(self.climatology_variable)
+        self.lat_array = self._optional_array("lat")
+        self.lon_array = self._optional_array("lon")
 
         self.dates = [str(value) for value in self.manifest.get("dates", [])]
         if not self.dates:
             self.dates = [datetime64_to_datestr(value) for value in self.root["time"][:]]
+        self.date_values = [dt.date.fromisoformat(value) for value in self.dates]
         self.date_to_index = {date_str: idx for idx, date_str in enumerate(self.dates)}
 
         self.grid_extent = dict(self.manifest["grid_extent"])
         grid_resolution = self.manifest["grid_resolution"]
         self.pixel_width = abs(float(grid_resolution["dx"]))
         self.pixel_height = abs(float(grid_resolution["dy"]))
-        self.x_size = int(self.mean_array.shape[2])
-        self.y_size = int(self.mean_array.shape[1])
+        self.x_size = int(self.display_array.shape[2])
+        self.y_size = int(self.display_array.shape[1])
+        self.grid_to_wgs84 = Transformer.from_crs(self.grid_crs, "EPSG:4326", always_xy=True)
+        self.wgs84_to_grid = Transformer.from_crs("EPSG:4326", self.grid_crs, always_xy=True)
 
-        self.landcover_years = np.asarray(self.landcover_year_array[:], dtype=np.int64)
+        if self.landcover_year_array is not None:
+            self.landcover_years = np.asarray(self.landcover_year_array[:], dtype=np.int64)
+        else:
+            self.landcover_years = np.asarray([], dtype=np.int64)
         self.landcover_labels = self._landcover_mapping()
         self.quality_labels = self._quality_mapping()
+
+    def _optional_array(self, variable_name: str):
+        if not variable_name:
+            return None
+        try:
+            return self.root[variable_name]
+        except KeyError:
+            return None
 
     def _dataset_path_label(self) -> str:
         if self.data_source == "source":
             if not self.source_store:
-                raise ValueError("viewer_config data.source_store is required when data_source=source")
+                raise ValueError("source_store is required when data_source=source")
             return self.source_store
         if self.data_source == "local":
             if not self.local_dataset_path:
-                raise ValueError("viewer_config data.local_dataset_path is required when data_source=local")
+                raise ValueError("local_dataset_path is required when data_source=local")
             return self.local_dataset_path
         raise ValueError(f"Unsupported data_source {self.data_source!r}; expected 'local' or 'source'")
 
@@ -288,16 +263,17 @@ class ViewerPointDataset:
         if self.data_source == "source":
             if not self.source_store.startswith("s3://"):
                 raise ValueError(f"Expected s3:// Source store path, got {self.source_store!r}")
-            source_path = self.source_store.removeprefix("s3://")
             storage_options = {"anon": True}
             if self.source_endpoint_url:
                 storage_options["client_kwargs"] = {"endpoint_url": self.source_endpoint_url}
             fs = fsspec.filesystem("s3", **storage_options)
-            return zarr.open_consolidated(fs.get_mapper(source_path), mode="r")
+            return zarr.open_consolidated(fs.get_mapper(self.source_store.removeprefix("s3://")), mode="r")
         return zarr.open_consolidated(self.local_dataset_path, mode="r")
 
     def _landcover_mapping(self) -> Dict[int, str]:
-        attrs = self.landcover_array.attrs.asdict()
+        if self.landcover_array is None:
+            return {}
+        attrs = zarr_attrs(self.landcover_array)
         code_to_name = attrs.get("code_to_name", {})
         nodata_code = attrs.get("nodata_code")
         if isinstance(code_to_name, dict):
@@ -305,7 +281,7 @@ class ViewerPointDataset:
             if nodata_code is not None:
                 mapping[int(nodata_code)] = "nodata"
             return mapping
-        dataset_key = self.root.attrs.asdict().get("dominant_landcover_code_key")
+        dataset_key = zarr_attrs(self.root).get("dominant_landcover_code_key")
         if isinstance(dataset_key, str):
             parsed = json.loads(dataset_key)
             mapping = {int(key): str(value) for key, value in parsed.items()}
@@ -315,10 +291,12 @@ class ViewerPointDataset:
         return {}
 
     def _quality_mapping(self) -> Dict[int, str]:
-        values = self.root.attrs.asdict().get("quality_flag_values")
+        values = zarr_attrs(self.root).get("quality_flag_values")
         if isinstance(values, dict):
             return {int(value): str(key) for key, value in values.items()}
-        attrs = self.quality_array.attrs.asdict()
+        if self.quality_array is None:
+            return {}
+        attrs = zarr_attrs(self.quality_array)
         flag_values = attrs.get("flag_values", [])
         flag_meanings = str(attrs.get("flag_meanings", "")).split()
         return {int(value): meaning for value, meaning in zip(flag_values, flag_meanings)}
@@ -331,32 +309,39 @@ class ViewerPointDataset:
             asset_base_url = self.source_asset_base_url
             manifest_url = self._manifest_url()
         else:
-            asset_base_url = "/viewer-assets"
+            asset_base_url = f"/viewer-assets/{self.dataset_key}"
             manifest_url = f"{asset_base_url}/{self.manifest_filename}"
-        return {
-            "dataset_label": self.dataset_label,
-            "data_source": self.data_source,
-            "dataset_path": self.dataset_path,
-            "initial_date": self.initial_date,
-            "asset_mode": self.asset_mode,
-            "asset_root": str(self.asset_root),
-            "manifest_path": str(self.manifest_path()),
-            "asset_base_url": asset_base_url,
-            "asset_manifest_url": manifest_url,
-            "dates": self.dates,
-            "grid_crs": self.grid_crs,
-            "grid_extent": self.grid_extent,
-            "grid_resolution": {
-                "dx": self.pixel_width,
-                "dy": self.pixel_height,
-            },
-        }
+        payload = config_dataset_metadata(self.dataset_key, self.entry_cfg)
+        payload.update(
+            {
+                "dataset_loaded": True,
+                "dates": self.dates,
+                "grid_extent": self.grid_extent,
+                "grid_resolution": {
+                    "dx": self.pixel_width,
+                    "dy": self.pixel_height,
+                },
+                "asset_base_url": asset_base_url,
+                "asset_manifest_url": manifest_url,
+                "manifest_path": str(self.manifest_path()),
+            }
+        )
+        return payload
 
     def _date_index(self, date_str: str) -> int:
         try:
             return self.date_to_index[date_str]
         except KeyError as exc:
             raise ValueError(f"Date not available: {date_str}") from exc
+
+    def _date_range_indices(self, start_date: dt.date, end_date: dt.date) -> Tuple[int, int]:
+        start_idx = 0
+        while start_idx < len(self.date_values) and self.date_values[start_idx] < start_date:
+            start_idx += 1
+        end_idx = start_idx
+        while end_idx < len(self.date_values) and self.date_values[end_idx] <= end_date:
+            end_idx += 1
+        return start_idx, end_idx
 
     def _cell_index_for_grid_xy(self, grid_x: float, grid_y: float) -> Tuple[int, int]:
         west = float(self.grid_extent["west"])
@@ -387,15 +372,52 @@ class ViewerPointDataset:
         }
 
     def _landcover_year_index(self, date_str: str) -> int:
+        if self.landcover_years.size == 0:
+            return 0
         year = int(date_str[:4])
         if self.landcover_years.size == 1:
             return 0
         diffs = np.abs(self.landcover_years - year)
         return int(np.argmin(diffs))
 
-    def _series_for_cell(self, array, start_idx: int, end_idx: int, y_idx: int, x_idx: int) -> Tuple[float, ...]:
+    def _array_value(self, array, time_idx: int, y_idx: int, x_idx: int):
+        if array is None:
+            return None
+        return safe_float(np.asarray(array[time_idx, y_idx, x_idx]).item())
+
+    def _series_for_cell(self, array, start_idx: int, end_idx: int, y_idx: int, x_idx: int) -> List[Optional[float]]:
+        if array is None:
+            return [None] * max(end_idx - start_idx, 0)
         values = np.asarray(array[start_idx:end_idx, y_idx, x_idx], dtype=np.float32)
-        return tuple(float(value) for value in values)
+        return [safe_float(value) for value in values]
+
+    def _values_for_indices(self, array, indices: List[int], y_idx: int, x_idx: int) -> List[Optional[float]]:
+        if array is None:
+            return [None] * len(indices)
+        if not indices:
+            return []
+        values = np.asarray(array.oindex[indices, y_idx, x_idx], dtype=np.float32)
+        return [safe_float(value) for value in values]
+
+    def _quality_value(self, time_idx: int):
+        if self.quality_array is None:
+            return None
+        value = np.asarray(self.quality_array[time_idx]).item()
+        return int(value) if np.isfinite(value) else None
+
+    def _quality_series_for_window(self, start_idx: int, end_idx: int) -> List[Optional[int]]:
+        if self.quality_array is None:
+            return [None] * max(end_idx - start_idx, 0)
+        values = np.asarray(self.quality_array[start_idx:end_idx])
+        return [int(value) if np.isfinite(value) else None for value in values]
+
+    def _quality_for_indices(self, indices: List[int]) -> List[Optional[int]]:
+        if self.quality_array is None:
+            return [None] * len(indices)
+        if not indices:
+            return []
+        values = np.asarray(self.quality_array.oindex[indices])
+        return [int(value) if np.isfinite(value) else None for value in values]
 
     def _climatology_value_for_cell(self, date_str: str, y_idx: int, x_idx: int):
         if self.climatology_array is None:
@@ -403,17 +425,107 @@ class ViewerPointDataset:
         day_idx = calendar_day_index_365(date_str)
         return safe_float(np.asarray(self.climatology_array[day_idx, y_idx, x_idx]).item())
 
-    def _climatology_series_for_cell(
-        self,
-        dates: List[str],
-        y_idx: int,
-        x_idx: int,
-    ) -> Tuple[float, ...]:
+    def _climatology_series_for_cell(self, dates: List[str], y_idx: int, x_idx: int) -> List[Optional[float]]:
         if self.climatology_array is None:
-            return tuple(np.nan for _ in dates)
+            return [None] * len(dates)
         day_indices = np.asarray([calendar_day_index_365(date_str) for date_str in dates], dtype=np.int64)
         point_climatology = np.asarray(self.climatology_array[:, y_idx, x_idx], dtype=np.float32)
-        return tuple(float(value) for value in point_climatology[day_indices])
+        return [safe_float(value) for value in point_climatology[day_indices]]
+
+    def _day_offsets(self, dates: List[str], window_start: dt.date) -> List[int]:
+        return [(dt.date.fromisoformat(date_str) - window_start).days for date_str in dates]
+
+    def _window_series_from_lookups(
+        self,
+        indices: List[int],
+        start_date: dt.date,
+        mean_lookup: Dict[int, Optional[float]],
+        uncertainty_lookup: Dict[int, Optional[float]],
+        quality_lookup: Dict[int, Optional[int]],
+        y_idx: int,
+        x_idx: int,
+    ) -> Dict[str, object]:
+        dates = [self.dates[idx] for idx in indices]
+        mean_series = [mean_lookup.get(idx) for idx in indices]
+        uncertainty_series = [uncertainty_lookup.get(idx) for idx in indices]
+        return {
+            "dates": dates,
+            "day_offsets": self._day_offsets(dates, start_date),
+            "lfmc_ens_mean": mean_series,
+            "lfmc_ens_std": uncertainty_series,
+            "lfmc_climatology_mean": self._climatology_series_for_cell(dates, y_idx, x_idx),
+            "lfmc_anomaly": [
+                safe_difference(mean, climatology)
+                for mean, climatology in zip(mean_series, self._climatology_series_for_cell(dates, y_idx, x_idx))
+            ],
+            "quality_flag": [quality_lookup.get(idx) for idx in indices],
+            "window_days": DEFAULT_POINT_TIMESERIES_DAYS,
+        }
+
+    def _series_windows_for_cell(self, selected_date: dt.date, y_idx: int, x_idx: int) -> Dict[str, object]:
+        current_start = selected_date - dt.timedelta(days=DEFAULT_POINT_TIMESERIES_DAYS - 1)
+        current_start_idx, current_end_idx = self._date_range_indices(current_start, selected_date)
+        current_indices = list(range(current_start_idx, current_end_idx))
+
+        selected_year = selected_date.year
+        first_year = self.date_values[0].year
+        historical_specs = []
+        all_indices = set(current_indices)
+        for year in range(first_year, selected_year):
+            hist_end = shift_year(selected_date, year)
+            hist_start = hist_end - dt.timedelta(days=DEFAULT_POINT_TIMESERIES_DAYS - 1)
+            start_idx, end_idx = self._date_range_indices(hist_start, hist_end)
+            indices = list(range(start_idx, end_idx))
+            if len(indices) < 2:
+                continue
+            historical_specs.append((year, hist_start, indices))
+            all_indices.update(indices)
+
+        sorted_indices = sorted(all_indices)
+        mean_lookup = dict(zip(sorted_indices, self._values_for_indices(self.display_array, sorted_indices, y_idx, x_idx)))
+        uncertainty_lookup = dict(zip(sorted_indices, self._values_for_indices(self.uncertainty_array, sorted_indices, y_idx, x_idx)))
+        quality_lookup = dict(zip(sorted_indices, self._quality_for_indices(sorted_indices)))
+
+        current = self._window_series_from_lookups(
+            current_indices,
+            current_start,
+            mean_lookup,
+            uncertainty_lookup,
+            quality_lookup,
+            y_idx,
+            x_idx,
+        )
+        windows = []
+        for year, hist_start, indices in historical_specs:
+            series = self._window_series_from_lookups(
+                indices,
+                hist_start,
+                mean_lookup,
+                uncertainty_lookup,
+                quality_lookup,
+                y_idx,
+                x_idx,
+            )
+            series["year"] = year
+            windows.append(series)
+        current["historical_windows"] = windows
+        return current
+
+    def landcover_payload_for_latlon(self, date_str: str, lat: float, lon: float) -> Dict[str, object]:
+        if self.landcover_array is None:
+            return {"landcover_code": None, "landcover_name": "unavailable"}
+        grid_x, grid_y = self.wgs84_to_grid.transform(lon, lat)
+        x_idx, y_idx = self._cell_index_for_grid_xy(grid_x=float(grid_x), grid_y=float(grid_y))
+        landcover_year_idx = self._landcover_year_index(date_str)
+        raw_landcover_value = np.asarray(self.landcover_array[landcover_year_idx, y_idx, x_idx]).item()
+        landcover_code = safe_float(raw_landcover_value)
+        if landcover_code is None:
+            return {"landcover_code": None, "landcover_name": "unknown"}
+        landcover_code = int(landcover_code)
+        return {
+            "landcover_code": landcover_code,
+            "landcover_name": self.landcover_labels.get(landcover_code, "unknown"),
+        }
 
     def point_payload(
         self,
@@ -425,42 +537,38 @@ class ViewerPointDataset:
         include_timeseries: bool = False,
         timeseries_days: int = DEFAULT_POINT_TIMESERIES_DAYS,
     ) -> Dict[str, object]:
+        _ = timeseries_days
         time_idx = self._date_index(date_str)
         if grid_x is None or grid_y is None:
-            raise ValueError("Direct viewer point queries require grid x/y")
+            if lat is None or lon is None:
+                raise ValueError("Provide either grid x/y or lat/lon")
+            grid_x, grid_y = self.wgs84_to_grid.transform(lon, lat)
 
-        requested_lon = safe_float(lon) if lon is not None else None
-        requested_lat = safe_float(lat) if lat is not None else None
+        requested_lon, requested_lat = self.grid_to_wgs84.transform(grid_x, grid_y)
         x_idx, y_idx = self._cell_index_for_grid_xy(grid_x=float(grid_x), grid_y=float(grid_y))
         cell_bounds = self._cell_bounds(x_idx=x_idx, y_idx=y_idx)
-        mean_value = safe_float(np.asarray(self.mean_array[time_idx, y_idx, x_idx]).item())
-        uncertainty_value = safe_float(np.asarray(self.uncertainty_array[time_idx, y_idx, x_idx]).item())
+        mean_value = self._array_value(self.display_array, time_idx, y_idx, x_idx)
+        uncertainty_value = self._array_value(self.uncertainty_array, time_idx, y_idx, x_idx)
         climatology_value = self._climatology_value_for_cell(date_str, y_idx, x_idx)
         anomaly_value = safe_difference(mean_value, climatology_value)
-        landcover_year_idx = self._landcover_year_index(date_str)
-        raw_landcover_value = np.asarray(self.landcover_array[landcover_year_idx, y_idx, x_idx]).item()
-        landcover_code = safe_float(raw_landcover_value)
-        if landcover_code is None:
-            log(
-                "Warning: missing landcover for point query "
-                f"date={date_str} x_idx={x_idx} y_idx={y_idx} "
-                f"grid_x={float(grid_x):.2f} grid_y={float(grid_y):.2f} "
-                f"lfmc={mean_value}"
-            )
-        else:
-            landcover_code = int(landcover_code)
-
         center_x, center_y = self._cell_center(x_idx=x_idx, y_idx=y_idx)
-        center_lon = safe_float(np.asarray(self.lon_array[y_idx, x_idx]).item())
-        center_lat = safe_float(np.asarray(self.lat_array[y_idx, x_idx]).item())
-        quality_value = int(np.asarray(self.quality_array[time_idx]).item())
+        if self.lon_array is not None and self.lat_array is not None:
+            center_lon = safe_float(np.asarray(self.lon_array[y_idx, x_idx]).item())
+            center_lat = safe_float(np.asarray(self.lat_array[y_idx, x_idx]).item())
+        else:
+            center_lon, center_lat = self.grid_to_wgs84.transform(center_x, center_y)
+            center_lon = safe_float(center_lon)
+            center_lat = safe_float(center_lat)
 
+        landcover = self.landcover_payload_for_latlon(date_str, center_lat, center_lon)
+        quality_value = self._quality_value(time_idx)
         payload = {
+            "dataset_key": self.dataset_key,
             "date": date_str,
             "requested_grid_x": float(grid_x),
             "requested_grid_y": float(grid_y),
-            "requested_lat": requested_lat,
-            "requested_lon": requested_lon,
+            "requested_lat": safe_float(requested_lat),
+            "requested_lon": safe_float(requested_lon),
             "cell_center_x": center_x,
             "cell_center_y": center_y,
             "nearest_lat": center_lat,
@@ -477,395 +585,24 @@ class ViewerPointDataset:
             "lfmc_climatology_mean": climatology_value,
             "lfmc_anomaly": anomaly_value,
             "quality_flag": quality_value,
-            "data_product_level": self.quality_labels.get(quality_value, "unknown"),
-            "landcover_code": landcover_code,
-            "landcover_name": self.landcover_labels.get(landcover_code, "unknown") if landcover_code is not None else "unknown",
+            "data_product_level": self.quality_labels.get(quality_value, "unknown") if quality_value is not None else "unknown",
+            "landcover_code": landcover["landcover_code"],
+            "landcover_name": landcover["landcover_name"],
             "timeseries": None,
         }
 
         if include_timeseries:
-            bounded_days = min(max(int(timeseries_days), 1), MAX_POINT_TIMESERIES_DAYS)
-            start_idx = max(0, time_idx - bounded_days + 1)
-            end_idx = time_idx + 1
-            series_dates = self.dates[start_idx:end_idx]
-            mean_series = self._series_for_cell(self.mean_array, start_idx, end_idx, y_idx, x_idx)
-            uncertainty_series = self._series_for_cell(self.uncertainty_array, start_idx, end_idx, y_idx, x_idx)
-            climatology_series = self._climatology_series_for_cell(series_dates, y_idx, x_idx)
-            quality_series = np.asarray(self.quality_array[start_idx:end_idx])
-            mean_payload_series = [safe_float(value) for value in mean_series]
-            climatology_payload_series = [safe_float(value) for value in climatology_series]
-            payload["timeseries"] = {
-                "dates": series_dates,
-                "lfmc_ens_mean": mean_payload_series,
-                "lfmc_ens_std": [safe_float(value) for value in uncertainty_series],
-                "lfmc_climatology_mean": climatology_payload_series,
-                "lfmc_anomaly": [
-                    safe_difference(mean, climatology)
-                    for mean, climatology in zip(mean_payload_series, climatology_payload_series)
-                ],
-                "quality_flag": [int(value) for value in quality_series],
-                "window_days": bounded_days,
-            }
+            selected_date = dt.date.fromisoformat(date_str)
+            payload["timeseries"] = self._series_windows_for_cell(selected_date, y_idx, x_idx)
 
         return payload
-
-    def resolve_asset_path(self, request_path: str) -> Path:
-        relpath = request_path.removeprefix("/viewer-assets/").strip("/")
-        candidate = (self.asset_root / relpath).resolve()
-        if not str(candidate).startswith(str(self.asset_root)):
-            raise ValueError("Attempted path traversal outside asset root")
-        return candidate
-
-    def close(self) -> None:
-        self.root = None
-
-
-class ViewerDataset:
-    def __init__(self, cfg: Dict[str, object]):
-        data_cfg = cfg["data"]
-        assets_cfg = cfg["assets"]
-
-        self.dataset_label = str(data_cfg["dataset_label"])
-        self.data_source = str(data_cfg.get("data_source", "local")).strip().lower()
-        self.local_dataset_path = str(data_cfg.get("local_dataset_path", "")).strip()
-        self.source_store = str(data_cfg.get("source_store", "")).strip()
-        self.source_endpoint_url = str(data_cfg.get("source_endpoint_url", "")).strip()
-        self.grid_crs = str(data_cfg["grid_crs"])
-        self.display_variable = str(data_cfg["display_variable"])
-        self.uncertainty_variable = str(data_cfg["uncertainty_variable"])
-        self.quality_variable = str(data_cfg["quality_variable"])
-        self.landcover_variable = str(data_cfg["landcover_variable"])
-        self.initial_date = str(data_cfg["initial_date"])
-
-        self.asset_mode = str(assets_cfg.get("asset_mode", "local")).strip().lower()
-        self.asset_root = Path(str(assets_cfg["local_asset_root"])).resolve()
-        self.source_asset_base_url = str(assets_cfg.get("source_asset_base_url", "")).strip()
-        self.manifest_filename = str(assets_cfg["manifest_filename"])
-
-        self.dataset_path = self._dataset_path_label()
-        self.ds = self._open_dataset()
-        self.grid_to_wgs84 = Transformer.from_crs(self.grid_crs, "EPSG:4326", always_xy=True)
-        self.wgs84_to_grid = Transformer.from_crs("EPSG:4326", self.grid_crs, always_xy=True)
-        self.dates = [datetime64_to_datestr(value) for value in self.ds["time"].values]
-        self.x_values = np.asarray(self.ds["x"].values, dtype=np.float64)
-        self.y_values = np.asarray(self.ds["y"].values, dtype=np.float64)
-        self.dx = float(np.median(np.diff(self.x_values)))
-        self.dy = float(np.median(np.diff(self.y_values)))
-        self.pixel_width = abs(self.dx)
-        self.pixel_height = abs(self.dy)
-        self.grid_extent = self._grid_extent()
-
-        self.landcover_da = self.ds[self.landcover_variable]
-        self.landcover_years = np.asarray(self.landcover_da["landcover_year"].values)
-        self.landcover_labels = self._landcover_mapping()
-        self.quality_labels = self._quality_mapping()
-
-    def _dataset_path_label(self) -> str:
-        if self.data_source == "source":
-            if not self.source_store:
-                raise ValueError("viewer_config data.source_store is required when data_source=source")
-            return self.source_store
-        if self.data_source == "local":
-            if not self.local_dataset_path:
-                raise ValueError("viewer_config data.local_dataset_path is required when data_source=local")
-            return self.local_dataset_path
-        raise ValueError(f"Unsupported data_source {self.data_source!r}; expected 'local' or 'source'")
-
-    def _open_dataset(self):
-        return open_dataset_for_config(
-            {
-                "data_source": self.data_source,
-                "local_dataset_path": self.local_dataset_path,
-                "source_store": self.source_store,
-                "source_endpoint_url": self.source_endpoint_url,
-                "consolidated": True if self.data_source == "source" else False,
-            }
-        )
-
-    def _grid_extent(self) -> Dict[str, float]:
-        return {
-            "west": float(self.x_values[0] - self.pixel_width / 2.0),
-            "east": float(self.x_values[-1] + self.pixel_width / 2.0),
-            "north": float(self.y_values[0] + self.pixel_height / 2.0),
-            "south": float(self.y_values[-1] - self.pixel_height / 2.0),
-        }
-
-    def _landcover_mapping(self) -> Dict[int, str]:
-        code_to_name = self.landcover_da.attrs.get("code_to_name", {})
-        nodata_code = self.landcover_da.attrs.get("nodata_code")
-        if isinstance(code_to_name, dict):
-            mapping = {int(key): str(value) for key, value in code_to_name.items()}
-            if nodata_code is not None:
-                mapping[int(nodata_code)] = "nodata"
-            return mapping
-        dataset_key = self.ds.attrs.get("dominant_landcover_code_key")
-        if isinstance(dataset_key, str):
-            parsed = json.loads(dataset_key)
-            mapping = {int(key): str(value) for key, value in parsed.items()}
-            if nodata_code is not None:
-                mapping[int(nodata_code)] = "nodata"
-            return mapping
-        return {}
-
-    def _quality_mapping(self) -> Dict[int, str]:
-        values = self.ds.attrs.get("quality_flag_values")
-        if isinstance(values, dict):
-            return {int(value): str(key) for key, value in values.items()}
-        flag_values = self.ds[self.quality_variable].attrs.get("flag_values", [])
-        flag_meanings = str(self.ds[self.quality_variable].attrs.get("flag_meanings", "")).split()
-        return {int(value): meaning for value, meaning in zip(flag_values, flag_meanings)}
-
-    def manifest_path(self) -> Path:
-        return self.asset_root / self.manifest_filename
-
-    def metadata(self) -> Dict[str, object]:
-        if self.asset_mode == "source":
-            asset_base_url = self.source_asset_base_url
-            manifest_url = join_url_parts(asset_base_url, self.manifest_filename)
-        else:
-            asset_base_url = "/viewer-assets"
-            manifest_url = f"{asset_base_url}/{self.manifest_filename}"
-        return {
-            "dataset_label": self.dataset_label,
-            "data_source": self.data_source,
-            "dataset_path": self.dataset_path,
-            "initial_date": self.initial_date,
-            "asset_mode": self.asset_mode,
-            "asset_root": str(self.asset_root),
-            "manifest_path": str(self.manifest_path()),
-            "asset_base_url": asset_base_url,
-            "asset_manifest_url": manifest_url,
-            "dates": self.dates,
-            "grid_crs": self.grid_crs,
-            "grid_extent": self.grid_extent,
-            "grid_resolution": {
-                "dx": self.pixel_width,
-                "dy": self.pixel_height,
-            },
-        }
-
-    def _date_index(self, date_str: str) -> int:
-        try:
-            return self.dates.index(date_str)
-        except ValueError as exc:
-            raise ValueError(f"Date not available: {date_str}") from exc
-
-    def _value_for_cell(self, variable_name: str, time_idx: int, y_idx: int, x_idx: int):
-        return np.asarray(
-            self.ds[variable_name].isel(time=time_idx, y=y_idx, x=x_idx).values
-        ).item()
-
-    def _series_for_cell(
-        self,
-        variable_name: str,
-        start_idx: int,
-        end_idx: int,
-        y_idx: int,
-        x_idx: int,
-    ) -> Tuple[float, ...]:
-        values = np.asarray(
-            self.ds[variable_name].isel(time=slice(start_idx, end_idx), y=y_idx, x=x_idx).values,
-            dtype=np.float32,
-        )
-        return tuple(float(value) for value in values)
-
-    def _quality_value(self, time_idx: int) -> int:
-        return int(np.asarray(self.ds[self.quality_variable].isel(time=time_idx).values).item())
-
-    def _quality_series_for_window(self, start_idx: int, end_idx: int) -> Tuple[int, ...]:
-        values = np.asarray(self.ds[self.quality_variable].isel(time=slice(start_idx, end_idx)).values)
-        if values.ndim != 1:
-            raise ValueError(
-                f"Expected viewer quality variable {self.quality_variable!r} to be 1D over time; "
-                f"found shape {values.shape}"
-            )
-        return tuple(int(value) for value in values)
-
-    def _landcover_year_index(self, date_str: str) -> int:
-        year = int(date_str[:4])
-        if self.landcover_years.size == 1:
-            return 0
-        diffs = np.abs(self.landcover_years.astype(np.int64) - year)
-        return int(np.argmin(diffs))
-
-    def _cell_index_for_grid_xy(self, grid_x: float, grid_y: float) -> Tuple[int, int]:
-        west = self.grid_extent["west"]
-        east = self.grid_extent["east"]
-        north = self.grid_extent["north"]
-        south = self.grid_extent["south"]
-        if grid_x < west or grid_x > east or grid_y < south or grid_y > north:
-            raise ValueError("Requested point is outside the LFMC grid extent")
-
-        x_idx = int(np.floor((grid_x - west) / self.pixel_width))
-        y_idx = int(np.floor((north - grid_y) / self.pixel_height))
-        x_idx = min(max(x_idx, 0), self.x_values.size - 1)
-        y_idx = min(max(y_idx, 0), self.y_values.size - 1)
-        return x_idx, y_idx
-
-    def _cell_bounds(self, x_idx: int, y_idx: int) -> Dict[str, float]:
-        center_x = float(self.x_values[x_idx])
-        center_y = float(self.y_values[y_idx])
-        return {
-            "west": center_x - self.pixel_width / 2.0,
-            "east": center_x + self.pixel_width / 2.0,
-            "south": center_y - self.pixel_height / 2.0,
-            "north": center_y + self.pixel_height / 2.0,
-        }
-
-    def point_payload(
-        self,
-        date_str: str,
-        grid_x: float = None,
-        grid_y: float = None,
-        lat: float = None,
-        lon: float = None,
-        include_timeseries: bool = False,
-        timeseries_days: int = DEFAULT_POINT_TIMESERIES_DAYS,
-    ) -> Dict[str, object]:
-        time_idx = self._date_index(date_str)
-        if grid_x is None or grid_y is None:
-            if lat is None or lon is None:
-                raise ValueError("Provide either grid x/y or lat/lon")
-            grid_x, grid_y = self.wgs84_to_grid.transform(lon, lat)
-        requested_lon, requested_lat = self.grid_to_wgs84.transform(grid_x, grid_y)
-        x_idx, y_idx = self._cell_index_for_grid_xy(grid_x=float(grid_x), grid_y=float(grid_y))
-        cell_bounds = self._cell_bounds(x_idx=x_idx, y_idx=y_idx)
-        mean_value = safe_float(self._value_for_cell(self.display_variable, time_idx, y_idx, x_idx))
-        uncertainty_value = safe_float(self._value_for_cell(self.uncertainty_variable, time_idx, y_idx, x_idx))
-        landcover_year_idx = self._landcover_year_index(date_str)
-        raw_landcover_value = np.asarray(
-            self.landcover_da.isel(landcover_year=landcover_year_idx, y=y_idx, x=x_idx).values
-        ).item()
-        landcover_code = safe_float(raw_landcover_value)
-        if landcover_code is None:
-            log(
-                "Warning: missing landcover for point query "
-                f"date={date_str} x_idx={x_idx} y_idx={y_idx} "
-                f"grid_x={float(grid_x):.2f} grid_y={float(grid_y):.2f} "
-                f"lfmc={mean_value}"
-            )
-        else:
-            landcover_code = int(landcover_code)
-
-        center_x = float(self.x_values[x_idx])
-        center_y = float(self.y_values[y_idx])
-        center_lon, center_lat = self.grid_to_wgs84.transform(center_x, center_y)
-        quality_value = self._quality_value(time_idx)
-
-        payload = {
-            "date": date_str,
-            "requested_grid_x": float(grid_x),
-            "requested_grid_y": float(grid_y),
-            "requested_lat": safe_float(requested_lat),
-            "requested_lon": safe_float(requested_lon),
-            "cell_center_x": center_x,
-            "cell_center_y": center_y,
-            "nearest_lat": safe_float(center_lat),
-            "nearest_lon": safe_float(center_lon),
-            "cell_center_lat": safe_float(center_lat),
-            "cell_center_lon": safe_float(center_lon),
-            "cell_bounds": cell_bounds,
-            "cell_index": {
-                "x": int(x_idx),
-                "y": int(y_idx),
-            },
-            "lfmc_ens_mean": mean_value,
-            "lfmc_ens_std": uncertainty_value,
-            "quality_flag": quality_value,
-            "data_product_level": self.quality_labels.get(quality_value, "unknown"),
-            "landcover_code": landcover_code,
-            "landcover_name": self.landcover_labels.get(landcover_code, "unknown") if landcover_code is not None else "unknown",
-            "timeseries": None,
-        }
-
-        if include_timeseries:
-            bounded_days = min(max(int(timeseries_days), 1), MAX_POINT_TIMESERIES_DAYS)
-            start_idx = max(0, time_idx - bounded_days + 1)
-            end_idx = time_idx + 1
-            mean_series = self._series_for_cell(
-                self.display_variable,
-                start_idx=start_idx,
-                end_idx=end_idx,
-                y_idx=y_idx,
-                x_idx=x_idx,
-            )
-            uncertainty_series = self._series_for_cell(
-                self.uncertainty_variable,
-                start_idx=start_idx,
-                end_idx=end_idx,
-                y_idx=y_idx,
-                x_idx=x_idx,
-            )
-            quality_series = self._quality_series_for_window(start_idx=start_idx, end_idx=end_idx)
-            payload["timeseries"] = {
-                "dates": self.dates[start_idx:end_idx],
-                "lfmc_ens_mean": [safe_float(value) for value in mean_series],
-                "lfmc_ens_std": [safe_float(value) for value in uncertainty_series],
-                "quality_flag": [int(value) for value in quality_series],
-                "window_days": bounded_days,
-            }
-
-        return payload
-
-    def resolve_asset_path(self, request_path: str) -> Path:
-        relpath = request_path.removeprefix("/viewer-assets/").strip("/")
-        candidate = (self.asset_root / relpath).resolve()
-        if not str(candidate).startswith(str(self.asset_root)):
-            raise ValueError("Attempted path traversal outside asset root")
-        return candidate
-
-    def close(self) -> None:
-        self.ds.close()
-
-
-class ScientificDataset:
-    def __init__(self, cfg: Dict[str, object]):
-        data_cfg = cfg["scientific_data"]
-
-        self.data_source = str(data_cfg.get("data_source", "local")).strip().lower()
-        self.local_dataset_path = str(data_cfg.get("local_dataset_path", "")).strip()
-        self.source_store = str(data_cfg.get("source_store", "")).strip()
-        self.source_endpoint_url = str(data_cfg.get("source_endpoint_url", "")).strip()
-        self.grid_crs = str(data_cfg["grid_crs"])
-        self.display_variable = str(data_cfg["display_variable"])
-        self.uncertainty_variable = str(data_cfg["uncertainty_variable"])
-        self.quality_variable = str(data_cfg["quality_variable"])
-
-        self.ds = open_dataset_for_config(
-            {
-                "data_source": self.data_source,
-                "local_dataset_path": self.local_dataset_path,
-                "source_store": self.source_store,
-                "source_endpoint_url": self.source_endpoint_url,
-                "consolidated": bool(data_cfg.get("consolidated", False)),
-            }
-        )
-        self.wgs84_to_grid = Transformer.from_crs("EPSG:4326", self.grid_crs, always_xy=True)
-        self.grid_to_wgs84 = Transformer.from_crs(self.grid_crs, "EPSG:4326", always_xy=True)
-        self.dates = [datetime64_to_datestr(value) for value in self.ds["time"].values]
-        self.date_to_index = {date_str: idx for idx, date_str in enumerate(self.dates)}
-        self.x_values = np.asarray(self.ds["x"].values, dtype=np.float64)
-        self.y_values = np.asarray(self.ds["y"].values, dtype=np.float64)
-
-    def _date_index(self, date_str: str) -> int:
-        try:
-            return self.dates.index(date_str)
-        except ValueError as exc:
-            raise ValueError(f"Date not available in scientific dataset: {date_str}") from exc
-
-    def _cell_for_latlon(self, lat: float, lon: float) -> Tuple[int, int, float, float]:
-        grid_x, grid_y = self.wgs84_to_grid.transform(lon, lat)
-        x_idx = nearest_index(self.x_values, float(grid_x))
-        y_idx = nearest_index(self.y_values, float(grid_y))
-        center_x = float(self.x_values[x_idx])
-        center_y = float(self.y_values[y_idx])
-        return x_idx, y_idx, center_x, center_y
 
     def download_csv_bytes_for_sites(
         self,
         sites: List[Tuple[float, float, str, str]],
         start_date: str,
         end_date: str,
+        landcover_dataset=None,
     ) -> Tuple[bytes, str]:
         if not sites:
             raise ValueError("At least one site is required for CSV download")
@@ -875,283 +612,111 @@ class ScientificDataset:
         normalized_sites = []
         for site_idx, site in enumerate(sites, start=1):
             lat, lon, site_start_date, site_end_date = site
-            start_idx = self._date_index(site_start_date)
-            end_idx = self._date_index(site_end_date)
-            if end_idx < start_idx:
+            if site_end_date < site_start_date:
                 raise ValueError(f"Site {site_idx} end_date must be on or after start_date")
             if dt.date.fromisoformat(site_end_date) > max_csv_end_date(site_start_date):
                 raise ValueError(
                     f"Site {site_idx} CSV download range must be {MAX_CSV_DOWNLOAD_YEARS} years or less"
                 )
+            range_start = dt.date.fromisoformat(site_start_date)
+            range_end = dt.date.fromisoformat(site_end_date)
+            start_idx, end_idx = self._date_range_indices(range_start, range_end)
+            if end_idx <= start_idx:
+                raise ValueError(f"Site {site_idx} has no {self.dataset_label} dates in requested range")
             normalized_sites.append((lat, lon, site_start_date, site_end_date, start_idx, end_idx))
 
         buffer = io.StringIO()
         writer = csv.writer(buffer)
         writer.writerow(
             [
+                "dataset",
                 "site_index",
                 "site_lat",
                 "site_lon",
                 "site_start_date",
                 "site_end_date",
                 "date",
-                "lfmc_ens_mean",
-                "lfmc_ens_std",
+                "lfmc",
+                "lfmc_uncertainty",
+                "lfmc_anomaly",
+                "lfmc_climatology",
                 "quality_flag",
+                "landcover_code",
+                "landcover_name",
             ]
         )
 
         for site_idx, site in enumerate(normalized_sites, start=1):
             lat, lon, site_start_date, site_end_date, start_idx, end_idx = site
-            time_slice = slice(start_idx, end_idx + 1)
-            date_values = self.dates[start_idx : end_idx + 1]
-            quality_values = np.asarray(self.ds[self.quality_variable].isel(time=time_slice).values)
-            x_idx, y_idx, center_x, center_y = self._cell_for_latlon(lat=lat, lon=lon)
+            grid_x, grid_y = self.wgs84_to_grid.transform(lon, lat)
+            x_idx, y_idx = self._cell_index_for_grid_xy(grid_x=float(grid_x), grid_y=float(grid_y))
+            center_x, center_y = self._cell_center(x_idx, y_idx)
             center_lon, center_lat = self.grid_to_wgs84.transform(center_x, center_y)
-            mean_values = np.asarray(
-                self.ds[self.display_variable].isel(time=time_slice, y=y_idx, x=x_idx).values,
-                dtype=np.float32,
-            )
-            uncertainty_values = np.asarray(
-                self.ds[self.uncertainty_variable].isel(time=time_slice, y=y_idx, x=x_idx).values,
-                dtype=np.float32,
-            )
+            landcover_source = landcover_dataset or self
+            landcover = landcover_source.landcover_payload_for_latlon(site_end_date, float(center_lat), float(center_lon))
+            dates = self.dates[start_idx:end_idx]
+            mean_values = self._series_for_cell(self.display_array, start_idx, end_idx, y_idx, x_idx)
+            uncertainty_values = self._series_for_cell(self.uncertainty_array, start_idx, end_idx, y_idx, x_idx)
+            climatology_values = self._climatology_series_for_cell(dates, y_idx, x_idx)
+            anomaly_values = [
+                safe_difference(mean, climatology)
+                for mean, climatology in zip(mean_values, climatology_values)
+            ]
+            quality_values = self._quality_series_for_window(start_idx, end_idx)
 
-            for time_idx, date_str in enumerate(date_values):
-                mean_value = safe_float(mean_values[time_idx])
-                uncertainty_value = safe_float(uncertainty_values[time_idx])
-                quality_raw = quality_values[time_idx]
-                quality_value = int(quality_raw) if np.isfinite(quality_raw) else ""
+            for row_idx, date_str in enumerate(dates):
                 writer.writerow(
                     [
+                        self.dataset_key,
                         site_idx,
                         f"{float(center_lat):.6f}",
                         f"{float(center_lon):.6f}",
                         site_start_date,
                         site_end_date,
                         date_str,
-                        "" if mean_value is None else f"{mean_value:.6f}",
-                        "" if uncertainty_value is None else f"{uncertainty_value:.6f}",
-                        quality_value,
+                        "" if mean_values[row_idx] is None else f"{mean_values[row_idx]:.6f}",
+                        "" if uncertainty_values[row_idx] is None else f"{uncertainty_values[row_idx]:.6f}",
+                        "" if anomaly_values[row_idx] is None else f"{anomaly_values[row_idx]:.6f}",
+                        "" if climatology_values[row_idx] is None else f"{climatology_values[row_idx]:.6f}",
+                        "" if quality_values[row_idx] is None else quality_values[row_idx],
+                        "" if landcover["landcover_code"] is None else landcover["landcover_code"],
+                        landcover["landcover_name"],
                     ]
                 )
 
         ranges = {(site[2], site[3]) for site in normalized_sites}
         if len(ranges) == 1:
-            filename = f"lfmc_sites_{start_date}_to_{end_date}.csv"
+            filename = f"{self.dataset_key}_lfmc_sites_{start_date}_to_{end_date}.csv"
         else:
-            filename = f"lfmc_sites_{start_date}_to_{end_date}_site_ranges.csv"
+            filename = f"{self.dataset_key}_lfmc_sites_{start_date}_to_{end_date}_site_ranges.csv"
         return buffer.getvalue().encode("utf-8"), filename
 
+    def resolve_asset_path(self, request_path: str) -> Path:
+        relpath = request_path.removeprefix(f"/viewer-assets/{self.dataset_key}/").strip("/")
+        candidate = (self.asset_root / relpath).resolve()
+        if not str(candidate).startswith(str(self.asset_root)):
+            raise ValueError("Attempted path traversal outside asset root")
+        return candidate
+
     def close(self) -> None:
-        self.ds.close()
+        self.root = None
 
 
-def build_viewer_dataset(fresh_cfg: Dict[str, object]) -> ViewerDataset:
-    return ViewerPointDataset(fresh_cfg)
-
-
-def build_scientific_dataset(fresh_cfg: Dict[str, object]) -> ScientificDataset:
-    load_runtime_dependencies()
-    return ScientificDataset(fresh_cfg)
-
-
-def build_datasets() -> Tuple[Dict[str, object], ViewerDataset, ScientificDataset]:
-    fresh_cfg = load_config()
-    return fresh_cfg, build_viewer_dataset(fresh_cfg), build_scientific_dataset(fresh_cfg)
-
-
-cfg: Dict[str, object] = {}
-viewer_dataset: Optional[ViewerDataset] = None
-scientific_dataset: Optional[ScientificDataset] = None
-dataset_lock = threading.RLock()
-dataset_condition = threading.Condition(dataset_lock)
-viewer_dataset_loading = False
-scientific_dataset_loading = False
-last_refresh_time = 0.0
-last_refresh_error: Optional[str] = None
-
-
-def refresh_datasets(reason: str = "manual") -> Dict[str, object]:
-    global cfg, viewer_dataset, scientific_dataset
-    global viewer_dataset_loading, scientific_dataset_loading
-    global last_refresh_time, last_refresh_error
-
-    log(f"Unloading datasets reason={reason}")
-    with dataset_condition:
-        old_viewer_dataset = viewer_dataset
-        old_scientific_dataset = scientific_dataset
-        cfg = load_config()
-        viewer_dataset = None
-        scientific_dataset = None
-        viewer_dataset_loading = False
-        scientific_dataset_loading = False
-        last_refresh_time = time.time()
-        last_refresh_error = None
-        dataset_condition.notify_all()
-
-    if old_viewer_dataset is not None:
-        old_viewer_dataset.close()
-    if old_scientific_dataset is not None:
-        old_scientific_dataset.close()
-
-    payload = {
-        "status": "refreshed",
-        "reason": reason,
-        "refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_refresh_time)),
-        "viewer_dataset_loaded": False,
-        "scientific_dataset_loaded": False,
-    }
-    log("Dataset handles unloaded; zarrs will reopen on demand")
-    return payload
-
-
-def load_viewer_dataset(reason: str) -> None:
-    global cfg, viewer_dataset, viewer_dataset_loading, last_refresh_error
-
-    try:
-        log(f"Opening viewer dataset reason={reason}")
-        fresh_cfg = load_config()
-        fresh_viewer_dataset = build_viewer_dataset(fresh_cfg)
-        with dataset_condition:
-            old_viewer_dataset = viewer_dataset
-            cfg = fresh_cfg
-            viewer_dataset = fresh_viewer_dataset
-            viewer_dataset_loading = False
-            last_refresh_error = None
-            dataset_condition.notify_all()
-        if old_viewer_dataset is not None:
-            old_viewer_dataset.close()
-        log(f"Viewer dataset open complete viewer_dates={len(fresh_viewer_dataset.dates)}")
-    except Exception as exc:
-        with dataset_condition:
-            viewer_dataset_loading = False
-            last_refresh_error = str(exc)
-            dataset_condition.notify_all()
-        log(f"Viewer dataset open failed reason={reason}: {exc}")
-
-
-def load_scientific_dataset(reason: str) -> None:
-    global cfg, scientific_dataset, scientific_dataset_loading, last_refresh_error
-
-    try:
-        log(f"Opening scientific dataset reason={reason}")
-        fresh_cfg = load_config()
-        fresh_scientific_dataset = build_scientific_dataset(fresh_cfg)
-        with dataset_condition:
-            old_scientific_dataset = scientific_dataset
-            cfg = fresh_cfg
-            scientific_dataset = fresh_scientific_dataset
-            scientific_dataset_loading = False
-            last_refresh_error = None
-            dataset_condition.notify_all()
-        if old_scientific_dataset is not None:
-            old_scientific_dataset.close()
-        log(f"Scientific dataset open complete scientific_dates={len(fresh_scientific_dataset.dates)}")
-    except Exception as exc:
-        with dataset_condition:
-            scientific_dataset_loading = False
-            last_refresh_error = str(exc)
-            dataset_condition.notify_all()
-        log(f"Scientific dataset open failed reason={reason}: {exc}")
-
-
-def start_viewer_dataset_load(reason: str) -> None:
-    global viewer_dataset_loading, last_refresh_error
-
-    with dataset_condition:
-        if viewer_dataset is not None or viewer_dataset_loading:
-            return
-        viewer_dataset_loading = True
-        last_refresh_error = None
-        dataset_condition.notify_all()
-
-    thread = threading.Thread(target=load_viewer_dataset, args=(reason,), daemon=True)
-    thread.start()
-
-
-def start_scientific_dataset_load(reason: str) -> None:
-    global scientific_dataset_loading, last_refresh_error
-
-    with dataset_condition:
-        if scientific_dataset is not None or scientific_dataset_loading:
-            return
-        scientific_dataset_loading = True
-        last_refresh_error = None
-        dataset_condition.notify_all()
-
-    thread = threading.Thread(target=load_scientific_dataset, args=(reason,), daemon=True)
-    thread.start()
-
-
-def require_loaded_viewer_dataset() -> ViewerDataset:
-    with dataset_lock:
-        if viewer_dataset is None:
-            if last_refresh_error:
-                raise RuntimeError(f"Viewer dataset is not loaded; last refresh error: {last_refresh_error}")
-            raise RuntimeError("Viewer dataset is still loading")
-        return viewer_dataset
-
-
-def require_loaded_scientific_dataset() -> ScientificDataset:
-    with dataset_lock:
-        if scientific_dataset is None:
-            if last_refresh_error:
-                raise RuntimeError(f"Scientific dataset is not loaded; last refresh error: {last_refresh_error}")
-            raise RuntimeError("Scientific dataset is still loading")
-        return scientific_dataset
-
-
-def wait_for_viewer_dataset(timeout_seconds: float = DATASET_LOAD_WAIT_SECONDS) -> ViewerDataset:
-    if viewer_dataset is None and not viewer_dataset_loading:
-        start_viewer_dataset_load(reason="on_demand_viewer")
-
-    deadline = time.time() + timeout_seconds
-    with dataset_condition:
-        while viewer_dataset is None:
-            if last_refresh_error and not viewer_dataset_loading:
-                raise RuntimeError(f"Viewer dataset is not loaded; last refresh error: {last_refresh_error}")
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                raise DatasetLoadingError("Viewer dataset is still loading")
-            dataset_condition.wait(timeout=remaining)
-        return viewer_dataset
-
-
-def wait_for_scientific_dataset(timeout_seconds: float = DATASET_LOAD_WAIT_SECONDS) -> ScientificDataset:
-    if scientific_dataset is None and not scientific_dataset_loading:
-        start_scientific_dataset_load(reason="on_demand_scientific")
-
-    deadline = time.time() + timeout_seconds
-    with dataset_condition:
-        while scientific_dataset is None:
-            if last_refresh_error and not scientific_dataset_loading:
-                raise RuntimeError(f"Scientific dataset is not loaded; last refresh error: {last_refresh_error}")
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                raise DatasetLoadingError("Scientific dataset is still loading")
-            dataset_condition.wait(timeout=remaining)
-        return scientific_dataset
-
-
-def should_refresh_for_date_error(exc: Exception) -> bool:
-    return "Date not available" in str(exc)
-
-
-def config_metadata_payload() -> Dict[str, object]:
-    fresh_cfg = load_config()
-    data_cfg = fresh_cfg["data"]
-    assets_cfg = fresh_cfg["assets"]
+def config_dataset_metadata(dataset_key: str, entry_cfg: Dict[str, object]) -> Dict[str, object]:
+    data_cfg = entry_cfg["data"]
+    assets_cfg = entry_cfg["assets"]
     asset_mode = str(assets_cfg.get("asset_mode", "local")).strip().lower()
     if asset_mode == "source":
         asset_base_url = str(assets_cfg.get("source_asset_base_url", "")).strip()
         manifest_url = join_url_parts(asset_base_url, str(assets_cfg["manifest_filename"]))
     else:
-        asset_base_url = "/viewer-assets"
+        asset_base_url = f"/viewer-assets/{dataset_key}"
         manifest_url = f"{asset_base_url}/{assets_cfg['manifest_filename']}"
 
+    layer_keys = data_cfg.get("layer_keys", [])
     return {
-        "dataset_label": str(data_cfg["dataset_label"]),
+        "dataset_key": dataset_key,
+        "dataset_label": str(data_cfg.get("dataset_label") or entry_cfg.get("label") or dataset_key),
         "data_source": str(data_cfg.get("data_source", "local")),
         "dataset_path": str(data_cfg.get("source_store") or data_cfg.get("local_dataset_path", "")),
         "initial_date": str(data_cfg["initial_date"]),
@@ -1165,26 +730,148 @@ def config_metadata_payload() -> Dict[str, object]:
         "grid_extent": None,
         "grid_resolution": None,
         "dataset_loaded": False,
-        "last_refresh_epoch": last_refresh_time,
+        "supports_anomaly": "anomaly" in layer_keys,
+        "supports_uncertainty": bool(str(data_cfg.get("uncertainty_variable", "")).strip()),
+        "supports_climatology": bool(str(data_cfg.get("climatology_variable", "")).strip()),
+        "layer_keys": layer_keys,
     }
 
 
-def viewer_metadata_payload() -> Dict[str, object]:
+cfg: Dict[str, object] = {}
+viewer_datasets: Dict[str, ViewerDataset] = {}
+dataset_loading: Dict[str, bool] = {}
+dataset_lock = threading.RLock()
+dataset_condition = threading.Condition(dataset_lock)
+last_refresh_time = 0.0
+last_refresh_error: Optional[str] = None
+
+
+def load_dataset(dataset_key: str, reason: str) -> None:
+    global cfg, last_refresh_error
+
+    try:
+        log(f"Opening viewer dataset={dataset_key} reason={reason}")
+        fresh_cfg = load_config()
+        entry = dataset_entries(fresh_cfg)[dataset_key]
+        fresh_dataset = ViewerDataset(dataset_key, entry)
+        with dataset_condition:
+            old_dataset = viewer_datasets.get(dataset_key)
+            cfg = fresh_cfg
+            viewer_datasets[dataset_key] = fresh_dataset
+            dataset_loading[dataset_key] = False
+            last_refresh_error = None
+            dataset_condition.notify_all()
+        if old_dataset is not None:
+            old_dataset.close()
+        log(f"Viewer dataset open complete dataset={dataset_key} dates={len(fresh_dataset.dates)}")
+    except Exception as exc:
+        with dataset_condition:
+            dataset_loading[dataset_key] = False
+            last_refresh_error = str(exc)
+            dataset_condition.notify_all()
+        log(f"Viewer dataset open failed dataset={dataset_key} reason={reason}: {exc}")
+
+
+def start_dataset_load(dataset_key: str, reason: str) -> None:
+    with dataset_condition:
+        if dataset_key in viewer_datasets or dataset_loading.get(dataset_key, False):
+            return
+        dataset_loading[dataset_key] = True
+        dataset_condition.notify_all()
+
+    thread = threading.Thread(target=load_dataset, args=(dataset_key, reason), daemon=True)
+    thread.start()
+
+
+def wait_for_dataset(dataset_key: str, timeout_seconds: float = DATASET_LOAD_WAIT_SECONDS) -> ViewerDataset:
+    if dataset_key not in viewer_datasets and not dataset_loading.get(dataset_key, False):
+        start_dataset_load(dataset_key, reason="on_demand")
+
+    deadline = time.time() + timeout_seconds
+    with dataset_condition:
+        while dataset_key not in viewer_datasets:
+            if last_refresh_error and not dataset_loading.get(dataset_key, False):
+                raise RuntimeError(f"Dataset {dataset_key} is not loaded; last refresh error: {last_refresh_error}")
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise DatasetLoadingError(f"Dataset {dataset_key} is still loading")
+            dataset_condition.wait(timeout=remaining)
+        return viewer_datasets[dataset_key]
+
+
+def require_loaded_dataset(dataset_key: str) -> ViewerDataset:
     with dataset_lock:
-        loaded_viewer_dataset = viewer_dataset
-        if loaded_viewer_dataset is not None:
-            payload = loaded_viewer_dataset.metadata()
-            payload["dataset_loaded"] = True
-            payload["last_refresh_epoch"] = last_refresh_time
-            return payload
+        if dataset_key not in viewer_datasets:
+            if last_refresh_error:
+                raise RuntimeError(f"Dataset {dataset_key} is not loaded; last refresh error: {last_refresh_error}")
+            raise RuntimeError(f"Dataset {dataset_key} is still loading")
+        return viewer_datasets[dataset_key]
 
-    payload = config_metadata_payload()
+
+def refresh_datasets(reason: str = "manual") -> Dict[str, object]:
+    global cfg, viewer_datasets, dataset_loading, last_refresh_time, last_refresh_error
+
+    log(f"Unloading datasets reason={reason}")
+    with dataset_condition:
+        old_datasets = viewer_datasets
+        cfg = load_config()
+        viewer_datasets = {}
+        dataset_loading = {}
+        last_refresh_time = time.time()
+        last_refresh_error = None
+        dataset_condition.notify_all()
+
+    for dataset in old_datasets.values():
+        dataset.close()
+
+    payload = {
+        "status": "refreshed",
+        "reason": reason,
+        "refreshed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_refresh_time)),
+        "datasets_loaded": [],
+    }
+    log("Dataset handles unloaded; zarrs will reopen on demand")
+    return payload
+
+
+def should_refresh_for_date_error(exc: Exception) -> bool:
+    return "Date not available" in str(exc)
+
+
+def metadata_payload(dataset_key: Optional[str] = None) -> Dict[str, object]:
+    fresh_cfg = load_config()
+    entries = dataset_entries(fresh_cfg)
+    requested_key = normalize_dataset_key(fresh_cfg, dataset_key)
     with dataset_lock:
-        payload["last_refresh_error"] = last_refresh_error
-        return payload
+        loaded_dataset = viewer_datasets.get(requested_key)
+        loaded_keys = sorted(viewer_datasets)
+        loading_keys = sorted(key for key, value in dataset_loading.items() if value)
+
+    datasets = {}
+    for key, entry in entries.items():
+        with dataset_lock:
+            loaded = viewer_datasets.get(key)
+        datasets[key] = loaded.metadata() if loaded is not None else config_dataset_metadata(key, entry)
+
+    payload = datasets[requested_key].copy()
+    payload.update(
+        {
+            "default_dataset": default_dataset_key(fresh_cfg),
+            "active_dataset": requested_key,
+            "datasets": datasets,
+            "loaded_datasets": loaded_keys,
+            "loading_datasets": loading_keys,
+            "last_refresh_epoch": last_refresh_time,
+            "last_refresh_error": last_refresh_error,
+        }
+    )
+    if loaded_dataset is not None:
+        payload["dataset_loaded"] = True
+    return payload
 
 
-def viewer_point_payload_with_refresh(
+def point_payload_with_refresh(
+    dataset_key: str,
     date_str: str,
     grid_x: float = None,
     grid_y: float = None,
@@ -1194,9 +881,9 @@ def viewer_point_payload_with_refresh(
     timeseries_days: int = DEFAULT_POINT_TIMESERIES_DAYS,
 ) -> Dict[str, object]:
     try:
-        loaded_viewer_dataset = wait_for_viewer_dataset()
+        loaded_dataset = wait_for_dataset(dataset_key)
         with dataset_lock:
-            return loaded_viewer_dataset.point_payload(
+            payload = loaded_dataset.point_payload(
                 date_str=date_str,
                 grid_x=grid_x,
                 grid_y=grid_y,
@@ -1205,14 +892,23 @@ def viewer_point_payload_with_refresh(
                 include_timeseries=include_timeseries,
                 timeseries_days=timeseries_days,
             )
+            if loaded_dataset.landcover_source_dataset and payload.get("landcover_code") is None:
+                source_dataset = wait_for_dataset(loaded_dataset.landcover_source_dataset)
+                landcover = source_dataset.landcover_payload_for_latlon(
+                    date_str=date_str,
+                    lat=float(payload["cell_center_lat"]),
+                    lon=float(payload["cell_center_lon"]),
+                )
+                payload.update(landcover)
+            return payload
     except ValueError as exc:
         if not should_refresh_for_date_error(exc):
             raise
 
-    refresh_datasets(reason=f"point_date_miss:{date_str}")
+    refresh_datasets(reason=f"point_date_miss:{dataset_key}:{date_str}")
+    loaded_dataset = wait_for_dataset(dataset_key)
     with dataset_lock:
-        loaded_viewer_dataset = wait_for_viewer_dataset()
-        return loaded_viewer_dataset.point_payload(
+        payload = loaded_dataset.point_payload(
             date_str=date_str,
             grid_x=grid_x,
             grid_y=grid_y,
@@ -1221,37 +917,56 @@ def viewer_point_payload_with_refresh(
             include_timeseries=include_timeseries,
             timeseries_days=timeseries_days,
         )
+        if loaded_dataset.landcover_source_dataset and payload.get("landcover_code") is None:
+            source_dataset = wait_for_dataset(loaded_dataset.landcover_source_dataset)
+            payload.update(
+                source_dataset.landcover_payload_for_latlon(
+                    date_str=date_str,
+                    lat=float(payload["cell_center_lat"]),
+                    lon=float(payload["cell_center_lon"]),
+                )
+            )
+        return payload
 
 
-def scientific_csv_with_refresh(
+def csv_with_refresh(
+    dataset_key: str,
     sites: List[Tuple[float, float, str, str]],
     start_date: str,
     end_date: str,
 ) -> Tuple[bytes, str]:
     try:
-        loaded_scientific_dataset = wait_for_scientific_dataset()
+        loaded_dataset = wait_for_dataset(dataset_key)
+        landcover_dataset = None
+        if loaded_dataset.landcover_source_dataset:
+            landcover_dataset = wait_for_dataset(loaded_dataset.landcover_source_dataset)
         with dataset_lock:
-            return loaded_scientific_dataset.download_csv_bytes_for_sites(
+            return loaded_dataset.download_csv_bytes_for_sites(
                 sites=sites,
                 start_date=start_date,
                 end_date=end_date,
+                landcover_dataset=landcover_dataset,
             )
     except ValueError as exc:
         if not should_refresh_for_date_error(exc):
             raise
 
-    refresh_datasets(reason=f"csv_date_miss:{start_date}:{end_date}")
+    refresh_datasets(reason=f"csv_date_miss:{dataset_key}:{start_date}:{end_date}")
+    loaded_dataset = wait_for_dataset(dataset_key)
+    landcover_dataset = None
+    if loaded_dataset.landcover_source_dataset:
+        landcover_dataset = wait_for_dataset(loaded_dataset.landcover_source_dataset)
     with dataset_lock:
-        loaded_scientific_dataset = wait_for_scientific_dataset()
-        return loaded_scientific_dataset.download_csv_bytes_for_sites(
+        return loaded_dataset.download_csv_bytes_for_sites(
             sites=sites,
             start_date=start_date,
             end_date=end_date,
+            landcover_dataset=landcover_dataset,
         )
 
 
 class ViewerRequestHandler(BaseHTTPRequestHandler):
-    server_version = "LongLFMCViewer/0.3"
+    server_version = "LongLFMCViewer/0.4"
 
     def log_message(self, format_string: str, *args) -> None:
         print(timestamped_message(format_string % args), flush=True)
@@ -1270,8 +985,9 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         try:
             if parsed.path.startswith("/viewer-assets/"):
-                loaded_viewer_dataset = require_loaded_viewer_dataset()
-                self._static_response(loaded_viewer_dataset.resolve_asset_path(parsed.path), send_body=False)
+                dataset_key = parsed.path.strip("/").split("/")[1]
+                loaded_dataset = require_loaded_dataset(dataset_key)
+                self._static_response(loaded_dataset.resolve_asset_path(parsed.path), send_body=False)
                 return
             if parsed.path == "/api/health":
                 self.send_response(HTTPStatus.OK)
@@ -1287,23 +1003,23 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
         try:
+            fresh_cfg = load_config()
+            dataset_key = normalize_dataset_key(fresh_cfg, self._optional_param(query, "dataset"))
             if parsed.path == "/api/health":
+                entries = dataset_entries(fresh_cfg)
                 with dataset_condition:
-                    datasets_loaded = viewer_dataset is not None and scientific_dataset is not None
                     payload = {
                         "status": "ok",
-                        "datasets_loaded": datasets_loaded,
-                        "viewer_dataset_loaded": viewer_dataset is not None,
-                        "scientific_dataset_loaded": scientific_dataset is not None,
-                        "viewer_dataset_loading": viewer_dataset_loading,
-                        "scientific_dataset_loading": scientific_dataset_loading,
+                        "datasets": sorted(entries),
+                        "loaded_datasets": sorted(viewer_datasets),
+                        "loading_datasets": sorted(key for key, value in dataset_loading.items() if value),
                         "last_refresh_epoch": last_refresh_time,
                         "last_refresh_error": last_refresh_error,
                     }
                 self._json_response(payload)
                 return
             if parsed.path == "/api/metadata":
-                self._json_response(viewer_metadata_payload())
+                self._json_response(metadata_payload(dataset_key))
                 return
             if parsed.path == "/api/point":
                 date_str = self._require_param(query, "date")
@@ -1319,7 +1035,8 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                     minimum=1,
                     maximum=MAX_POINT_TIMESERIES_DAYS,
                 )
-                payload = viewer_point_payload_with_refresh(
+                payload = point_payload_with_refresh(
+                    dataset_key=dataset_key,
                     date_str=date_str,
                     grid_x=grid_x,
                     grid_y=grid_y,
@@ -1348,7 +1065,8 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                     lat = float(self._require_param(query, "lat"))
                     lon = float(self._require_param(query, "lon"))
                     sites = [(lat, lon, start_date, end_date)]
-                csv_bytes, filename = scientific_csv_with_refresh(
+                csv_bytes, filename = csv_with_refresh(
+                    dataset_key=dataset_key,
                     sites=sites,
                     start_date=start_date,
                     end_date=end_date,
@@ -1356,8 +1074,9 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 self._csv_response(csv_bytes, filename=filename)
                 return
             if parsed.path.startswith("/viewer-assets/"):
-                loaded_viewer_dataset = require_loaded_viewer_dataset()
-                self._static_response(loaded_viewer_dataset.resolve_asset_path(parsed.path))
+                dataset_key = parsed.path.strip("/").split("/")[1]
+                loaded_dataset = require_loaded_dataset(dataset_key)
+                self._static_response(loaded_dataset.resolve_asset_path(parsed.path))
                 return
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
         except DatasetLoadingError as exc:
@@ -1392,6 +1111,12 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
         values = query.get(name)
         if not values or not values[0]:
             raise ValueError(f"Missing required query parameter: {name}")
+        return values[0]
+
+    def _optional_param(self, query: Dict[str, List[str]], name: str):
+        values = query.get(name)
+        if not values or values[0] == "":
+            return None
         return values[0]
 
     def _optional_float(self, query: Dict[str, List[str]], name: str):

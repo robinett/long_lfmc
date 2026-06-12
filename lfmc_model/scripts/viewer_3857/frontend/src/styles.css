@@ -63,6 +63,49 @@ body {
   box-shadow: inset 0 0 0 1px rgba(128, 89, 58, 0.13);
 }
 
+.dataset-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 18px;
+  background: rgba(255, 251, 244, 0.62);
+  box-shadow: inset 0 0 0 1px rgba(128, 89, 58, 0.13);
+}
+
+.dataset-toggle-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dataset-toggle-button {
+  min-width: 190px;
+}
+
+.dataset-help-link {
+  color: #6d4b2f;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  white-space: nowrap;
+}
+
+.dataset-notice {
+  margin-top: 9px;
+  padding: 9px 12px;
+  border-radius: 14px;
+  background: rgba(234, 214, 179, 0.92);
+  color: #4c311d;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
 .date-slider-control {
   display: grid;
   grid-template-columns: 152px minmax(220px, 1fr);
@@ -480,6 +523,10 @@ body {
   background: linear-gradient(180deg, rgba(245, 239, 226, 0.9) 0%, rgba(236, 227, 209, 0.9) 100%);
 }
 
+.timeseries-chart-wrap {
+  position: relative;
+}
+
 .chart-band {
   fill: rgba(108, 141, 167, 0.28);
   stroke: none;
@@ -495,6 +542,36 @@ body {
 
 .chart-line-anomaly {
   stroke: #41548b;
+}
+
+.chart-line-history {
+  fill: none;
+  stroke: rgba(82, 72, 60, 0.18);
+  stroke-width: 1.15;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.chart-hover-target {
+  fill: transparent;
+  stroke: transparent;
+  pointer-events: all;
+}
+
+.timeseries-tooltip {
+  position: absolute;
+  z-index: 2;
+  transform: translate(8px, -110%);
+  max-width: 190px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(42, 33, 25, 0.92);
+  color: #fff5e9;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.25;
+  pointer-events: none;
+  box-shadow: 0 8px 20px rgba(44, 33, 20, 0.22);
 }
 
 .chart-zero-line {
@@ -560,6 +637,12 @@ body {
   border-top-color: #41548b;
 }
 
+.timeseries-legend-swatch-history {
+  height: 0;
+  border-top: 3px solid rgba(82, 72, 60, 0.24);
+  border-radius: 0;
+}
+
 .timeseries-legend-swatch-band {
   background: rgba(108, 141, 167, 0.28);
   border: 1px solid rgba(108, 141, 167, 0.42);
@@ -582,6 +665,35 @@ body {
   overflow: hidden;
   box-shadow: 0 28px 60px rgba(52, 40, 24, 0.16);
   background: linear-gradient(180deg, #e7dfcf 0%, #d8ccb8 100%);
+}
+
+.map-notice,
+.map-loading {
+  position: absolute;
+  z-index: 3;
+  right: 16px;
+  max-width: min(420px, calc(100% - 32px));
+  border-radius: 14px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  box-shadow: 0 10px 28px rgba(44, 33, 20, 0.16);
+}
+
+.map-notice {
+  top: 16px;
+  padding: 10px 12px;
+  background: rgba(255, 251, 244, 0.94);
+  color: #4c311d;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.map-loading {
+  bottom: 16px;
+  padding: 8px 11px;
+  background: rgba(42, 33, 25, 0.86);
+  color: #fff5e9;
+  font-size: 0.76rem;
+  text-transform: lowercase;
 }
 
 .map-container {
@@ -618,6 +730,15 @@ body {
   .date-bar-controls {
     grid-template-columns: 1fr;
     align-items: stretch;
+  }
+
+  .dataset-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dataset-help-link {
+    white-space: normal;
   }
 
   .date-slider-control {
