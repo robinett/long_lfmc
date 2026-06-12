@@ -2,7 +2,7 @@ server:
   host: 0.0.0.0
   port: 8001
 
-default_dataset: modis
+default_dataset: sentinel1
 
 datasets:
   modis:
@@ -46,7 +46,7 @@ datasets:
       landcover_variable: ""
       climatology_variable: ""
       landcover_source_dataset: modis
-      initial_date: 2024-06-01
+      initial_date: latest
       layer_keys:
         - lfmc
     assets:

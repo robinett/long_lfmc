@@ -355,6 +355,16 @@ function clampDownloadSiteDates(site, dates) {
   return nextSite;
 }
 
+function configuredInitialDate(dates, initialDate) {
+  if (!dates.length) {
+    return "";
+  }
+  if (initialDate === "latest") {
+    return dates[dates.length - 1];
+  }
+  return dates.includes(initialDate) ? initialDate : dates[dates.length - 1];
+}
+
 function showDatePicker(event) {
   const input = event.currentTarget;
   if (typeof input.showPicker === "function") {
@@ -1382,10 +1392,8 @@ function App() {
           }
           const defaultKey = metadataPayload.default_dataset || DEFAULT_DATASET_KEY;
           const initialManifest = nextManifests[defaultKey] ?? nextManifests[Object.keys(nextManifests)[0]];
-          const configuredInitialDate = initialManifest.dates.includes(initialManifest.initial_date)
-            ? initialManifest.initial_date
-            : initialManifest.dates[initialManifest.dates.length - 1];
-          const initialIndex = Math.max(initialManifest.dates.indexOf(configuredInitialDate), 0);
+          const initialDate = configuredInitialDate(initialManifest.dates, initialManifest.initial_date);
+          const initialIndex = Math.max(initialManifest.dates.indexOf(initialDate), 0);
           const initialLayerKey = preferredLayerForDataset(defaultKey, initialManifest);
           setMetadata(metadataPayload);
           setDatasetManifests(nextManifests);
