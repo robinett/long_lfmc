@@ -1232,8 +1232,8 @@ function App() {
             }
             const manifestPayload = await manifestResponse.json();
             nextManifests[datasetKey] = {
-              ...manifestPayload,
               ...datasetConfig,
+              ...manifestPayload,
               dataset_key: datasetKey,
               dataset_label: datasetConfig.dataset_label,
               asset_base_url: datasetConfig.asset_base_url,
