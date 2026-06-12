@@ -365,6 +365,24 @@ function configuredInitialDate(dates, initialDate) {
   return dates.includes(initialDate) ? initialDate : dates[dates.length - 1];
 }
 
+function startupViewResolutions(manifestPayload, extent, mapElement) {
+  const baseResolutions = manifestPayload.tiles.view_resolutions ?? manifestPayload.tiles.resolutions ?? [];
+  const width = Math.max(mapElement?.clientWidth ?? 0, 1);
+  const height = Math.max(mapElement?.clientHeight ?? 0, 1);
+  const fitResolution = Math.max(
+    (extent[2] - extent[0]) / width,
+    (extent[3] - extent[1]) / height,
+  );
+  if (!Number.isFinite(fitResolution) || fitResolution <= 0) {
+    return baseResolutions;
+  }
+  const maxExistingResolution = Math.max(...baseResolutions.map(Number).filter(Number.isFinite), 0);
+  if (fitResolution <= maxExistingResolution) {
+    return baseResolutions;
+  }
+  return [fitResolution, ...baseResolutions];
+}
+
 function showDatePicker(event) {
   const input = event.currentTarget;
   if (typeof input.showPicker === "function") {
@@ -1380,6 +1398,7 @@ function App() {
               ...manifestPayload,
               dataset_key: datasetKey,
               dataset_label: datasetConfig.dataset_label,
+              initial_date: datasetConfig.initial_date,
               asset_base_url: datasetConfig.asset_base_url,
               asset_manifest_url: datasetConfig.asset_manifest_url,
               supports_anomaly: Boolean(datasetConfig.supports_anomaly),
@@ -1485,7 +1504,7 @@ function App() {
     const view = new View({
       projection,
       center: getCenter(extent),
-      resolutions: manifest.tiles.view_resolutions,
+      resolutions: startupViewResolutions(manifest, extent, mapContainerRef.current),
       constrainResolution: true,
       extent,
       showFullExtent: true,
