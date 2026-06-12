@@ -56,3 +56,26 @@ datasets:
     required_layers:
       - mean
       - anomaly
+  rao_s1_scientific_lfmc_maps:
+    description: Scientific EPSG:4326 Zarr for Rao S1-informed LFMC maps.
+    artifact_type: zarr
+    source_path: /oak/stanford/groups/konings/projects/rao_2020/data/source_products/rao_s1_lfmc.zarr
+    destination_relpath: lfmc_maps.zarr
+    required_variables:
+      - lfmc
+      - quality_flag
+  rao_s1_viewer_3857_lfmc_maps:
+    description: EPSG:3857 viewer Zarr for Rao S1-informed LFMC maps.
+    artifact_type: zarr
+    source_path: /oak/stanford/groups/konings/projects/rao_2020/data/source_products/viewer_3857/rao_s1_lfmc_3857.zarr
+    destination_relpath: viewer_3857/lfmc_maps_3857.zarr
+    required_variables:
+      - lfmc
+      - quality_flag
+  rao_s1_viewer_3857_assets:
+    description: Absolute LFMC tile and manifest assets for the Rao S1-informed viewer product.
+    artifact_type: directory
+    source_path: /oak/stanford/groups/konings/projects/rao_2020/data/source_products/viewer_3857/assets
+    destination_relpath: viewer_3857/assets/web_mercator_3857
+    required_layers:
+      - lfmc

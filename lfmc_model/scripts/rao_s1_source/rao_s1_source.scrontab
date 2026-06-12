@@ -1,0 +1,10 @@
+RAO_S1_DIR=/home/users/trobinet/long_lfmc/lfmc_model/scripts/rao_s1_source
+
+#SCRON --job-name=rao_s1_source_update
+#SCRON --partition=serc
+#SCRON --time=24:00:00
+#SCRON --cpus-per-task=16
+#SCRON --mem=128G
+#SCRON --output=/home/users/trobinet/long_lfmc/lfmc_model/scripts/rao_s1_source/logs/rao_s1_source_update_%j.out
+#SCRON --error=/home/users/trobinet/long_lfmc/lfmc_model/scripts/rao_s1_source/logs/rao_s1_source_update_%j.err
+0 6 11,26 * * $RAO_S1_DIR/run_rao_s1_source_update.sh

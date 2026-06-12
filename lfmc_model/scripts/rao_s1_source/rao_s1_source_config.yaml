@@ -1,0 +1,57 @@
+dataset:
+  dataset_label: Rao S1-informed LFMC
+  source_crs: EPSG:4326
+  viewer_crs: EPSG:3857
+  variable_name: lfmc
+  variable_label: LFMC
+  units: percent
+  source_nodata_value: -9999
+  source_sampling_method: nearest
+  initial_date: 2024-06-01
+
+paths:
+  rao_root: /oak/stanford/groups/konings/projects/rao_2020
+  lfmc_maps_dir: /oak/stanford/groups/konings/projects/rao_2020/data/lfmc_maps
+  rao_pipeline_script: /oak/stanford/groups/konings/projects/rao_2020/code/lfmc_from_sar/scripts/run_lfmc_pipeline.sh
+  scientific_zarr_path: /oak/stanford/groups/konings/projects/rao_2020/data/source_products/rao_s1_lfmc.zarr
+  viewer_zarr_path: /oak/stanford/groups/konings/projects/rao_2020/data/source_products/viewer_3857/rao_s1_lfmc_3857.zarr
+  asset_root: /oak/stanford/groups/konings/projects/rao_2020/data/source_products/viewer_3857/assets
+  scratch_root: /scratch/users/trobinet/long_lfmc/final_lfmc/rao_s1_lfmc
+  state_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/rao_s1_lfmc/state
+
+chunks:
+  scientific_time: 128
+  viewer_time: 32
+  spatial: 256
+  latlon_row: 256
+
+viewer:
+  resolution_m: auto
+  tile_size: 512
+  min_zoom: 0
+  max_zoom: 3
+  extra_view_resolutions:
+    - 250.0
+    - 125.0
+    - 62.5
+    - 31.25
+    - 15.625
+    - 7.8125
+
+rendering:
+  default_valid_alpha: 191
+  min: 40.0
+  max: 220.0
+  palette:
+    - [109, 39, 27]
+    - [202, 126, 74]
+    - [208, 196, 135]
+    - [109, 142, 96]
+    - [37, 59, 54]
+  stops: [0.0, 0.18, 0.40, 0.68, 1.0]
+
+source_coop:
+  product_prefix: rseg/sentinel1-lfmc/
+  scientific_dataset_key: rao_s1_scientific_lfmc_maps
+  viewer_dataset_key: rao_s1_viewer_3857_lfmc_maps
+  assets_dataset_key: rao_s1_viewer_3857_assets
