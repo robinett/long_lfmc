@@ -30,6 +30,7 @@ const SENTINEL_DATASET_KEY = "sentinel1";
 const DEFAULT_TIMESERIES_MODE = "mean";
 const TIMESERIES_WINDOW_DAYS = 90;
 const SENTINEL_DATE_TOLERANCE_DAYS = 20;
+const GLOBAL_DATE_START = "2001-01-01";
 const PRODUCT_DOC_URL = "https://docs.google.com/document/d/1b8n4UQ1XYDd_llw2nO0yPj-pN8Ar0BUjXGQiM-G6CvY/edit?usp=sharing";
 
 function apiUrl(pathAndQuery) {
@@ -237,6 +238,21 @@ function shiftDateString(dateStr, amount, unit) {
     date.setUTCDate(date.getUTCDate() + amount);
   }
   return formatDateString(date);
+}
+
+function buildDailyDateRange(startDate, endDate) {
+  const start = parseDateString(startDate);
+  const end = parseDateString(endDate);
+  if (!start || !end || start > end) {
+    return [];
+  }
+  const values = [];
+  const cursor = new Date(start.getTime());
+  while (cursor <= end) {
+    values.push(formatDateString(cursor));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return values;
 }
 
 function findDateIndex(dates, targetDate, direction = "nearest") {
@@ -681,7 +697,7 @@ function TimeseriesChart({ pointInfo, mode, onModeChange, supportsAnomaly }) {
         </div>
         <div className="timeseries-legend-item">
           <span className="timeseries-legend-swatch timeseries-legend-swatch-history" />
-          <span className="timeseries-legend-label">Previous years</span>
+          <span className="timeseries-legend-label">Other years</span>
         </div>
         {geometry.showBand ? (
           <div className="timeseries-legend-item">
@@ -712,6 +728,8 @@ function App() {
   const playbackTimeoutRef = useRef(null);
   const activeDownloadSiteIndexRef = useRef(0);
   const noticeTimeoutRef = useRef(null);
+  const pointQueryTokenRef = useRef(0);
+  const selectedLocationRef = useRef(null);
 
   const [metadata, setMetadata] = useState(null);
   const [datasetManifests, setDatasetManifests] = useState({});
@@ -734,6 +752,10 @@ function App() {
 
   const dates = manifest?.dates ?? [];
   const selectedDate = dates[dateIndex] ?? "NA";
+  const sentinelDates = datasetManifests[SENTINEL_DATASET_KEY]?.dates ?? [];
+  const globalDateEnd = sentinelDates[sentinelDates.length - 1] ?? dates[dates.length - 1] ?? "";
+  const globalDates = buildDailyDateRange(GLOBAL_DATE_START, globalDateEnd);
+  const globalDateIndex = Math.max(findDateIndex(globalDates, selectedDate), 0);
   const datasetMeta = metadata?.datasets?.[activeDatasetKey] ?? {};
   const supportsAnomaly = Boolean(datasetMeta.supports_anomaly);
   const layerEntries = Object.entries(manifest?.layers ?? {});
@@ -759,13 +781,13 @@ function App() {
     return targetManifest?.layers?.mean ? "mean" : Object.keys(targetManifest?.layers ?? {})[0] ?? "";
   }
 
-  function dateResolutionForDataset(datasetKey, targetDate) {
+  function dateResolutionForDataset(datasetKey, targetDate, direction = "nearest") {
     const targetManifest = datasetManifests[datasetKey];
     const targetDates = targetManifest?.dates ?? [];
     if (!targetDates.length || !targetDate) {
       return null;
     }
-    const targetIndex = findDateIndex(targetDates, targetDate);
+    const targetIndex = findDateIndex(targetDates, targetDate, direction);
     if (targetIndex < 0) {
       return null;
     }
@@ -777,6 +799,30 @@ function App() {
       date: resolvedDate,
       distanceDays: dateDiffDays(resolvedDate, targetDate),
     };
+  }
+
+  function alternateDatasetKey(datasetKey) {
+    return datasetKey === SENTINEL_DATASET_KEY ? DEFAULT_DATASET_KEY : SENTINEL_DATASET_KEY;
+  }
+
+  function canUseResolution(resolution) {
+    if (!resolution) {
+      return false;
+    }
+    return resolution.datasetKey !== SENTINEL_DATASET_KEY || resolution.distanceDays <= SENTINEL_DATE_TOLERANCE_DAYS;
+  }
+
+  function refreshSelectedLocation(dateStr, updateDownloadSite = false) {
+    const selectedLocation = selectedLocationRef.current;
+    if (!selectedLocation || !dateStr) {
+      return;
+    }
+    void loadPointAtLocation(selectedLocation.lat, selectedLocation.lon, dateStr, {
+      updateDownloadSite,
+      loadHistory: true,
+    }).catch((error) => {
+      setStatusText(`Point refresh failed: ${error.message}`);
+    });
   }
 
   function applyResolvedSelection(resolution, message = "") {
@@ -792,12 +838,12 @@ function App() {
     setSelectedLayerKey(nextLayerKey);
     selectedLayerKeyRef.current = nextLayerKey;
     setTimeseriesMode(DEFAULT_TIMESERIES_MODE);
-    pointRef.current = null;
-    setPointInfo(null);
     setDownloadSites((currentSites) =>
       currentSites.map((site) => clampDownloadSiteDates(site, nextManifest.dates ?? [])),
     );
     setStatusText(`Showing ${nextManifest.dataset_label} for ${resolution.date}`);
+    void transitionToDateIndex(resolution.index, { force: true, layerKey: nextLayerKey });
+    refreshSelectedLocation(resolution.date);
     if (message) {
       showNotice(message);
     }
@@ -807,6 +853,19 @@ function App() {
     const targetManifest = datasetManifests[datasetKey];
     const targetDates = targetManifest?.dates ?? [];
     if (!targetDates.length || !targetDate) {
+      return;
+    }
+    const targetStart = targetDates[0];
+    const targetEnd = targetDates[targetDates.length - 1];
+    if (targetDate < targetStart || targetDate > targetEnd) {
+      const alternateKey = alternateDatasetKey(datasetKey);
+      const alternateResolution = dateResolutionForDataset(alternateKey, targetDate, "nearest");
+      if (canUseResolution(alternateResolution)) {
+        applyResolvedSelection(
+          alternateResolution,
+          `${targetManifest.dataset_label} is unavailable for ${targetDate}; switched to ${alternateResolution.manifest.dataset_label}.`,
+        );
+      }
       return;
     }
     let targetIndex = findDateIndex(targetDates, targetDate, direction);
@@ -837,17 +896,28 @@ function App() {
     }
     setIsPlaying(false);
     requestDateTransition(targetIndex);
+    refreshSelectedLocation(resolvedDate);
   }
 
-  async function queryPoint(x, y, dateStr) {
+  async function queryPoint(params, dateStr, options = {}) {
+    const {
+      datasetKey = activeDatasetKeyRef.current,
+      includeHistory = false,
+    } = options;
     const query = new URLSearchParams({
-      dataset: activeDatasetKeyRef.current,
+      dataset: datasetKey,
       date: dateStr,
-      x: String(x),
-      y: String(y),
       include_timeseries: "true",
+      include_history: includeHistory ? "true" : "false",
       timeseries_days: String(TIMESERIES_WINDOW_DAYS),
     });
+    if (params.x !== undefined && params.y !== undefined) {
+      query.set("x", String(params.x));
+      query.set("y", String(params.y));
+    } else {
+      query.set("lat", String(params.lat));
+      query.set("lon", String(params.lon));
+    }
     const maxAttempts = 30;
     const retryDelayMs = 2000;
 
@@ -869,15 +939,49 @@ function App() {
     throw new Error("Point query timed out while viewer dataset was loading");
   }
 
-  async function loadPointAtCoordinate(x, y, dateStr, options = {}) {
-    const { recenter = false, updateDownloadSite = true } = options;
+  function mergePointHistory(payload, token) {
+    queryPoint(
+      {
+        lat: payload.requested_lat,
+        lon: payload.requested_lon,
+      },
+      payload.date,
+      {
+        datasetKey: payload.dataset_key,
+        includeHistory: true,
+      },
+    )
+      .then((historyPayload) => {
+        if (token !== pointQueryTokenRef.current) {
+          return;
+        }
+        setPointInfo(historyPayload);
+      })
+      .catch((error) => {
+        if (token === pointQueryTokenRef.current) {
+          setStatusText(`All-year comparison load failed: ${error.message}`);
+        }
+      });
+  }
+
+  async function loadPoint(params, dateStr, options = {}) {
+    const { recenter = false, updateDownloadSite = true, loadHistory = true } = options;
+    const token = pointQueryTokenRef.current + 1;
+    pointQueryTokenRef.current = token;
     setIsPointLoading(true);
     try {
-      const payload = await queryPoint(x, y, dateStr);
+      const payload = await queryPoint(params, dateStr, { includeHistory: false });
+      if (token !== pointQueryTokenRef.current) {
+        return payload;
+      }
       setPointInfo(payload);
       pointRef.current = {
         x: payload.requested_grid_x,
         y: payload.requested_grid_y,
+      };
+      selectedLocationRef.current = {
+        lat: payload.requested_lat,
+        lon: payload.requested_lon,
       };
       if (updateDownloadSite) {
         setDownloadSites((currentSites) =>
@@ -899,10 +1003,23 @@ function App() {
           duration: 250,
         });
       }
+      if (loadHistory) {
+        mergePointHistory(payload, token);
+      }
       return payload;
     } finally {
-      setIsPointLoading(false);
+      if (token === pointQueryTokenRef.current) {
+        setIsPointLoading(false);
+      }
     }
+  }
+
+  async function loadPointAtCoordinate(x, y, dateStr, options = {}) {
+    return loadPoint({ x, y }, dateStr, options);
+  }
+
+  async function loadPointAtLocation(lat, lon, dateStr, options = {}) {
+    return loadPoint({ lat, lon }, dateStr, options);
   }
 
   function buildTileGrid(manifestPayload) {
@@ -1179,6 +1296,12 @@ function App() {
     if (!dates.length || selectedDate === "NA") {
       return;
     }
+    if (activeDatasetKeyRef.current === SENTINEL_DATASET_KEY && unit === "day" && Math.abs(amount) === 15) {
+      const nextIndex = Math.max(0, Math.min(dates.length - 1, dateIndexRef.current + Math.sign(amount)));
+      requestDateTransition(nextIndex);
+      refreshSelectedLocation(dates[nextIndex]);
+      return;
+    }
     const targetDate = shiftDateString(selectedDate, amount, unit);
     requestDateValueTransition(targetDate, amount < 0 ? "backward" : "forward");
   }
@@ -1433,7 +1556,7 @@ function App() {
       rasterTileLayersRef.current = [];
       selectionSourceRef.current = null;
     };
-  }, [manifest?.dataset_key]);
+  }, [Boolean(manifest)]);
 
   useEffect(() => {
     if (!pointRef.current || !manifest || isPlaying) {
@@ -1441,7 +1564,12 @@ function App() {
     }
 
     const currentSelectedDate = manifest.dates[dateIndex];
-    loadPointAtCoordinate(pointRef.current.x, pointRef.current.y, currentSelectedDate)
+    const selectedLocation = selectedLocationRef.current;
+    if (!selectedLocation) {
+      return;
+    }
+
+    loadPointAtLocation(selectedLocation.lat, selectedLocation.lon, currentSelectedDate)
       .then((payload) => {
         updateSelectionFeatures(payload);
       })
@@ -1714,10 +1842,10 @@ function App() {
               <input
                 className="location-input date-input picker-only-date"
                 type="date"
-                value={dates.includes(selectedDate) ? selectedDate : ""}
-                min={dates[0] ?? undefined}
-                max={dates[dates.length - 1] ?? undefined}
-                disabled={!dates.length}
+                value={selectedDate !== "NA" ? selectedDate : ""}
+                min={globalDates[0] ?? undefined}
+                max={globalDates[globalDates.length - 1] ?? undefined}
+                disabled={!globalDates.length}
                 onClick={showDatePicker}
                 onBeforeInput={preventManualDateEdit}
                 onChange={(event) => requestDateValueTransition(event.target.value)}
@@ -1731,18 +1859,18 @@ function App() {
                 className="date-slider"
                 type="range"
                 min="0"
-                max={Math.max(dates.length - 1, 0)}
+                max={Math.max(globalDates.length - 1, 0)}
                 step="1"
-                value={dateIndex}
-                disabled={!dates.length}
+                value={globalDateIndex}
+                disabled={!globalDates.length}
                 onChange={(event) => {
                   setIsPlaying(false);
-                  requestDateTransition(Number(event.target.value));
+                  requestDateValueTransition(globalDates[Number(event.target.value)]);
                 }}
               />
               <div className="slider-extents date-slider-extents">
-                <span>{dates[0] ?? "--"}</span>
-                <span>{dates[dates.length - 1] ?? "--"}</span>
+                <span>{globalDates[0] ?? "--"}</span>
+                <span>{globalDates[globalDates.length - 1] ?? "--"}</span>
               </div>
             </div>
           </div>
@@ -1787,7 +1915,7 @@ function App() {
             })}
           </div>
           <a className="dataset-help-link" href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
-            Which dataset should I use
+            Which dataset should I use?
           </a>
         </div>
         {noticeText ? <div className="dataset-notice">{noticeText}</div> : null}

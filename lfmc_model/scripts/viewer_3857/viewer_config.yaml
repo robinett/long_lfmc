@@ -6,9 +6,9 @@ default_dataset: modis
 
 datasets:
   modis:
-    label: MODIS-based LFMC
+    label: MODIS-based LFMC dataset
     data:
-      dataset_label: MODIS-based LFMC
+      dataset_label: MODIS-based LFMC dataset
       data_source: source
       consolidated: true
       local_dataset_path: /scratch/users/trobinet/long_lfmc/final_lfmc/lfmc_model/viewer_3857/lfmc_maps_3857.zarr
@@ -31,9 +31,9 @@ datasets:
       manifest_filename: manifest.json
 
   sentinel1:
-    label: Sentinel-1 based LFMC
+    label: Sentinel-1 based LFMC dataset
     data:
-      dataset_label: Sentinel-1 based LFMC
+      dataset_label: Sentinel-1 based LFMC dataset
       data_source: source
       consolidated: true
       local_dataset_path: /oak/stanford/groups/konings/projects/rao_2020/data/source_products/viewer_3857/rao_s1_lfmc_3857.zarr

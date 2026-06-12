@@ -66,8 +66,8 @@ body {
 .dataset-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 14px;
+  justify-content: flex-start;
+  gap: 12px;
   margin-top: 10px;
   padding: 10px 12px;
   border-radius: 18px;
@@ -82,7 +82,7 @@ body {
 }
 
 .dataset-toggle-button {
-  min-width: 190px;
+  min-width: 230px;
 }
 
 .dataset-help-link {
@@ -733,7 +733,7 @@ body {
   }
 
   .dataset-bar {
-    align-items: stretch;
+    align-items: flex-start;
     flex-direction: column;
   }
 

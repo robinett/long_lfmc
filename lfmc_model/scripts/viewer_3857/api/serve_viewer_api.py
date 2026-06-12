@@ -462,24 +462,34 @@ class ViewerDataset:
             "window_days": DEFAULT_POINT_TIMESERIES_DAYS,
         }
 
-    def _series_windows_for_cell(self, selected_date: dt.date, y_idx: int, x_idx: int) -> Dict[str, object]:
+    def _series_windows_for_cell(
+        self,
+        selected_date: dt.date,
+        y_idx: int,
+        x_idx: int,
+        include_history: bool = True,
+    ) -> Dict[str, object]:
         current_start = selected_date - dt.timedelta(days=DEFAULT_POINT_TIMESERIES_DAYS - 1)
         current_start_idx, current_end_idx = self._date_range_indices(current_start, selected_date)
         current_indices = list(range(current_start_idx, current_end_idx))
 
         selected_year = selected_date.year
         first_year = self.date_values[0].year
+        last_year = self.date_values[-1].year
         historical_specs = []
         all_indices = set(current_indices)
-        for year in range(first_year, selected_year):
-            hist_end = shift_year(selected_date, year)
-            hist_start = hist_end - dt.timedelta(days=DEFAULT_POINT_TIMESERIES_DAYS - 1)
-            start_idx, end_idx = self._date_range_indices(hist_start, hist_end)
-            indices = list(range(start_idx, end_idx))
-            if len(indices) < 2:
-                continue
-            historical_specs.append((year, hist_start, indices))
-            all_indices.update(indices)
+        if include_history:
+            for year in range(first_year, last_year + 1):
+                if year == selected_year:
+                    continue
+                hist_end = shift_year(selected_date, year)
+                hist_start = hist_end - dt.timedelta(days=DEFAULT_POINT_TIMESERIES_DAYS - 1)
+                start_idx, end_idx = self._date_range_indices(hist_start, hist_end)
+                indices = list(range(start_idx, end_idx))
+                if len(indices) < 2:
+                    continue
+                historical_specs.append((year, hist_start, indices))
+                all_indices.update(indices)
 
         sorted_indices = sorted(all_indices)
         mean_lookup = dict(zip(sorted_indices, self._values_for_indices(self.display_array, sorted_indices, y_idx, x_idx)))
@@ -535,6 +545,7 @@ class ViewerDataset:
         lat: float = None,
         lon: float = None,
         include_timeseries: bool = False,
+        include_history: bool = True,
         timeseries_days: int = DEFAULT_POINT_TIMESERIES_DAYS,
     ) -> Dict[str, object]:
         _ = timeseries_days
@@ -593,7 +604,12 @@ class ViewerDataset:
 
         if include_timeseries:
             selected_date = dt.date.fromisoformat(date_str)
-            payload["timeseries"] = self._series_windows_for_cell(selected_date, y_idx, x_idx)
+            payload["timeseries"] = self._series_windows_for_cell(
+                selected_date,
+                y_idx,
+                x_idx,
+                include_history=include_history,
+            )
 
         return payload
 
@@ -878,6 +894,7 @@ def point_payload_with_refresh(
     lat: float = None,
     lon: float = None,
     include_timeseries: bool = False,
+    include_history: bool = True,
     timeseries_days: int = DEFAULT_POINT_TIMESERIES_DAYS,
 ) -> Dict[str, object]:
     try:
@@ -890,6 +907,7 @@ def point_payload_with_refresh(
                 lat=lat,
                 lon=lon,
                 include_timeseries=include_timeseries,
+                include_history=include_history,
                 timeseries_days=timeseries_days,
             )
             if loaded_dataset.landcover_source_dataset and payload.get("landcover_code") is None:
@@ -915,6 +933,7 @@ def point_payload_with_refresh(
             lat=lat,
             lon=lon,
             include_timeseries=include_timeseries,
+            include_history=include_history,
             timeseries_days=timeseries_days,
         )
         if loaded_dataset.landcover_source_dataset and payload.get("landcover_code") is None:
@@ -1028,6 +1047,7 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                 lat = self._optional_float(query, "lat")
                 lon = self._optional_float(query, "lon")
                 include_timeseries = self._optional_bool(query, "include_timeseries", default=False)
+                include_history = self._optional_bool(query, "include_history", default=True)
                 timeseries_days = self._optional_int(
                     query,
                     "timeseries_days",
@@ -1043,6 +1063,7 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
                     lat=lat,
                     lon=lon,
                     include_timeseries=include_timeseries,
+                    include_history=include_history,
                     timeseries_days=timeseries_days,
                 )
                 self._json_response(payload)
