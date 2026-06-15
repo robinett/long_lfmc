@@ -59,7 +59,13 @@ def check_head(url: str, label: str) -> None:
             raise ValueError(f"{label} HEAD failed with status {response.status}")
 
 
-def check_zarr(label: str, store_url: str, expected_chunks, expected_time_count: int) -> None:
+def check_zarr(
+    label: str,
+    store_url: str,
+    expected_chunks,
+    expected_time_count: int,
+    required_climatology: bool = False,
+) -> None:
     metadata_url = f"{store_url}/.zmetadata"
     log(f"Opening remote {label} zarr metadata {metadata_url}")
     metadata = load_remote_json(metadata_url).get("metadata", {})
@@ -69,6 +75,14 @@ def check_zarr(label: str, store_url: str, expected_chunks, expected_time_count:
         raise ValueError(f"{label} is missing lfmc array metadata")
     if "time/.zarray" not in metadata:
         raise ValueError(f"{label} is missing time array metadata")
+    if required_climatology:
+        for variable_name in ("lfmc_climatology_mean_tile", "lfmc_climatology_mean_point"):
+            key = f"{variable_name}/.zarray"
+            if key not in metadata:
+                raise ValueError(f"{label} is missing {variable_name} array metadata")
+            shape = tuple(metadata[key].get("shape", ()))
+            if len(shape) != 3 or shape[0] != 365:
+                raise ValueError(f"{label} {variable_name} climatology shape check failed: shape={shape}")
 
     lfmc_meta = metadata["lfmc/.zarray"]
     time_meta = metadata["time/.zarray"]
@@ -101,16 +115,17 @@ def check_assets(
     if len(dates) != expected_time_count or dates[-1] != expected_last_date:
         raise ValueError(f"Manifest date check failed: count={len(dates)} last={dates[-1] if dates else None}")
     layers = manifest.get("layers", {})
-    if sorted(layers) != ["lfmc"]:
-        raise ValueError(f"Expected only lfmc layer, found {sorted(layers)}")
-    template = str(layers["lfmc"].get("tile_root_template", ""))
-    sample_tile_relpath = (
-        f"{strip_slashes(destination_relpath)}/"
-        + template.format(date=expected_last_date, z=3, x=0, y=0)
-    )
-    sample_tile_url = source_url(product_prefix, sample_tile_relpath)
-    check_head(sample_tile_url, "sample tile")
-    log(f"Verified assets manifest and sample tile {sample_tile_url}")
+    if sorted(layers) != ["anomaly", "lfmc"]:
+        raise ValueError(f"Expected lfmc and anomaly layers, found {sorted(layers)}")
+    for layer_key in ("lfmc", "anomaly"):
+        template = str(layers[layer_key].get("tile_root_template", ""))
+        sample_tile_relpath = (
+            f"{strip_slashes(destination_relpath)}/"
+            + template.format(date=expected_last_date, z=3, x=0, y=0)
+        )
+        sample_tile_url = source_url(product_prefix, sample_tile_relpath)
+        check_head(sample_tile_url, f"sample {layer_key} tile")
+        log(f"Verified {layer_key} sample tile {sample_tile_url}")
 
 
 def parse_args():
@@ -143,6 +158,7 @@ def main() -> None:
         source_url(product_prefix, datasets["rao_s1_viewer_3857_lfmc_maps"]["destination_relpath"]),
         expected_chunks=(32, 256, 256),
         expected_time_count=expected_time_count,
+        required_climatology=True,
     )
     check_assets(
         product_prefix,

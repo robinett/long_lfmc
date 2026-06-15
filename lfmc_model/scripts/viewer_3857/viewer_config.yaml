@@ -44,11 +44,12 @@ datasets:
       uncertainty_variable: ""
       quality_variable: quality_flag
       landcover_variable: ""
-      climatology_variable: ""
+      climatology_variable: lfmc_climatology_mean_point
       landcover_source_dataset: modis
       initial_date: latest
       layer_keys:
         - lfmc
+        - anomaly
     assets:
       asset_mode: source
       local_asset_root: /oak/stanford/groups/konings/projects/rao_2020/data/source_products/viewer_3857/assets

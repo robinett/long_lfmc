@@ -1320,7 +1320,7 @@ function App() {
       return;
     }
     if (isAnomalyLayer(layerKey) && !supportsAnomaly) {
-      showNotice("Sentinel-1 LFMC does not include anomalies, so the anomaly layer is unavailable.");
+      showNotice("LFMC anomaly is unavailable for the selected dataset.");
       return;
     }
     setIsPlaying(false);
@@ -1974,8 +1974,8 @@ function App() {
             Welcome to the viewer for Live Fuel Moisture Content (LFMC) products produced by Stanford's Remote
             Sensing Ecohydrology Group. LFMC is defined as the mass of water in vegetation normalized by its dry
             biomass, representing how "wet" or "dry" vegetation is in a given location. It is a crucial indicator
-            for wildland fire risk. This viewer allows you to explore absolute values of LFMC and, for the
-            MODIS-based product, LFMC anomalies. For more information about the data products displayed here, as
+            for wildland fire risk. This viewer allows you to explore absolute values of LFMC and LFMC anomalies.
+            For more information about the data products displayed here, as
             well as instructions for downloading data, please view{" "}
             <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
               this document

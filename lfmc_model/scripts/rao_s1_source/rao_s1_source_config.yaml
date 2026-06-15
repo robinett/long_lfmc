@@ -50,6 +50,54 @@ rendering:
     - [37, 59, 54]
   stops: [0.0, 0.18, 0.40, 0.68, 1.0]
 
+climatology:
+  enabled: true
+  source_variable: lfmc
+  baseline_start_date: 2016-04-01
+  baseline_end_date: 2026-05-15
+  calendar_day_count: 365
+  feb29_policy: map_to_feb28
+  window_offsets: [-10, 10]
+  state_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/rao_s1_lfmc/state/viewer_climatology
+  work_block_size: 256
+  time_block_size: 64
+  tile_variable: lfmc_climatology_mean_tile
+  tile_chunks: [1, 256, 256]
+  point_variable: lfmc_climatology_mean_point
+  point_chunks: [365, 16, 16]
+  max_concurrent_tasks: 24
+
+layers:
+  lfmc:
+    variable: lfmc
+    label: LFMC
+    unit: percent
+    min: 40.0
+    max: 220.0
+    palette:
+      - [109, 39, 27]
+      - [202, 126, 74]
+      - [208, 196, 135]
+      - [109, 142, 96]
+      - [37, 59, 54]
+    stops: [0.0, 0.18, 0.40, 0.68, 1.0]
+  anomaly:
+    variable: lfmc_anomaly
+    derived: lfmc_anomaly
+    source_variable: lfmc
+    climatology_variable: lfmc_climatology_mean_tile
+    label: LFMC anomaly
+    unit: percent
+    min: -40.0
+    max: 40.0
+    palette:
+      - [132, 57, 43]
+      - [230, 178, 122]
+      - [247, 247, 241]
+      - [181, 209, 224]
+      - [65, 84, 139]
+    stops: [0.0, 0.25, 0.5, 0.75, 1.0]
+
 source_coop:
   product_prefix: rseg/sentinel1-lfmc/
   scientific_dataset_key: rao_s1_scientific_lfmc_maps

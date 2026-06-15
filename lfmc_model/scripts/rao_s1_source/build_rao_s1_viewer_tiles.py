@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import os
 import shutil
 import time
 from pathlib import Path
@@ -60,26 +61,68 @@ def downsample_rgba(rgba: np.ndarray, factor: int) -> np.ndarray:
     return np.ascontiguousarray(rgba[::factor, ::factor, :])
 
 
-def rgba_for_data(data: np.ndarray, cfg: Dict[str, object]) -> np.ndarray:
+def calendar_index_365(date_str: str) -> int:
+    import datetime as dt
+
+    date_value = dt.date.fromisoformat(date_str)
+    if date_value.month == 2 and date_value.day == 29:
+        date_value = dt.date(date_value.year, 2, 28)
+    return int(dt.date(2001, date_value.month, date_value.day).timetuple().tm_yday - 1)
+
+
+def layer_config(cfg: Dict[str, object], layer_key: str) -> Dict[str, object]:
+    if "layers" in cfg and layer_key in cfg["layers"]:
+        return dict(cfg["layers"][layer_key])
+    if layer_key != "lfmc":
+        raise ValueError(f"Layer {layer_key!r} is not defined in config")
     rendering = cfg["rendering"]
+    return {
+        "variable": str(cfg["dataset"]["variable_name"]),
+        "label": str(cfg["dataset"]["variable_label"]),
+        "unit": str(cfg["dataset"]["units"]),
+        "min": float(rendering["min"]),
+        "max": float(rendering["max"]),
+        "palette": rendering["palette"],
+        "stops": rendering["stops"],
+    }
+
+
+def data_for_layer(root, cfg: Dict[str, object], layer_key: str, time_idx: int, date_str: str) -> np.ndarray:
+    layer = layer_config(cfg, layer_key)
+    if str(layer.get("derived", "")).strip() == "lfmc_anomaly":
+        source_variable = str(layer["source_variable"])
+        climatology_variable = str(layer["climatology_variable"])
+        if climatology_variable not in root:
+            raise ValueError(f"Viewer zarr is missing climatology variable {climatology_variable!r}")
+        day_idx = calendar_index_365(date_str)
+        source_data = np.asarray(root[source_variable][time_idx, :, :], dtype=np.float32)
+        climatology_data = np.asarray(root[climatology_variable][day_idx, :, :], dtype=np.float32)
+        return source_data - climatology_data
+    return np.asarray(root[str(layer["variable"])][time_idx, :, :], dtype=np.float32)
+
+
+def rgba_for_data(data: np.ndarray, cfg: Dict[str, object], layer_key: str) -> np.ndarray:
+    layer = layer_config(cfg, layer_key)
     valid_mask = np.isfinite(data)
-    value_min = float(rendering["min"])
-    value_max = float(rendering["max"])
+    value_min = float(layer["min"])
+    value_max = float(layer["max"])
+    if str(layer.get("derived", "")).strip() == "lfmc_anomaly" and abs(value_min) != abs(value_max):
+        raise ValueError(f"Anomaly layer {layer_key!r} must use min/max centered at zero")
     normalized = (data - value_min) / (value_max - value_min)
     normalized = np.clip(normalized, 0.0, 1.0)
     normalized[~valid_mask] = 0.0
-    stops = np.asarray(rendering["stops"], dtype=np.float32)
-    colors = np.asarray(rendering["palette"], dtype=np.float32)
+    stops = np.asarray(layer["stops"], dtype=np.float32)
+    colors = np.asarray(layer["palette"], dtype=np.float32)
     rgb = build_color_ramp(normalized, stops, colors)
-    alpha = np.where(valid_mask, int(rendering.get("default_valid_alpha", 191)), 0).astype(np.uint8)
+    alpha = np.where(valid_mask, int(cfg["rendering"].get("default_valid_alpha", 191)), 0).astype(np.uint8)
     return np.dstack([rgb, alpha])
 
 
-def tile_relpath(date_str: str, zoom: int, tile_x: int, tile_y: int) -> Path:
-    return Path("tiles") / "lfmc" / date_str / str(zoom) / str(tile_x) / f"{tile_y}.png"
+def tile_relpath(layer_key: str, date_str: str, zoom: int, tile_x: int, tile_y: int) -> Path:
+    return Path("tiles") / layer_key / date_str / str(zoom) / str(tile_x) / f"{tile_y}.png"
 
 
-def write_tiles(asset_root: Path, rgba: np.ndarray, cfg: Dict[str, object], date_str: str):
+def write_tiles(asset_root: Path, rgba: np.ndarray, cfg: Dict[str, object], layer_key: str, date_str: str):
     viewer = cfg["viewer"]
     tile_size = int(viewer["tile_size"])
     min_zoom = int(viewer["min_zoom"])
@@ -91,7 +134,7 @@ def write_tiles(asset_root: Path, rgba: np.ndarray, cfg: Dict[str, object], date
         height, width, _ = zoom_rgba.shape
         tiles_x, tiles_y = tile_counts(height, width, tile_size)
         layer_counts[str(zoom)] = {"x": tiles_x, "y": tiles_y}
-        log(f"Tiling lfmc {date_str} zoom {zoom}: {tiles_x}x{tiles_y} tiles")
+        log(f"Tiling {layer_key} {date_str} zoom {zoom}: {tiles_x}x{tiles_y} tiles")
         for tile_y in range(tiles_y):
             row_start = tile_y * tile_size
             row_end = min(row_start + tile_size, height)
@@ -100,7 +143,7 @@ def write_tiles(asset_root: Path, rgba: np.ndarray, cfg: Dict[str, object], date
                 col_end = min(col_start + tile_size, width)
                 tile_rgba = np.zeros((tile_size, tile_size, 4), dtype=np.uint8)
                 tile_rgba[: row_end - row_start, : col_end - col_start, :] = zoom_rgba[row_start:row_end, col_start:col_end, :]
-                write_png(asset_root / tile_relpath(date_str, zoom, tile_x, tile_y), tile_rgba)
+                write_png(asset_root / tile_relpath(layer_key, date_str, zoom, tile_x, tile_y), tile_rgba)
     return layer_counts
 
 
@@ -111,6 +154,37 @@ def write_json(path: Path, payload: Dict[str, object]) -> None:
     tmp_path.replace(path)
 
 
+def read_json(path: Path) -> Dict[str, object]:
+    with path.open("r", encoding="utf-8") as file_obj:
+        return json.load(file_obj)
+
+
+def existing_layer_counts(asset_root: Path) -> Dict[str, object]:
+    manifest_path = asset_root / "manifest.json"
+    if not manifest_path.exists():
+        return {}
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return {
+        layer_key: layer_payload.get("tile_counts", {})
+        for layer_key, layer_payload in manifest.get("layers", {}).items()
+    }
+
+
+def default_layer_counts(root, cfg: Dict[str, object]) -> Dict[str, Dict[str, int]]:
+    height = int(root["y"].shape[0])
+    width = int(root["x"].shape[0])
+    tile_size = int(cfg["viewer"]["tile_size"])
+    max_zoom = int(cfg["viewer"]["max_zoom"])
+    counts = {}
+    for zoom in range(int(cfg["viewer"]["min_zoom"]), max_zoom + 1):
+        factor = 2 ** (max_zoom - zoom)
+        zoom_height = int(math.ceil(height / factor))
+        zoom_width = int(math.ceil(width / factor))
+        tiles_x, tiles_y = tile_counts(zoom_height, zoom_width, tile_size)
+        counts[str(zoom)] = {"x": tiles_x, "y": tiles_y}
+    return counts
+
+
 def build_manifest(root, cfg: Dict[str, object], dates: Sequence[str], layer_counts: Dict[str, object]) -> Dict[str, object]:
     x_values = np.asarray(root["x"][:], dtype=np.float64)
     y_values = np.asarray(root["y"][:], dtype=np.float64)
@@ -119,7 +193,7 @@ def build_manifest(root, cfg: Dict[str, object], dates: Sequence[str], layer_cou
     bounds = root.attrs.get("geospatial_bounds", {})
     tile_resolutions = [dx * (2 ** (int(cfg["viewer"]["max_zoom"]) - zoom)) for zoom in range(int(cfg["viewer"]["min_zoom"]), int(cfg["viewer"]["max_zoom"]) + 1)]
     view_resolutions = tile_resolutions + [float(value) for value in cfg["viewer"].get("extra_view_resolutions", []) if float(value) < dx]
-    return {
+    manifest = {
         "dataset_label": str(cfg["dataset"]["dataset_label"]),
         "initial_date": str(cfg["dataset"]["initial_date"]),
         "dates": list(dates),
@@ -141,36 +215,58 @@ def build_manifest(root, cfg: Dict[str, object], dates: Sequence[str], layer_cou
             "resolutions": tile_resolutions,
             "view_resolutions": view_resolutions,
         },
-        "layers": {
-            "lfmc": {
-                "label": str(cfg["dataset"]["variable_label"]),
-                "unit": str(cfg["dataset"]["units"]),
-                "min": float(cfg["rendering"]["min"]),
-                "max": float(cfg["rendering"]["max"]),
-                "palette": cfg["rendering"]["palette"],
-                "stops": cfg["rendering"]["stops"],
-                "tile_root_template": "tiles/lfmc/{date}/{z}/{x}/{y}.png",
-                "tile_counts": layer_counts,
-            }
-        },
+        "layers": {},
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
+    layer_keys = list(cfg.get("layers", {"lfmc": {}}).keys())
+    for layer_key in layer_keys:
+        layer = layer_config(cfg, layer_key)
+        manifest["layers"][layer_key] = {
+            "label": str(layer.get("label", layer_key)),
+            "unit": str(layer.get("unit", cfg["dataset"]["units"])),
+            "min": float(layer["min"]),
+            "max": float(layer["max"]),
+            "palette": layer["palette"],
+            "stops": layer["stops"],
+            "tile_root_template": f"tiles/{layer_key}/{{date}}/{{z}}/{{x}}/{{y}}.png",
+            "tile_counts": layer_counts.get(layer_key) or default_layer_counts(root, cfg),
+        }
+    return manifest
+
+
+def dates_from_plan(plan_path: Path, array_index: int | None) -> Sequence[str]:
+    plan = read_json(plan_path)
+    if array_index is None:
+        return list(plan.get("dates", []))
+    blocks = list(plan.get("blocks", []))
+    if array_index < 0 or array_index >= len(blocks):
+        raise IndexError(f"Array index {array_index} outside block count {len(blocks)}")
+    return list(blocks[array_index].get("dates", []))
 
 
 def build(args) -> None:
     cfg = load_config(args.config)
     viewer_path = Path(str(cfg["paths"]["viewer_zarr_path"]))
     asset_root = Path(str(cfg["paths"]["asset_root"]))
-    variable_name = str(cfg["dataset"]["variable_name"])
+    layer_keys = args.layers or list(cfg.get("layers", {"lfmc": {}}).keys())
+    for layer_key in layer_keys:
+        layer_config(cfg, layer_key)
 
     if args.dry_run:
         log(f"Would read viewer zarr: {viewer_path}")
-        log(f"Would write absolute LFMC tiles under: {asset_root}")
+        log(f"Would write viewer tiles under: {asset_root}")
+        log(f"Selected layers: {', '.join(layer_keys)}")
         return
 
     root = zarr.open_group(str(viewer_path), mode="r")
     all_dates = date_strings(root)
-    dates = args.dates or all_dates
+    array_index = args.array_index
+    if array_index is None and args.use_slurm_array:
+        array_index = int(os.environ["SLURM_ARRAY_TASK_ID"])
+    if args.plan_path is not None:
+        dates = dates_from_plan(args.plan_path, array_index)
+    else:
+        dates = args.dates or all_dates
     missing = [date for date in dates if date not in all_dates]
     if missing:
         raise ValueError(f"Dates missing from viewer zarr: {', '.join(missing)}")
@@ -180,17 +276,20 @@ def build(args) -> None:
         shutil.rmtree(asset_root)
     asset_root.mkdir(parents=True, exist_ok=True)
 
-    layer_counts = {}
-    for date_str in dates:
-        date_dir = asset_root / "tiles" / "lfmc" / date_str
-        if date_dir.exists():
-            shutil.rmtree(date_dir)
-        log(f"Rendering absolute LFMC tiles for {date_str}")
-        data = np.asarray(root[variable_name][date_index[date_str], :, :], dtype=np.float32)
-        rgba = rgba_for_data(data, cfg)
-        layer_counts = write_tiles(asset_root, rgba, cfg, date_str)
-    manifest = build_manifest(root, cfg, all_dates, layer_counts)
-    write_json(asset_root / "manifest.json", manifest)
+    layer_counts = existing_layer_counts(asset_root)
+    if not args.manifest_only:
+        for date_str in dates:
+            for layer_key in layer_keys:
+                date_dir = asset_root / "tiles" / layer_key / date_str
+                if date_dir.exists():
+                    shutil.rmtree(date_dir)
+                log(f"Rendering {layer_key} tiles for {date_str}")
+                data = data_for_layer(root, cfg, layer_key, date_index[date_str], date_str)
+                rgba = rgba_for_data(data, cfg, layer_key)
+                layer_counts[layer_key] = write_tiles(asset_root, rgba, cfg, layer_key, date_str)
+    if not args.skip_manifest:
+        manifest = build_manifest(root, cfg, all_dates, layer_counts)
+        write_json(asset_root / "manifest.json", manifest)
     log(f"Viewer assets ready: {asset_root}")
 
 
@@ -198,7 +297,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Build Rao S1-informed absolute LFMC viewer tiles.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--dates", nargs="*", default=None)
+    parser.add_argument("--layers", nargs="*", default=None)
+    parser.add_argument("--plan-path", type=Path, default=None)
+    parser.add_argument("--array-index", type=int, default=None)
+    parser.add_argument("--use-slurm-array", action="store_true")
     parser.add_argument("--clear", action="store_true")
+    parser.add_argument("--skip-manifest", action="store_true")
+    parser.add_argument("--manifest-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
