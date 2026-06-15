@@ -796,7 +796,13 @@ function App() {
   const globalDateIndex = Math.max(findDateIndex(globalDates, selectedDate), 0);
   const datasetMeta = metadata?.datasets?.[activeDatasetKey] ?? {};
   const supportsAnomaly = Boolean(datasetMeta.supports_anomaly);
-  const layerEntries = Object.entries(manifest?.layers ?? {});
+  const manifestLayers = manifest?.layers ?? {};
+  const configuredLayerKeys = Array.isArray(datasetMeta.layer_keys) ? datasetMeta.layer_keys : [];
+  const orderedLayerKeys = [
+    ...configuredLayerKeys.filter((layerKey) => manifestLayers[layerKey]),
+    ...Object.keys(manifestLayers).filter((layerKey) => !configuredLayerKeys.includes(layerKey)),
+  ];
+  const layerEntries = orderedLayerKeys.map((layerKey) => [layerKey, manifestLayers[layerKey]]);
   const activeLayer = manifest?.layers?.[selectedLayerKey] ?? null;
   const activeLayerKey = activeLayer ? selectedLayerKey : Object.keys(manifest?.layers ?? {})[0] ?? "";
   const datasetKeys = Object.keys(metadata?.datasets ?? {});
