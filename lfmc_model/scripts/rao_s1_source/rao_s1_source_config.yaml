@@ -59,7 +59,7 @@ climatology:
   feb29_policy: map_to_feb28
   window_offsets: [-10, 10]
   state_dir: /scratch/users/trobinet/long_lfmc/final_lfmc/rao_s1_lfmc/state/viewer_climatology
-  work_block_size: 256
+  work_block_size: 512
   time_block_size: 64
   tile_variable: lfmc_climatology_mean_tile
   tile_chunks: [1, 256, 256]
