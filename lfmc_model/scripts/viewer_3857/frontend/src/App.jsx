@@ -45,6 +45,16 @@ function formatValue(value, digits = 2) {
   return Number(value).toFixed(digits);
 }
 
+function formatMetricValue(value, digits = 1, supported = true) {
+  if (!supported) {
+    return "Unavailable";
+  }
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "No data";
+  }
+  return Number(value).toFixed(digits);
+}
+
 function formatLabel(label) {
   if (!label) {
     return "Unknown";
@@ -425,10 +435,6 @@ function parseCoordinateInput(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function hasUsableValue(values) {
-  return Boolean(values?.some((value) => value !== null && value !== undefined && Number.isFinite(Number(value))));
-}
-
 function seriesPath(points, xCoord, yCoord) {
   let lineStarted = false;
   const parts = [];
@@ -454,6 +460,7 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
   const isAnomalyMode = mode === "anomaly";
   const values = isAnomalyMode ? (timeseries.lfmc_anomaly ?? []) : (timeseries.lfmc_ens_mean ?? []);
   const stds = isAnomalyMode ? [] : (timeseries.lfmc_ens_std ?? []);
+  const climatologyValues = timeseries.lfmc_climatology_mean ?? [];
   const currentPoints = dates.map((date, idx) => ({
     date,
     offset: Number(offsets[idx]),
@@ -479,6 +486,18 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
       };
     })
     .filter((series) => series.points.filter((point) => Number.isFinite(point.value)).length >= 2);
+  const seasonalPoints = isAnomalyMode
+    ? []
+    : dates.map((date, idx) => ({
+        date,
+        offset: Number(offsets[idx]),
+        value: climatologyValues[idx] === null || climatologyValues[idx] === undefined
+          ? null
+          : Number(climatologyValues[idx]),
+        year: "Seasonal cycle",
+        current: false,
+      }));
+  const validSeasonalPoints = seasonalPoints.filter((point) => Number.isFinite(point.value));
 
   const validCurrentPoints = currentPoints.filter((point) => Number.isFinite(point.value));
   if (validCurrentPoints.length < 2) {
@@ -495,6 +514,7 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
   );
   const allYValues = [
     ...validCurrentPoints.map((point) => point.value),
+    ...validSeasonalPoints.map((point) => point.value),
     ...validBandPoints.flatMap((point) => [point.value - point.std, point.value + point.std]),
     ...historicalSeries.flatMap((series) =>
       series.points.filter((point) => Number.isFinite(point.value)).map((point) => point.value),
@@ -513,6 +533,7 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
     year: series.year,
     path: seriesPath(series.points, xCoord, yCoord),
   }));
+  const seasonalPath = validSeasonalPoints.length >= 2 ? seriesPath(seasonalPoints, xCoord, yCoord) : "";
 
   const bandSegments = [];
   let currentBandSegment = [];
@@ -544,6 +565,7 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
     );
   const hoverPoints = [
     ...currentPoints,
+    ...seasonalPoints.map((point) => ({ ...point, seasonal: true })),
     ...historicalSeries.flatMap((series) => series.points),
   ]
     .filter((point) => Number.isFinite(point.value))
@@ -551,7 +573,9 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
       ...point,
       x: xCoord(point.offset),
       y: yCoord(point.value),
-      label: `${point.year} ${point.date}: ${formatValue(point.value, 1)}%`,
+      label: point.seasonal
+        ? `Seasonal cycle ${point.date.slice(5)}: ${formatValue(point.value, 1)}%`
+        : `${point.year} ${point.date}: ${formatValue(point.value, 1)}%`,
     }));
   const firstDate = dates[0] ?? "";
   const lastDate = dates[dates.length - 1] ?? "";
@@ -571,6 +595,7 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
     height,
     linePath,
     historicalPaths,
+    seasonalPath,
     areaPaths,
     axisLeft: padding.left,
     axisRight: width - padding.right,
@@ -589,6 +614,7 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
     mode,
     axisLabel: isAnomalyMode ? "LFMC Anomaly (%)" : "LFMC (%)",
     lineLabel: isAnomalyMode ? "Selected-year LFMC anomaly" : "Selected-year LFMC",
+    showSeasonalCycle: !isAnomalyMode && seasonalPath !== "",
     showBand: !isAnomalyMode && areaPaths.length > 0,
     hoverPoints,
   };
@@ -596,8 +622,7 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
 
 function TimeseriesChart({ pointInfo, mode, onModeChange, supportsAnomaly }) {
   const [hoverPoint, setHoverPoint] = useState(null);
-  const hasAnomaly = supportsAnomaly && hasUsableValue(pointInfo?.timeseries?.lfmc_anomaly);
-  const activeMode = mode === "anomaly" && hasAnomaly ? "anomaly" : DEFAULT_TIMESERIES_MODE;
+  const activeMode = mode === "anomaly" && supportsAnomaly ? "anomaly" : DEFAULT_TIMESERIES_MODE;
   const geometry = buildTimeseriesGeometry(pointInfo, activeMode);
   const modeControls = (
     <div className="timeseries-mode-row" aria-label="Timeseries mode">
@@ -611,7 +636,7 @@ function TimeseriesChart({ pointInfo, mode, onModeChange, supportsAnomaly }) {
       <button
         type="button"
         className={`toggle-button timeseries-mode-button ${activeMode === "anomaly" ? "toggle-button-active" : ""}`}
-        disabled={!hasAnomaly}
+        disabled={!supportsAnomaly}
         onClick={() => onModeChange("anomaly")}
       >
         LFMC Anomaly
@@ -620,10 +645,13 @@ function TimeseriesChart({ pointInfo, mode, onModeChange, supportsAnomaly }) {
   );
 
   if (!geometry) {
+    const emptyMessage = pointInfo
+      ? `No finite ${activeMode === "anomaly" ? "LFMC anomaly" : "LFMC"} values are available for this cell in the previous 90 days.`
+      : "Click the map to load the previous 90 days of values.";
     return (
       <div className="timeseries-wrap">
         {modeControls}
-        <p className="panel-note">Click the map to load the previous 90 days of values.</p>
+        <p className="panel-note">{emptyMessage}</p>
       </div>
     );
   }
@@ -653,6 +681,9 @@ function TimeseriesChart({ pointInfo, mode, onModeChange, supportsAnomaly }) {
           {geometry.areaPaths.map((areaPath, idx) => (
             <path key={`band-${idx}`} d={areaPath} className="chart-band" />
           ))}
+          {geometry.showSeasonalCycle ? (
+            <path d={geometry.seasonalPath} className="chart-line-seasonal" />
+          ) : null}
           {geometry.zeroLineY !== null ? (
             <line
               x1={geometry.axisLeft}
@@ -737,6 +768,12 @@ function TimeseriesChart({ pointInfo, mode, onModeChange, supportsAnomaly }) {
           <span className="timeseries-legend-swatch timeseries-legend-swatch-history" />
           <span className="timeseries-legend-label">Other years</span>
         </div>
+        {geometry.showSeasonalCycle ? (
+          <div className="timeseries-legend-item">
+            <span className="timeseries-legend-swatch timeseries-legend-swatch-seasonal" />
+            <span className="timeseries-legend-label">Seasonal cycle</span>
+          </div>
+        ) : null}
         {geometry.showBand ? (
           <div className="timeseries-legend-item">
             <span className="timeseries-legend-swatch timeseries-legend-swatch-band" />
@@ -787,6 +824,7 @@ function App() {
   const [noticeText, setNoticeText] = useState("");
   const [isMapLoading, setIsMapLoading] = useState(false);
   const [isPointLoading, setIsPointLoading] = useState(false);
+  const [isPointHistoryLoading, setIsPointHistoryLoading] = useState(false);
 
   const dates = manifest?.dates ?? [];
   const selectedDate = dates[dateIndex] ?? "NA";
@@ -796,6 +834,7 @@ function App() {
   const globalDateIndex = Math.max(findDateIndex(globalDates, selectedDate), 0);
   const datasetMeta = metadata?.datasets?.[activeDatasetKey] ?? {};
   const supportsAnomaly = Boolean(datasetMeta.supports_anomaly);
+  const supportsClimatology = Boolean(datasetMeta.supports_climatology);
   const manifestLayers = manifest?.layers ?? {};
   const configuredLayerKeys = Array.isArray(datasetMeta.layer_keys) ? datasetMeta.layer_keys : [];
   const orderedLayerKeys = [
@@ -995,6 +1034,7 @@ function App() {
   }
 
   function mergePointHistory(payload, token) {
+    setIsPointHistoryLoading(true);
     queryPoint(
       {
         lat: payload.requested_lat,
@@ -1016,6 +1056,11 @@ function App() {
         if (token === pointQueryTokenRef.current) {
           setStatusText(`All-year comparison load failed: ${error.message}`);
         }
+      })
+      .finally(() => {
+        if (token === pointQueryTokenRef.current) {
+          setIsPointHistoryLoading(false);
+        }
       });
   }
 
@@ -1024,6 +1069,7 @@ function App() {
     const token = pointQueryTokenRef.current + 1;
     pointQueryTokenRef.current = token;
     setIsPointLoading(true);
+    setIsPointHistoryLoading(false);
     try {
       const payload = await queryPoint(params, dateStr, { includeHistory: false });
       if (token !== pointQueryTokenRef.current) {
@@ -1981,6 +2027,8 @@ function App() {
             Sensing Ecohydrology Group. LFMC is defined as the mass of water in vegetation normalized by its dry
             biomass, representing how "wet" or "dry" vegetation is in a given location. It is a crucial indicator
             for wildland fire risk. This viewer allows you to explore absolute values of LFMC and LFMC anomalies.
+            LFMC anomaly is the difference between the selected LFMC value and the average LFMC for that calendar
+            day across the dataset record.
             For more information about the data products displayed here, as
             well as instructions for downloading data, please view{" "}
             <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
@@ -2077,15 +2125,15 @@ function App() {
             <div className="stats-grid">
               <div>
                 <span className="stats-key">LFMC (%)</span>
-                <span className="stats-value">{formatValue(pointInfo.lfmc_ens_mean, 1)}</span>
+                <span className="stats-value">{formatMetricValue(pointInfo.lfmc_ens_mean, 1, true)}</span>
               </div>
               <div>
                 <span className="stats-key">LFMC Anomaly (%)</span>
-                <span className="stats-value">{supportsAnomaly ? formatValue(pointInfo.lfmc_anomaly, 1) : "Unavailable"}</span>
+                <span className="stats-value">{formatMetricValue(pointInfo.lfmc_anomaly, 1, supportsAnomaly)}</span>
               </div>
               <div>
                 <span className="stats-key">Average LFMC on this date (%)</span>
-                <span className="stats-value">{supportsAnomaly ? formatValue(pointInfo.lfmc_climatology_mean, 1) : "Unavailable"}</span>
+                <span className="stats-value">{formatMetricValue(pointInfo.lfmc_climatology_mean, 1, supportsClimatology)}</span>
               </div>
               <div>
                 <span className="stats-key">Land Cover</span>
@@ -2104,6 +2152,9 @@ function App() {
         <section className="panel-card">
           <div className="panel-label">Time Series</div>
           <div className="timeseries-shell">
+            {isPointHistoryLoading ? (
+              <div className="timeseries-history-status">Loading all-year comparison lines...</div>
+            ) : null}
             <TimeseriesChart
               pointInfo={pointInfo}
               mode={timeseriesMode}

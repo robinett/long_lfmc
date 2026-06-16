@@ -479,11 +479,13 @@ class ViewerDataset:
         historical_specs = []
         all_indices = set(current_indices)
         if include_history:
-            comparison_start_year = max(first_year, selected_year - 3)
-            comparison_end_year = min(last_year, selected_year + 3)
-            for year in range(comparison_start_year, comparison_end_year + 1):
-                if year == selected_year:
-                    continue
+            max_year_distance = max(abs(selected_year - first_year), abs(last_year - selected_year))
+            candidate_years = []
+            for distance in range(1, max_year_distance + 1):
+                for year in (selected_year - distance, selected_year + distance):
+                    if first_year <= year <= last_year and year != selected_year:
+                        candidate_years.append(year)
+            for year in candidate_years:
                 hist_end = shift_year(selected_date, year)
                 hist_start = hist_end - dt.timedelta(days=DEFAULT_POINT_TIMESERIES_DAYS - 1)
                 start_idx, end_idx = self._date_range_indices(hist_start, hist_end)
@@ -518,8 +520,17 @@ class ViewerDataset:
                 y_idx,
                 x_idx,
             )
+            finite_values = [
+                value
+                for value in series["lfmc_ens_mean"]
+                if value is not None and np.isfinite(value)
+            ]
+            if len(finite_values) < 2:
+                continue
             series["year"] = year
             windows.append(series)
+            if len(windows) >= 8:
+                break
         current["historical_windows"] = windows
         return current
 

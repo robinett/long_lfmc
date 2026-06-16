@@ -396,6 +396,9 @@ body {
 }
 
 .download-note {
+  color: #473e35;
+  font-size: 0.92rem;
+  line-height: 1.45;
   margin-bottom: 12px;
 }
 
@@ -505,6 +508,18 @@ body {
   box-shadow: inset 0 0 0 1px rgba(128, 89, 58, 0.18);
 }
 
+.timeseries-history-status {
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: rgba(255, 251, 244, 0.9);
+  color: #4c311d;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.76rem;
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px rgba(128, 89, 58, 0.18);
+}
+
 .timeseries-chart {
   width: 100%;
   height: auto;
@@ -537,6 +552,15 @@ body {
   fill: none;
   stroke: rgba(82, 72, 60, 0.18);
   stroke-width: 1.15;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.chart-line-seasonal {
+  fill: none;
+  stroke: rgba(42, 97, 91, 0.86);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
   stroke-linejoin: round;
   stroke-linecap: round;
 }
@@ -629,6 +653,12 @@ body {
 .timeseries-legend-swatch-history {
   height: 0;
   border-top: 3px solid rgba(82, 72, 60, 0.24);
+  border-radius: 0;
+}
+
+.timeseries-legend-swatch-seasonal {
+  height: 0;
+  border-top: 3px dashed rgba(42, 97, 91, 0.86);
   border-radius: 0;
 }
 
