@@ -574,8 +574,8 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
       x: xCoord(point.offset),
       y: yCoord(point.value),
       label: point.seasonal
-        ? `Seasonal cycle ${point.date.slice(5)}: ${formatValue(point.value, 1)}%`
-        : `${point.year} ${point.date}: ${formatValue(point.value, 1)}%`,
+        ? `Seasonal cycle: ${formatValue(point.value, 1)}%`
+        : `${point.year}: ${formatValue(point.value, 1)}%`,
     }));
   const firstDate = dates[0] ?? "";
   const lastDate = dates[dates.length - 1] ?? "";
@@ -2028,7 +2028,8 @@ function App() {
             biomass, representing how "wet" or "dry" vegetation is in a given location. It is a crucial indicator
             for wildland fire risk. This viewer allows you to explore absolute values of LFMC and LFMC anomalies.
             LFMC anomaly is the difference between the selected LFMC value and the average LFMC for that calendar
-            day across the dataset record.
+            day across the dataset record, showing whether vegetation is wetter or drier than is typical for that
+            time of year.
             For more information about the data products displayed here, as
             well as instructions for downloading data, please view{" "}
             <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
@@ -2153,7 +2154,7 @@ function App() {
           <div className="panel-label">Time Series</div>
           <div className="timeseries-shell">
             {isPointHistoryLoading ? (
-              <div className="timeseries-history-status">Loading all-year comparison lines...</div>
+              <div className="timeseries-history-status">Loading comparisons from other years...</div>
             ) : null}
             <TimeseriesChart
               pointInfo={pointInfo}
