@@ -193,7 +193,7 @@ def append_dates(cfg: Dict[str, object], zarr_path: Path, dates: Sequence[str], 
     nodata = float(dataset_cfg.get("source_nodata_value", -9999))
     spatial_chunk = int(chunks_cfg.get("spatial", 256))
 
-    root = zarr.open_group(str(zarr_path), mode="a")
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
     current_dates = existing_dates(root)
     new_dates = [date for date in dates if date not in current_dates]
     if not new_dates:
@@ -202,9 +202,20 @@ def append_dates(cfg: Dict[str, object], zarr_path: Path, dates: Sequence[str], 
 
     old_count = len(current_dates)
     new_count = old_count + len(new_dates)
+    height = int(root[variable_name].shape[1])
+    width = int(root[variable_name].shape[2])
     root["time"].resize((new_count,))
-    root[variable_name].resize((new_count, root[variable_name].shape[1], root[variable_name].shape[2]))
+    root[variable_name].resize((new_count, height, width))
     root["quality_flag"].resize((new_count,))
+
+    root = zarr.open_group(str(zarr_path), mode="a", use_consolidated=False)
+    if root["time"].shape[0] != new_count:
+        raise RuntimeError(f"Time resize failed for {zarr_path}: {root['time'].shape[0]} != {new_count}")
+    if root[variable_name].shape != (new_count, height, width):
+        raise RuntimeError(f"{variable_name} resize failed for {zarr_path}: {root[variable_name].shape} != {(new_count, height, width)}")
+    if root["quality_flag"].shape[0] != new_count:
+        raise RuntimeError(f"quality_flag resize failed for {zarr_path}: {root['quality_flag'].shape[0]} != {new_count}")
+
     root["time"][old_count:new_count] = np.asarray(new_dates, dtype="datetime64[ns]")
     root["quality_flag"][old_count:new_count] = np.zeros(len(new_dates), dtype=np.uint8)
 

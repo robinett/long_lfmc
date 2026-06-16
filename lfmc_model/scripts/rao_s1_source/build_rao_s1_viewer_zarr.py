@@ -247,7 +247,7 @@ def build(args) -> None:
         viewer_root = zarr.open_group(str(viewer_path), mode="a")
         viewer_dates = dates
     else:
-        viewer_root = zarr.open_group(str(viewer_path), mode="a")
+        viewer_root = zarr.open_group(str(viewer_path), mode="a", use_consolidated=False)
         current_dates = date_strings(viewer_root)
         dates = [date for date in dates if date not in current_dates]
         if not dates:
@@ -255,11 +255,21 @@ def build(args) -> None:
             return
         old_count = len(current_dates)
         new_count = old_count + len(dates)
+        variable_name = str(cfg["dataset"]["variable_name"])
+        height = int(viewer_root[variable_name].shape[1])
+        width = int(viewer_root[variable_name].shape[2])
         viewer_root["time"].resize((new_count,))
-        viewer_root[str(cfg["dataset"]["variable_name"])].resize(
-            (new_count, viewer_root[str(cfg["dataset"]["variable_name"])].shape[1], viewer_root[str(cfg["dataset"]["variable_name"])].shape[2])
-        )
+        viewer_root[variable_name].resize((new_count, height, width))
         viewer_root["quality_flag"].resize((new_count,))
+
+        viewer_root = zarr.open_group(str(viewer_path), mode="a", use_consolidated=False)
+        if viewer_root["time"].shape[0] != new_count:
+            raise RuntimeError(f"Time resize failed for {viewer_path}: {viewer_root['time'].shape[0]} != {new_count}")
+        if viewer_root[variable_name].shape != (new_count, height, width):
+            raise RuntimeError(f"{variable_name} resize failed for {viewer_path}: {viewer_root[variable_name].shape} != {(new_count, height, width)}")
+        if viewer_root["quality_flag"].shape[0] != new_count:
+            raise RuntimeError(f"quality_flag resize failed for {viewer_path}: {viewer_root['quality_flag'].shape[0]} != {new_count}")
+
         viewer_root["time"][old_count:new_count] = np.asarray(dates, dtype="datetime64[ns]")
         viewer_root["quality_flag"][old_count:new_count] = np.zeros(len(dates), dtype=np.uint8)
         viewer_dates = current_dates + dates

@@ -153,15 +153,26 @@ run_cmd python3 -u "${script_dir}/validate_rao_s1_source_products.py" \
     --target-date "${target_date}" \
     --check-assets
 
+manifest_dir="/home/users/trobinet/long_lfmc/logs/rao_s1_source_manifests/${target_date}"
+run_cmd python3 -u "${script_dir}/build_rao_s1_source_upload_manifests.py" \
+    --config "${config_path}" \
+    --target-date "${target_date}" \
+    --output-dir "${manifest_dir}"
+
 if [[ "${skip_upload}" -eq 1 ]]; then
     echo "[INFO] --skip-upload set; not uploading Source artifacts."
     exit 0
 fi
 
-upload_args=()
 if [[ "${dry_run}" -eq 1 ]]; then
-    upload_args=(--dry-run)
+    run_cmd bash "${transfer_dir}/run_upload_rao_s1_source_products.sh" \
+        --dry-run \
+        --target-date "${target_date}" \
+        --manifest-dir "${manifest_dir}"
+else
+    run_cmd bash "${transfer_dir}/run_upload_rao_s1_source_products.sh" \
+        --target-date "${target_date}" \
+        --manifest-dir "${manifest_dir}"
 fi
-run_cmd bash "${transfer_dir}/run_upload_rao_s1_source_products.sh" "${upload_args[@]}"
 
 echo "[INFO] Rao S1-informed LFMC Source update complete for ${target_date}"
