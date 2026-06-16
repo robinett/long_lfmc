@@ -139,9 +139,19 @@ run_cmd python3 -u "${script_dir}/build_rao_s1_viewer_zarr.py" \
     --mode append \
     --target-dates "${target_date}"
 
+run_cmd python3 -u "${script_dir}/validate_rao_s1_source_products.py" \
+    --config "${config_path}" \
+    --target-date "${target_date}"
+
 run_cmd python3 -u "${script_dir}/build_rao_s1_viewer_tiles.py" \
     --config "${config_path}" \
-    --dates "${target_date}"
+    --dates "${target_date}" \
+    --layers lfmc anomaly
+
+run_cmd python3 -u "${script_dir}/validate_rao_s1_source_products.py" \
+    --config "${config_path}" \
+    --target-date "${target_date}" \
+    --check-assets
 
 if [[ "${skip_upload}" -eq 1 ]]; then
     echo "[INFO] --skip-upload set; not uploading Source artifacts."
