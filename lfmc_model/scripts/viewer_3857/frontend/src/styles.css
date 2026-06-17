@@ -24,7 +24,7 @@ body {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 380px 1fr;
+  grid-template-columns: minmax(390px, 1fr) minmax(0, 2fr);
   grid-template-rows: auto minmax(0, 1fr);
   height: 100vh;
   min-height: 720px;
@@ -64,15 +64,34 @@ body {
 }
 
 .dataset-bar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) minmax(420px, 1fr);
+  align-items: start;
+  gap: 18px;
   margin-top: 10px;
-  padding: 10px 12px;
+  padding: 12px;
   border-radius: 18px;
   background: rgba(255, 251, 244, 0.62);
   box-shadow: inset 0 0 0 1px rgba(128, 89, 58, 0.13);
+}
+
+.dataset-bar-section {
+  min-width: 0;
+}
+
+.dataset-bar-section-dataset,
+.dataset-bar-section-layer {
+  display: flex;
+  flex-direction: column;
+}
+
+.dataset-bar-section-dataset {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.dataset-bar-section-layer {
+  gap: 9px;
 }
 
 .dataset-toggle-row {
@@ -233,7 +252,7 @@ body {
 
 .layer-toggle-row {
   flex-wrap: wrap;
-  margin-bottom: 10px;
+  margin-bottom: 0;
 }
 
 .layer-toggle-button {
@@ -473,18 +492,6 @@ body {
 .timeseries-wrap {
   display: flex;
   flex-direction: column;
-}
-
-.timeseries-mode-row {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.timeseries-mode-button {
-  flex: 1;
-  padding: 7px 10px;
-  font-size: 0.76rem;
 }
 
 .timeseries-shell {
@@ -753,7 +760,7 @@ body {
 
   .dataset-bar {
     align-items: flex-start;
-    flex-direction: column;
+    grid-template-columns: 1fr;
   }
 
   .dataset-help-link {

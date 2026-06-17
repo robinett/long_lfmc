@@ -620,29 +620,10 @@ function buildTimeseriesGeometry(pointInfo, mode = DEFAULT_TIMESERIES_MODE) {
   };
 }
 
-function TimeseriesChart({ pointInfo, mode, onModeChange, supportsAnomaly }) {
+function TimeseriesChart({ pointInfo, mode, supportsAnomaly }) {
   const [hoverPoint, setHoverPoint] = useState(null);
   const activeMode = mode === "anomaly" && supportsAnomaly ? "anomaly" : DEFAULT_TIMESERIES_MODE;
   const geometry = buildTimeseriesGeometry(pointInfo, activeMode);
-  const modeControls = (
-    <div className="timeseries-mode-row" aria-label="Timeseries mode">
-      <button
-        type="button"
-        className={`toggle-button timeseries-mode-button ${activeMode === "mean" ? "toggle-button-active" : ""}`}
-        onClick={() => onModeChange("mean")}
-      >
-        LFMC
-      </button>
-      <button
-        type="button"
-        className={`toggle-button timeseries-mode-button ${activeMode === "anomaly" ? "toggle-button-active" : ""}`}
-        disabled={!supportsAnomaly}
-        onClick={() => onModeChange("anomaly")}
-      >
-        LFMC Anomaly
-      </button>
-    </div>
-  );
 
   if (!geometry) {
     const emptyMessage = pointInfo
@@ -650,7 +631,6 @@ function TimeseriesChart({ pointInfo, mode, onModeChange, supportsAnomaly }) {
       : "Click the map to load the previous 90 days of values.";
     return (
       <div className="timeseries-wrap">
-        {modeControls}
         <p className="panel-note">{emptyMessage}</p>
       </div>
     );
@@ -658,7 +638,6 @@ function TimeseriesChart({ pointInfo, mode, onModeChange, supportsAnomaly }) {
 
   return (
     <div className="timeseries-wrap">
-      {modeControls}
       <div className="timeseries-chart-wrap" onMouseLeave={() => setHoverPoint(null)}>
         <svg viewBox={`0 0 ${geometry.width} ${geometry.height}`} className="timeseries-chart" role="img">
           <line
@@ -1380,7 +1359,7 @@ function App() {
     selectedLayerKeyRef.current = layerKey;
     if (isAnomalyLayer(layerKey)) {
       setTimeseriesMode("anomaly");
-    } else if (!supportsAnomaly) {
+    } else {
       setTimeseriesMode(DEFAULT_TIMESERIES_MODE);
     }
     void transitionToDateIndex(dateIndexRef.current, { force: true, layerKey });
@@ -1997,31 +1976,77 @@ function App() {
           </div>
         </div>
         <div className="dataset-bar">
-          <div className="dataset-toggle-row" aria-label="Dataset selector">
-            {datasetKeys.map((datasetKey) => {
-              const runtimeManifest = datasetManifests[datasetKey];
-              const label = metadata?.datasets?.[datasetKey]?.dataset_label ?? formatLabel(datasetKey);
-              return (
-                <button
-                  key={datasetKey}
-                  type="button"
-                  className={`toggle-button dataset-toggle-button ${activeDatasetKey === datasetKey ? "toggle-button-active" : ""}`}
-                  disabled={!runtimeManifest}
-                  onClick={() => requestDatasetDate(datasetKey, selectedDate, "nearest", { forceDataset: true })}
-                >
-                  {label}
-                </button>
-              );
-            })}
+          <div className="dataset-bar-section dataset-bar-section-dataset">
+            <div className="dataset-toggle-row" aria-label="Dataset selector">
+              {datasetKeys.map((datasetKey) => {
+                const runtimeManifest = datasetManifests[datasetKey];
+                const label = metadata?.datasets?.[datasetKey]?.dataset_label ?? formatLabel(datasetKey);
+                return (
+                  <button
+                    key={datasetKey}
+                    type="button"
+                    className={`toggle-button dataset-toggle-button ${activeDatasetKey === datasetKey ? "toggle-button-active" : ""}`}
+                    disabled={!runtimeManifest}
+                    onClick={() => requestDatasetDate(datasetKey, selectedDate, "nearest", { forceDataset: true })}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+            <a className="dataset-help-link" href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
+              Which dataset should I use?
+            </a>
           </div>
-          <a className="dataset-help-link" href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
-            Which dataset should I use?
-          </a>
+          <div className="dataset-bar-section dataset-bar-section-layer">
+            <div className="toggle-row layer-toggle-row" aria-label="Map layer selector">
+              {layerEntries.map(([layerKey, layer]) => {
+                const disabled = isAnomalyLayer(layerKey) && !supportsAnomaly;
+                return (
+                  <button
+                    key={layerKey}
+                    type="button"
+                    className={`toggle-button layer-toggle-button ${activeLayerKey === layerKey ? "toggle-button-active" : ""}`}
+                    disabled={disabled}
+                    onClick={() => handleLayerChange(layerKey)}
+                  >
+                    {layer.label ?? formatLabel(layerKey)}
+                  </button>
+                );
+              })}
+              {!supportsAnomaly ? (
+                <button
+                  type="button"
+                  className="toggle-button layer-toggle-button"
+                  disabled
+                >
+                  LFMC anomaly
+                </button>
+              ) : null}
+            </div>
+            <div
+              className="legend-bar"
+              style={{ background: activeLayer ? legendGradient(activeLayer) : undefined }}
+            />
+            <div className="legend-axis">
+              {buildLegendTicks(activeLayer, activeLayerKey).map((tick) => (
+                <div
+                  key={`${tick.position}-${tick.label}`}
+                  className="legend-tick"
+                  style={{ left: `${tick.position}%` }}
+                >
+                  <span className="legend-tick-mark" />
+                  <span className="legend-tick-label">{tick.label}</span>
+                  {tick.subLabel ? <span className="legend-tick-sub-label">{tick.subLabel}</span> : null}
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </header>
       <aside className="control-panel">
         <section className="panel-card information-card">
-          <div className="panel-label">Information about this product</div>
+          <div className="panel-label">Information about these products</div>
           <p>
             Welcome to the viewer for Live Fuel Moisture Content (LFMC) products produced by Stanford's Remote
             Sensing Ecohydrology Group. LFMC is defined as the mass of water in vegetation normalized by its dry
@@ -2040,49 +2065,51 @@ function App() {
         </section>
 
         <section className="panel-card">
-          <div className="panel-label">Map Layer</div>
-          <div className="toggle-row layer-toggle-row">
-            {layerEntries.map(([layerKey, layer]) => {
-              const disabled = isAnomalyLayer(layerKey) && !supportsAnomaly;
-              return (
-                <button
-                  key={layerKey}
-                  type="button"
-                  className={`toggle-button layer-toggle-button ${activeLayerKey === layerKey ? "toggle-button-active" : ""}`}
-                  disabled={disabled}
-                  onClick={() => handleLayerChange(layerKey)}
-                >
-                  {layer.label ?? formatLabel(layerKey)}
-                </button>
-              );
-            })}
-            {!supportsAnomaly ? (
-              <button
-                type="button"
-                className="toggle-button layer-toggle-button"
-                disabled
-              >
-                LFMC anomaly
-              </button>
+          <div className="panel-label">Timeseries</div>
+          <div className="timeseries-shell">
+            {isPointHistoryLoading ? (
+              <div className="timeseries-history-status">Loading comparisons from other years...</div>
+            ) : null}
+            <TimeseriesChart
+              pointInfo={pointInfo}
+              mode={timeseriesMode}
+              supportsAnomaly={supportsAnomaly}
+            />
+            {isPointLoading ? <div className="timeseries-play-overlay">loading</div> : null}
+            {!isPointLoading && isPlaying ? (
+              <div className="timeseries-play-overlay">will update after play</div>
             ) : null}
           </div>
-          <div
-            className="legend-bar"
-            style={{ background: activeLayer ? legendGradient(activeLayer) : undefined }}
-          />
-          <div className="legend-axis">
-            {buildLegendTicks(activeLayer, activeLayerKey).map((tick) => (
-              <div
-                key={`${tick.position}-${tick.label}`}
-                className="legend-tick"
-                style={{ left: `${tick.position}%` }}
-              >
-                <span className="legend-tick-mark" />
-                <span className="legend-tick-label">{tick.label}</span>
-                {tick.subLabel ? <span className="legend-tick-sub-label">{tick.subLabel}</span> : null}
+        </section>
+
+        <section className="panel-card">
+          <div className="panel-label">Clicked Cell</div>
+          {pointInfo ? (
+            <div className="stats-grid">
+              <div>
+                <span className="stats-key">LFMC (%)</span>
+                <span className="stats-value">{formatMetricValue(pointInfo.lfmc_ens_mean, 1, true)}</span>
               </div>
-            ))}
-          </div>
+              <div>
+                <span className="stats-key">LFMC Anomaly (%)</span>
+                <span className="stats-value">{formatMetricValue(pointInfo.lfmc_anomaly, 1, supportsAnomaly)}</span>
+              </div>
+              <div>
+                <span className="stats-key">Average LFMC on this date (%)</span>
+                <span className="stats-value">{formatMetricValue(pointInfo.lfmc_climatology_mean, 1, supportsClimatology)}</span>
+              </div>
+              <div>
+                <span className="stats-key">Land Cover</span>
+                <span className="stats-value">{formatLabel(pointInfo.landcover_name)}</span>
+              </div>
+              <div>
+                <span className="stats-key">Product Level</span>
+                <span className="stats-value">{formatLabel(pointInfo.data_product_level)}</span>
+              </div>
+            </div>
+          ) : (
+            <p className="panel-note">Click the map to query a viewer grid cell.</p>
+          )}
         </section>
 
         <section className="panel-card">
@@ -2121,56 +2148,7 @@ function App() {
         </section>
 
         <section className="panel-card">
-          <div className="panel-label">Clicked Cell</div>
-          {pointInfo ? (
-            <div className="stats-grid">
-              <div>
-                <span className="stats-key">LFMC (%)</span>
-                <span className="stats-value">{formatMetricValue(pointInfo.lfmc_ens_mean, 1, true)}</span>
-              </div>
-              <div>
-                <span className="stats-key">LFMC Anomaly (%)</span>
-                <span className="stats-value">{formatMetricValue(pointInfo.lfmc_anomaly, 1, supportsAnomaly)}</span>
-              </div>
-              <div>
-                <span className="stats-key">Average LFMC on this date (%)</span>
-                <span className="stats-value">{formatMetricValue(pointInfo.lfmc_climatology_mean, 1, supportsClimatology)}</span>
-              </div>
-              <div>
-                <span className="stats-key">Land Cover</span>
-                <span className="stats-value">{formatLabel(pointInfo.landcover_name)}</span>
-              </div>
-              <div>
-                <span className="stats-key">Product Level</span>
-                <span className="stats-value">{formatLabel(pointInfo.data_product_level)}</span>
-              </div>
-            </div>
-          ) : (
-            <p className="panel-note">Click the map to query a viewer grid cell.</p>
-          )}
-        </section>
-
-        <section className="panel-card">
-          <div className="panel-label">Time Series</div>
-          <div className="timeseries-shell">
-            {isPointHistoryLoading ? (
-              <div className="timeseries-history-status">Loading comparisons from other years...</div>
-            ) : null}
-            <TimeseriesChart
-              pointInfo={pointInfo}
-              mode={timeseriesMode}
-              onModeChange={setTimeseriesMode}
-              supportsAnomaly={supportsAnomaly}
-            />
-            {isPointLoading ? <div className="timeseries-play-overlay">loading</div> : null}
-            {!isPointLoading && isPlaying ? (
-              <div className="timeseries-play-overlay">will update after play</div>
-            ) : null}
-          </div>
-        </section>
-
-        <section className="panel-card">
-          <div className="panel-label">Download LFMC data</div>
+          <div className="panel-label">Download</div>
           <p className="panel-note download-note">
             This tool downloads the currently selected LFMC dataset for up to 10 sites and up to three years at
             each site. For larger downloads, please see{" "}
