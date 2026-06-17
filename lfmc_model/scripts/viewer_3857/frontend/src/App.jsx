@@ -1915,145 +1915,141 @@ function App() {
             <h1>Live Fuel Moisture Content Products from Stanford's Remote Sensing Ecohydrology Group</h1>
           </div>
         </div>
-        <div className="top-control-grid">
-          <section className="date-control-card" aria-label="Date controls">
-            <div className="top-card-header">
-              <span className="selection-section-title">Date</span>
-              <span className="top-card-value">{selectedDate !== "NA" ? selectedDate : "--"}</span>
-            </div>
-            <div className="date-slider-control">
-              <label className="date-input-field">
-                <span className="panel-mono">Selected</span>
-                <input
-                  className="location-input date-input picker-only-date"
-                  type="date"
-                  value={selectedDate !== "NA" ? selectedDate : ""}
-                  min={globalDates[0] ?? undefined}
-                  max={globalDates[globalDates.length - 1] ?? undefined}
-                  disabled={!globalDates.length}
-                  onClick={showDatePicker}
-                  onBeforeInput={preventManualDateEdit}
-                  onChange={(event) => requestDateValueTransition(event.target.value)}
-                  onDrop={preventManualDateEdit}
-                  onKeyDown={preventManualDateEdit}
-                  onPaste={preventManualDateEdit}
-                />
-              </label>
-              <div className="date-slider-stack">
-                <input
-                  className="date-slider"
-                  type="range"
-                  min="0"
-                  max={Math.max(globalDates.length - 1, 0)}
-                  step="1"
-                  value={globalDateIndex}
-                  disabled={!globalDates.length}
-                  onChange={(event) => {
-                    setIsPlaying(false);
-                    requestDateValueTransition(globalDates[Number(event.target.value)]);
-                  }}
-                />
-                <div className="slider-extents date-slider-extents">
-                  <span>{globalDates[0] ?? "--"}</span>
-                  <span>{globalDates[globalDates.length - 1] ?? "--"}</span>
-                </div>
+        <div className="date-bar-controls">
+          <div className="date-slider-control">
+            <label className="date-input-field">
+              <input
+                className="location-input date-input picker-only-date"
+                type="date"
+                value={selectedDate !== "NA" ? selectedDate : ""}
+                min={globalDates[0] ?? undefined}
+                max={globalDates[globalDates.length - 1] ?? undefined}
+                disabled={!globalDates.length}
+                onClick={showDatePicker}
+                onBeforeInput={preventManualDateEdit}
+                onChange={(event) => requestDateValueTransition(event.target.value)}
+                onDrop={preventManualDateEdit}
+                onKeyDown={preventManualDateEdit}
+                onPaste={preventManualDateEdit}
+              />
+            </label>
+            <div className="date-slider-stack">
+              <input
+                className="date-slider"
+                type="range"
+                min="0"
+                max={Math.max(globalDates.length - 1, 0)}
+                step="1"
+                value={globalDateIndex}
+                disabled={!globalDates.length}
+                onChange={(event) => {
+                  setIsPlaying(false);
+                  requestDateValueTransition(globalDates[Number(event.target.value)]);
+                }}
+              />
+              <div className="slider-extents date-slider-extents">
+                <span>{globalDates[0] ?? "--"}</span>
+                <span>{globalDates[globalDates.length - 1] ?? "--"}</span>
               </div>
             </div>
-            <div className="date-step-controls" aria-label="Date step controls">
-              {dateStepControls.map(([amount, unit, label]) => (
+          </div>
+          <button
+            type="button"
+            className={`toggle-button play-button ${isPlaying ? "toggle-button-active" : ""}`}
+            disabled={dates.length < 2}
+            onClick={() => setIsPlaying((currentValue) => !currentValue)}
+          >
+            {isPlaying ? "Pause" : "Play"}
+          </button>
+          <div className="date-step-controls" aria-label="Date step controls">
+            {dateStepControls.map(([amount, unit, label]) => (
+              <button
+                type="button"
+                className="toggle-button date-step-button"
+                disabled={!dates.length}
+                onClick={() => handleDateStep(amount, unit)}
+                key={`${amount}-${unit}-${label}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="dataset-bar">
+          <div className="dataset-bar-section dataset-bar-section-dataset">
+            <div className="selection-section-header">
+              <span className="selection-section-title">Dataset</span>
+            </div>
+            <div className="dataset-toggle-row" aria-label="Dataset selector">
+              {datasetKeys.map((datasetKey) => {
+                const runtimeManifest = datasetManifests[datasetKey];
+                const label = metadata?.datasets?.[datasetKey]?.dataset_label ?? formatLabel(datasetKey);
+                return (
+                  <button
+                    key={datasetKey}
+                    type="button"
+                    className={`toggle-button dataset-toggle-button ${activeDatasetKey === datasetKey ? "toggle-button-active" : ""}`}
+                    disabled={!runtimeManifest}
+                    onClick={() => requestDatasetDate(datasetKey, selectedDate, "nearest", { forceDataset: true })}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+            <a className="dataset-help-link" href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
+              Which dataset should I use?
+            </a>
+          </div>
+          <div className="dataset-bar-section dataset-bar-section-layer">
+            <div className="selection-section-header">
+              <span className="selection-section-title">Map Layer</span>
+            </div>
+            <div className="toggle-row layer-toggle-row" aria-label="Map layer selector">
+              {layerEntries.map(([layerKey, layer]) => {
+                const disabled = isAnomalyLayer(layerKey) && !supportsAnomaly;
+                return (
+                  <button
+                    key={layerKey}
+                    type="button"
+                    className={`toggle-button layer-toggle-button ${activeLayerKey === layerKey ? "toggle-button-active" : ""}`}
+                    disabled={disabled}
+                    onClick={() => handleLayerChange(layerKey)}
+                  >
+                    {layer.label ?? formatLabel(layerKey)}
+                  </button>
+                );
+              })}
+              {!supportsAnomaly ? (
                 <button
                   type="button"
-                  className="toggle-button date-step-button"
-                  disabled={!dates.length}
-                  onClick={() => handleDateStep(amount, unit)}
-                  key={`${amount}-${unit}-${label}`}
+                  className="toggle-button layer-toggle-button"
+                  disabled
                 >
-                  {label}
+                  LFMC anomaly
                 </button>
-              ))}
+              ) : null}
             </div>
-          </section>
-          <section className="view-control-card" aria-label="View controls">
-            <div className="top-card-header">
-              <span className="selection-section-title">View</span>
-              <a className="dataset-help-link" href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
-                Which dataset should I use?
-              </a>
-            </div>
-            <div className="view-control-groups">
-              <div className="dataset-bar-section dataset-bar-section-dataset">
-                <div className="selection-section-header">
-                  <span className="selection-section-title selection-section-subtitle">Dataset</span>
-                </div>
-                <div className="dataset-toggle-row" aria-label="Dataset selector">
-                  {datasetKeys.map((datasetKey) => {
-                    const runtimeManifest = datasetManifests[datasetKey];
-                    const label = metadata?.datasets?.[datasetKey]?.dataset_label ?? formatLabel(datasetKey);
-                    return (
-                      <button
-                        key={datasetKey}
-                        type="button"
-                        className={`toggle-button dataset-toggle-button ${activeDatasetKey === datasetKey ? "toggle-button-active" : ""}`}
-                        disabled={!runtimeManifest}
-                        onClick={() => requestDatasetDate(datasetKey, selectedDate, "nearest", { forceDataset: true })}
-                      >
-                        {label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="dataset-bar-section dataset-bar-section-layer">
-                <div className="selection-section-header">
-                  <span className="selection-section-title selection-section-subtitle">Map Layer</span>
-                </div>
-                <div className="toggle-row layer-toggle-row" aria-label="Map layer selector">
-                  {layerEntries.map(([layerKey, layer]) => {
-                    const disabled = isAnomalyLayer(layerKey) && !supportsAnomaly;
-                    return (
-                      <button
-                        key={layerKey}
-                        type="button"
-                        className={`toggle-button layer-toggle-button ${activeLayerKey === layerKey ? "toggle-button-active" : ""}`}
-                        disabled={disabled}
-                        onClick={() => handleLayerChange(layerKey)}
-                      >
-                        {layer.label ?? formatLabel(layerKey)}
-                      </button>
-                    );
-                  })}
-                  {!supportsAnomaly ? (
-                    <button
-                      type="button"
-                      className="toggle-button layer-toggle-button"
-                      disabled
-                    >
-                      LFMC anomaly
-                    </button>
-                  ) : null}
-                </div>
-                <div className="legend-wrap">
+            <div className="legend-wrap">
+              <div
+                className="legend-bar"
+                style={{ background: activeLayer ? legendGradient(activeLayer) : undefined }}
+              />
+              <div className="legend-axis">
+                {buildLegendTicks(activeLayer, activeLayerKey).map((tick) => (
                   <div
-                    className="legend-bar"
-                    style={{ background: activeLayer ? legendGradient(activeLayer) : undefined }}
-                  />
-                  <div className="legend-axis">
-                    {buildLegendTicks(activeLayer, activeLayerKey).map((tick) => (
-                      <div
-                        key={`${tick.position}-${tick.label}`}
-                        className="legend-tick"
-                        style={{ left: `${tick.position}%` }}
-                      >
-                        <span className="legend-tick-mark" />
-                        <span className="legend-tick-label">{tick.label}</span>
-                        {tick.subLabel ? <span className="legend-tick-sub-label">{tick.subLabel}</span> : null}
-                      </div>
-                    ))}
+                    key={`${tick.position}-${tick.label}`}
+                    className="legend-tick"
+                    style={{ left: `${tick.position}%` }}
+                  >
+                    <span className="legend-tick-mark" />
+                    <span className="legend-tick-label">{tick.label}</span>
+                    {tick.subLabel ? <span className="legend-tick-sub-label">{tick.subLabel}</span> : null}
                   </div>
-                </div>
+                ))}
               </div>
             </div>
-          </section>
+          </div>
         </div>
       </header>
       <aside className="control-panel">
