@@ -833,7 +833,7 @@ function App() {
     noticeTimeoutRef.current = window.setTimeout(() => {
       setNoticeText("");
       noticeTimeoutRef.current = null;
-    }, 5200);
+    }, 30000);
   }
 
   function preferredLayerForDataset(datasetKey, targetManifest) {
@@ -1977,6 +1977,9 @@ function App() {
         </div>
         <div className="dataset-bar">
           <div className="dataset-bar-section dataset-bar-section-dataset">
+            <div className="selection-section-header">
+              <span className="selection-section-title">Dataset</span>
+            </div>
             <div className="dataset-toggle-row" aria-label="Dataset selector">
               {datasetKeys.map((datasetKey) => {
                 const runtimeManifest = datasetManifests[datasetKey];
@@ -1999,6 +2002,9 @@ function App() {
             </a>
           </div>
           <div className="dataset-bar-section dataset-bar-section-layer">
+            <div className="selection-section-header">
+              <span className="selection-section-title">Map Layer</span>
+            </div>
             <div className="toggle-row layer-toggle-row" aria-label="Map layer selector">
               {layerEntries.map(([layerKey, layer]) => {
                 const disabled = isAnomalyLayer(layerKey) && !supportsAnomaly;
@@ -2024,22 +2030,24 @@ function App() {
                 </button>
               ) : null}
             </div>
-            <div
-              className="legend-bar"
-              style={{ background: activeLayer ? legendGradient(activeLayer) : undefined }}
-            />
-            <div className="legend-axis">
-              {buildLegendTicks(activeLayer, activeLayerKey).map((tick) => (
-                <div
-                  key={`${tick.position}-${tick.label}`}
-                  className="legend-tick"
-                  style={{ left: `${tick.position}%` }}
-                >
-                  <span className="legend-tick-mark" />
-                  <span className="legend-tick-label">{tick.label}</span>
-                  {tick.subLabel ? <span className="legend-tick-sub-label">{tick.subLabel}</span> : null}
-                </div>
-              ))}
+            <div className="legend-wrap">
+              <div
+                className="legend-bar"
+                style={{ background: activeLayer ? legendGradient(activeLayer) : undefined }}
+              />
+              <div className="legend-axis">
+                {buildLegendTicks(activeLayer, activeLayerKey).map((tick) => (
+                  <div
+                    key={`${tick.position}-${tick.label}`}
+                    className="legend-tick"
+                    style={{ left: `${tick.position}%` }}
+                  >
+                    <span className="legend-tick-mark" />
+                    <span className="legend-tick-label">{tick.label}</span>
+                    {tick.subLabel ? <span className="legend-tick-sub-label">{tick.subLabel}</span> : null}
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         </div>
