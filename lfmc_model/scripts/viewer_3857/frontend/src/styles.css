@@ -24,8 +24,8 @@ body {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 340px minmax(360px, 0.85fr) minmax(0, 1.65fr);
-  grid-template-rows: auto minmax(340px, 0.48fr) minmax(0, 1fr);
+  grid-template-columns: 340px minmax(0, 1fr) 380px;
+  grid-template-rows: auto minmax(0, 1fr);
   height: 100vh;
   min-height: 720px;
 }
@@ -53,7 +53,7 @@ body {
 
 .control-rail {
   grid-column: 1;
-  grid-row: 2 / 4;
+  grid-row: 2;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -73,18 +73,22 @@ body {
 }
 
 .detail-panel {
-  grid-column: 2 / -1;
+  grid-column: 3;
   grid-row: 2;
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-height: 0;
-  padding: 18px 18px 0;
+  padding: 20px 18px;
+  overflow-y: auto;
+  background: rgba(245, 239, 226, 0.84);
+  backdrop-filter: blur(10px);
+  border-left: 1px solid rgba(63, 55, 42, 0.14);
 }
 
 .detail-tabs {
   display: grid;
-  grid-template-columns: repeat(5, minmax(112px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -224,9 +228,8 @@ body {
 }
 
 .detail-panel .panel-card {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
+  flex: 0 0 auto;
+  overflow: visible;
 }
 
 .panel-card[hidden] {
@@ -757,10 +760,9 @@ body {
 }
 
 .map-stage {
-  grid-column: 2 / -1;
-  grid-row: 3;
+  grid-column: 2;
+  grid-row: 2;
   padding: 18px;
-  padding-top: 12px;
   min-height: 0;
 }
 
@@ -845,6 +847,8 @@ body {
     grid-column: 1;
     grid-row: 3;
     padding: 18px;
+    border-left: 0;
+    border-bottom: 1px solid rgba(63, 55, 42, 0.14);
   }
 
   .detail-tabs {
