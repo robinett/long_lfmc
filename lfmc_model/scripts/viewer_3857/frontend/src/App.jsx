@@ -35,8 +35,6 @@ const PRODUCT_DOC_URL = "https://docs.google.com/document/d/1b8n4UQ1XYDd_llw2nO0
 const DETAIL_TABS = [
   ["information", "Information"],
   ["timeseries", "View timeseries"],
-  ["cell", "Clicked cell info"],
-  ["location", "Input a location"],
   ["download", "Download data"],
 ];
 
@@ -2085,87 +2083,89 @@ function App() {
           </p>
         </section>
 
-        <section className="panel-card" hidden={activeDetailTab !== "timeseries"}>
-          <div className="panel-label">View timeseries</div>
-          <div className="timeseries-shell">
-            {isPointHistoryLoading ? (
-              <div className="timeseries-history-status">Loading comparisons from other years...</div>
-            ) : null}
-            <TimeseriesChart
-              pointInfo={pointInfo}
-              mode={timeseriesMode}
-              supportsAnomaly={supportsAnomaly}
-            />
-            {isPointLoading ? <div className="timeseries-play-overlay">loading</div> : null}
-            {!isPointLoading && isPlaying ? (
-              <div className="timeseries-play-overlay">will update after play</div>
-            ) : null}
-          </div>
-        </section>
+        <section className="detail-tab-content" hidden={activeDetailTab !== "timeseries"}>
+          <section className="panel-card">
+            <div className="panel-label">View timeseries</div>
+            <div className="timeseries-shell">
+              {isPointHistoryLoading ? (
+                <div className="timeseries-history-status">Loading comparisons from other years...</div>
+              ) : null}
+              <TimeseriesChart
+                pointInfo={pointInfo}
+                mode={timeseriesMode}
+                supportsAnomaly={supportsAnomaly}
+              />
+              {isPointLoading ? <div className="timeseries-play-overlay">loading</div> : null}
+              {!isPointLoading && isPlaying ? (
+                <div className="timeseries-play-overlay">will update after play</div>
+              ) : null}
+            </div>
+          </section>
 
-        <section className="panel-card" hidden={activeDetailTab !== "cell"}>
-          <div className="panel-label">Clicked cell info</div>
-          {pointInfo ? (
-            <div className="stats-grid">
-              <div>
-                <span className="stats-key">LFMC (%)</span>
-                <span className="stats-value">{formatMetricValue(pointInfo.lfmc_ens_mean, 1, true)}</span>
+          <section className="panel-card">
+            <div className="panel-label">Clicked cell info</div>
+            {pointInfo ? (
+              <div className="stats-grid">
+                <div>
+                  <span className="stats-key">LFMC (%)</span>
+                  <span className="stats-value">{formatMetricValue(pointInfo.lfmc_ens_mean, 1, true)}</span>
+                </div>
+                <div>
+                  <span className="stats-key">LFMC Anomaly (%)</span>
+                  <span className="stats-value">{formatMetricValue(pointInfo.lfmc_anomaly, 1, supportsAnomaly)}</span>
+                </div>
+                <div>
+                  <span className="stats-key">Average LFMC on this date (%)</span>
+                  <span className="stats-value">{formatMetricValue(pointInfo.lfmc_climatology_mean, 1, supportsClimatology)}</span>
+                </div>
+                <div>
+                  <span className="stats-key">Land Cover</span>
+                  <span className="stats-value">{formatLabel(pointInfo.landcover_name)}</span>
+                </div>
+                <div>
+                  <span className="stats-key">Product Level</span>
+                  <span className="stats-value">{formatLabel(pointInfo.data_product_level)}</span>
+                </div>
               </div>
-              <div>
-                <span className="stats-key">LFMC Anomaly (%)</span>
-                <span className="stats-value">{formatMetricValue(pointInfo.lfmc_anomaly, 1, supportsAnomaly)}</span>
-              </div>
-              <div>
-                <span className="stats-key">Average LFMC on this date (%)</span>
-                <span className="stats-value">{formatMetricValue(pointInfo.lfmc_climatology_mean, 1, supportsClimatology)}</span>
-              </div>
-              <div>
-                <span className="stats-key">Land Cover</span>
-                <span className="stats-value">{formatLabel(pointInfo.landcover_name)}</span>
-              </div>
-              <div>
-                <span className="stats-key">Product Level</span>
-                <span className="stats-value">{formatLabel(pointInfo.data_product_level)}</span>
-              </div>
-            </div>
-          ) : (
-            <p className="panel-note">Click the map to query a viewer grid cell.</p>
-          )}
-        </section>
+            ) : (
+              <p className="panel-note">Click the map to query a viewer grid cell.</p>
+            )}
+          </section>
 
-        <section className="panel-card" hidden={activeDetailTab !== "location"}>
-          <div className="panel-label">Input a location</div>
-          <form onSubmit={handleLocationSubmit}>
-            <div className="location-grid">
-              <label className="location-field">
-                <span className="stats-key">Latitude</span>
-                <input
-                  className="location-input"
-                  type="text"
-                  inputMode="decimal"
-                  value={locationLatInput}
-                  onChange={(event) => setLocationLatInput(event.target.value)}
-                  placeholder="34.2206"
-                />
-              </label>
-              <label className="location-field">
-                <span className="stats-key">Longitude</span>
-                <input
-                  className="location-input"
-                  type="text"
-                  inputMode="decimal"
-                  value={locationLonInput}
-                  onChange={(event) => setLocationLonInput(event.target.value)}
-                  placeholder="-119.0504"
-                />
-              </label>
-            </div>
-            <div className="location-actions">
-              <button type="submit" className="toggle-button location-button">
-                Snap To Cell
-              </button>
-            </div>
-          </form>
+          <section className="panel-card">
+            <div className="panel-label">Input a location</div>
+            <form onSubmit={handleLocationSubmit}>
+              <div className="location-grid">
+                <label className="location-field">
+                  <span className="stats-key">Latitude</span>
+                  <input
+                    className="location-input"
+                    type="text"
+                    inputMode="decimal"
+                    value={locationLatInput}
+                    onChange={(event) => setLocationLatInput(event.target.value)}
+                    placeholder="34.2206"
+                  />
+                </label>
+                <label className="location-field">
+                  <span className="stats-key">Longitude</span>
+                  <input
+                    className="location-input"
+                    type="text"
+                    inputMode="decimal"
+                    value={locationLonInput}
+                    onChange={(event) => setLocationLonInput(event.target.value)}
+                    placeholder="-119.0504"
+                  />
+                </label>
+              </div>
+              <div className="location-actions">
+                <button type="submit" className="toggle-button location-button">
+                  Snap To Cell
+                </button>
+              </div>
+            </form>
+          </section>
         </section>
 
         <section className="panel-card" hidden={activeDetailTab !== "download"}>
