@@ -24,15 +24,15 @@ body {
 
 .app-shell {
   display: grid;
-  grid-template-columns: minmax(390px, 1fr) minmax(0, 2fr);
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-columns: 340px minmax(360px, 0.85fr) minmax(0, 1.65fr);
+  grid-template-rows: auto minmax(250px, 0.42fr) minmax(0, 1fr);
   height: 100vh;
   min-height: 720px;
 }
 
 .date-bar {
   grid-column: 1 / -1;
-  padding: 15px 22px 13px;
+  padding: 15px 22px 14px;
   background:
     linear-gradient(135deg, rgba(255, 251, 244, 0.97) 0%, rgba(240, 229, 210, 0.94) 62%, rgba(229, 218, 197, 0.92) 100%);
   border-bottom: 1px solid rgba(63, 55, 42, 0.16);
@@ -51,30 +51,60 @@ body {
   line-height: 1.08;
 }
 
-.date-bar-controls {
-  display: grid;
-  grid-template-columns: minmax(420px, 1fr) auto minmax(360px, auto);
-  align-items: center;
-  gap: 12px;
-  margin-top: 11px;
-  padding: 11px 12px 9px;
-  border-radius: 18px;
-  background: rgba(255, 251, 244, 0.72);
-  box-shadow: inset 0 0 0 1px rgba(128, 89, 58, 0.13);
+.control-rail {
+  grid-column: 1;
+  grid-row: 2 / 4;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  padding: 20px 18px;
+  overflow-y: auto;
+  background: rgba(245, 239, 226, 0.84);
+  backdrop-filter: blur(10px);
+  border-right: 1px solid rgba(63, 55, 42, 0.14);
 }
 
-.dataset-bar {
-  display: grid;
-  grid-template-columns: minmax(360px, 0.95fr) minmax(460px, 1.2fr);
-  align-items: stretch;
-  gap: 14px;
-  margin-top: 10px;
-  padding: 12px;
+.rail-card {
+  padding: 14px;
   border-radius: 18px;
-  background: rgba(255, 251, 244, 0.56);
-  box-shadow:
-    inset 0 0 0 1px rgba(128, 89, 58, 0.12),
-    0 12px 26px rgba(63, 46, 26, 0.08);
+  background: rgba(255, 251, 244, 0.86);
+  box-shadow: 0 14px 32px rgba(63, 46, 26, 0.08);
+}
+
+.detail-panel {
+  grid-column: 2 / -1;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 18px 18px 0;
+}
+
+.detail-tabs {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(112px, 1fr));
+  gap: 8px;
+}
+
+.detail-tab-button {
+  min-height: 42px;
+  border: 0;
+  border-radius: 999px;
+  padding: 8px 10px;
+  background: rgba(229, 221, 207, 0.92);
+  color: #53412d;
+  cursor: pointer;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.74rem;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.detail-tab-button-active {
+  background: #725033;
+  color: #fff5e9;
 }
 
 .dataset-bar-section {
@@ -140,10 +170,9 @@ body {
 }
 
 .date-slider-control {
-  display: grid;
-  grid-template-columns: 152px minmax(220px, 1fr);
-  align-items: center;
-  gap: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -152,14 +181,16 @@ body {
 }
 
 .date-step-controls {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+  margin-top: 10px;
 }
 
 .date-step-button {
-  padding: 8px 11px;
-  font-size: 0.78rem;
+  min-width: 0;
+  padding: 8px 8px;
+  font-size: 0.74rem;
 }
 
 .date-input-field {
@@ -170,7 +201,7 @@ body {
 }
 
 .date-input {
-  width: 152px;
+  width: 100%;
 }
 
 .control-panel {
@@ -190,6 +221,16 @@ body {
   border-radius: 18px;
   background: rgba(255, 251, 244, 0.86);
   box-shadow: 0 14px 32px rgba(63, 46, 26, 0.08);
+}
+
+.detail-panel .panel-card {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.panel-card[hidden] {
+  display: none;
 }
 
 .information-card p {
@@ -308,6 +349,8 @@ body {
 }
 
 .play-button {
+  width: 100%;
+  margin-top: 10px;
   min-width: 84px;
   flex-shrink: 0;
   background: #d3c6b5;
@@ -335,6 +378,7 @@ body {
 
 .legend-wrap {
   min-width: 0;
+  margin-top: 10px;
   padding: 0 2px;
 }
 
@@ -713,7 +757,10 @@ body {
 }
 
 .map-stage {
+  grid-column: 2 / -1;
+  grid-row: 3;
   padding: 18px;
+  padding-top: 12px;
   min-height: 0;
 }
 
@@ -778,7 +825,7 @@ body {
 @media (max-width: 1100px) {
   .app-shell {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto minmax(420px, 1fr);
+    grid-template-rows: auto auto auto minmax(420px, 1fr);
     height: auto;
     min-height: 100vh;
   }
@@ -787,22 +834,24 @@ body {
     display: block;
   }
 
-  .date-bar-controls {
-    grid-template-columns: 1fr;
-    align-items: stretch;
+  .control-rail {
+    grid-column: 1;
+    grid-row: 2;
+    border-right: 0;
+    border-bottom: 1px solid rgba(63, 55, 42, 0.14);
   }
 
-  .dataset-bar {
-    align-items: flex-start;
-    grid-template-columns: 1fr;
+  .detail-panel {
+    grid-column: 1;
+    grid-row: 3;
+    padding: 18px;
   }
 
-  .dataset-help-link {
-    white-space: normal;
+  .detail-tabs {
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   }
 
   .date-slider-control {
-    grid-template-columns: 1fr;
     gap: 8px;
   }
 
@@ -815,9 +864,10 @@ body {
     width: 100%;
   }
 
-  .control-panel {
-    border-right: 0;
-    border-bottom: 1px solid rgba(63, 55, 42, 0.14);
+  .map-stage {
+    grid-column: 1;
+    grid-row: 4;
+    padding-top: 0;
   }
 
   .map-frame {
