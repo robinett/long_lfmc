@@ -51,38 +51,65 @@ body {
   line-height: 1.08;
 }
 
-.date-bar-controls {
+.top-control-grid {
   display: grid;
-  grid-template-columns: minmax(420px, 1fr) auto minmax(360px, auto);
-  align-items: center;
-  gap: 12px;
-  margin-top: 11px;
-  padding: 11px 12px 9px;
-  border-radius: 18px;
-  background: rgba(255, 251, 244, 0.72);
-  box-shadow: inset 0 0 0 1px rgba(128, 89, 58, 0.13);
-}
-
-.dataset-bar {
-  display: grid;
-  grid-template-columns: minmax(360px, 0.95fr) minmax(460px, 1.2fr);
+  grid-template-columns: minmax(520px, 1.55fr) minmax(430px, 0.9fr);
   align-items: stretch;
   gap: 14px;
-  margin-top: 10px;
-  padding: 12px;
-  border-radius: 18px;
-  background: rgba(255, 251, 244, 0.56);
+  margin-top: 13px;
+}
+
+.date-control-card,
+.view-control-card {
+  min-width: 0;
+  padding: 14px;
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(255, 251, 244, 0.84), rgba(246, 237, 221, 0.7));
   box-shadow:
-    inset 0 0 0 1px rgba(128, 89, 58, 0.12),
-    0 12px 26px rgba(63, 46, 26, 0.08);
+    inset 0 0 0 1px rgba(128, 89, 58, 0.13),
+    0 14px 30px rgba(63, 46, 26, 0.08);
+}
+
+.date-control-card {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+}
+
+.view-control-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.top-card-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 20px;
+}
+
+.top-card-value {
+  color: #2f261d;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.92rem;
+  font-weight: 800;
+}
+
+.view-control-groups {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
 }
 
 .dataset-bar-section {
   min-width: 0;
-  padding: 10px 12px 12px;
+  padding: 10px;
   border-radius: 14px;
-  background: rgba(255, 251, 244, 0.66);
-  box-shadow: inset 0 0 0 1px rgba(128, 89, 58, 0.1);
+  background: rgba(255, 251, 244, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(128, 89, 58, 0.08);
 }
 
 .dataset-bar-section-dataset,
@@ -115,6 +142,11 @@ body {
   text-transform: uppercase;
 }
 
+.selection-section-subtitle {
+  color: #8a6749;
+  font-size: 0.62rem;
+}
+
 .dataset-toggle-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -128,22 +160,23 @@ body {
 }
 
 .dataset-help-link {
-  align-self: flex-start;
+  align-self: auto;
   color: #6d4b2f;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: 0.76rem;
+  font-size: 0.72rem;
   font-weight: 700;
   line-height: 1.25;
   text-decoration: underline;
   text-underline-offset: 3px;
-  white-space: nowrap;
+  text-align: right;
+  white-space: normal;
 }
 
 .date-slider-control {
   display: grid;
-  grid-template-columns: 152px minmax(220px, 1fr);
+  grid-template-columns: 156px minmax(260px, 1fr);
   align-items: center;
-  gap: 12px;
+  gap: 16px;
   min-width: 0;
 }
 
@@ -152,25 +185,32 @@ body {
 }
 
 .date-step-controls {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
 }
 
 .date-step-button {
-  padding: 8px 11px;
-  font-size: 0.78rem;
+  min-width: 0;
+  padding: 8px 8px;
+  font-size: 0.74rem;
 }
 
 .date-input-field {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-shrink: 0;
+  color: #80593a;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
 }
 
 .date-input {
-  width: 152px;
+  width: 156px;
 }
 
 .control-panel {
@@ -303,18 +343,6 @@ body {
 }
 
 .toggle-button-active {
-  background: #725033;
-  color: #fff5e9;
-}
-
-.play-button {
-  min-width: 84px;
-  flex-shrink: 0;
-  background: #d3c6b5;
-  color: #493929;
-}
-
-.play-button.toggle-button-active {
   background: #725033;
   color: #fff5e9;
 }
@@ -787,18 +815,19 @@ body {
     display: block;
   }
 
-  .date-bar-controls {
+  .top-control-grid {
     grid-template-columns: 1fr;
     align-items: stretch;
   }
 
-  .dataset-bar {
+  .top-card-header {
     align-items: flex-start;
-    grid-template-columns: 1fr;
+    flex-direction: column;
+    gap: 5px;
   }
 
   .dataset-help-link {
-    white-space: normal;
+    text-align: left;
   }
 
   .date-slider-control {
@@ -813,6 +842,10 @@ body {
 
   .date-input {
     width: 100%;
+  }
+
+  .date-step-controls {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .control-panel {
