@@ -25,7 +25,7 @@ body {
 .app-shell {
   display: grid;
   grid-template-columns: 340px minmax(360px, 0.85fr) minmax(0, 1.65fr);
-  grid-template-rows: auto minmax(250px, 0.42fr) minmax(0, 1fr);
+  grid-template-rows: auto minmax(340px, 0.48fr) minmax(0, 1fr);
   height: 100vh;
   min-height: 720px;
 }
@@ -607,7 +607,7 @@ body {
 
 .timeseries-chart {
   width: 100%;
-  height: auto;
+  height: 190px;
   border-radius: 12px;
   background: linear-gradient(180deg, rgba(245, 239, 226, 0.9) 0%, rgba(236, 227, 209, 0.9) 100%);
 }
@@ -705,10 +705,10 @@ body {
 .timeseries-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px 16px;
-  margin-top: 10px;
+  gap: 8px 14px;
+  margin-top: 8px;
   color: #4d4337;
-  font-size: 0.8rem;
+  font-size: 0.76rem;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
