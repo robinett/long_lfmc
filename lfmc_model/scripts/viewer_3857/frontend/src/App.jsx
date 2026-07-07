@@ -2045,7 +2045,7 @@ function App() {
                 aria-expanded={!isIntroCollapsed}
                 onClick={() => setIsIntroCollapsed((currentValue) => !currentValue)}
               >
-                {isIntroCollapsed ? "Show more" : "Minimize"}
+                {isIntroCollapsed ? "Show more" : "Minimize text"}
               </button>
             </div>
             <p id="viewer-intro" className="viewer-intro">
