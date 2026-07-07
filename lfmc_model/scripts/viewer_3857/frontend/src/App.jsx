@@ -1924,11 +1924,11 @@ function App() {
             <h1>Live Fuel Moisture Content Products from Stanford's Remote Sensing Ecohydrology Group</h1>
             <p className="viewer-intro">
               Live fuel moisture content (LFMC) is the mass of water in vegetation normalized by dry biomass, and
-              is an important indicator for wildland fire risk. You can choose between two datasets. We present a
-              MODIS-based dataset, which provides a long historical record beginning in 2001 at 500 m and daily
+              is an important indicator for wildland fire risk. You can choose between two datasets. First, a
+              MODIS-based dataset provides a long historical record beginning in 2001 at 500 m and daily
               resolution, but updates only annually and can be uncertain in some evergreen forests. Alternatively,
-              we also present a Sentinel-1 based dataset, which provides a shorter historical record beginning in
-              2016 at 250 m and 15-day resolution, but updates with approximately 10-day latency and is more
+              a Sentinel-1 based dataset provides a shorter historical record beginning in 2016 at 250 m and
+              15-day resolution, but updates with approximately 10-day latency and is more
               skillful in evergreen forests. You can view absolute LFMC or LFMC anomaly, where anomaly shows
               whether vegetation is wetter or drier than typical for that calendar day. For guidance on choosing
               the appropriate dataset, performance metrics, and download instructions, please see{" "}
@@ -1939,7 +1939,7 @@ function App() {
             </p>
           </div>
           <section className="header-dataset-selector" aria-label="Dataset selector">
-            <div className="panel-label">Dataset</div>
+            <div className="panel-label">Dataset selection</div>
             <div className="dataset-toggle-row dataset-toggle-row-header">
               {datasetKeys.map((datasetKey) => {
                 const runtimeManifest = datasetManifests[datasetKey];
