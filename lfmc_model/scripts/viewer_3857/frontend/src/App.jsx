@@ -33,10 +33,13 @@ const SENTINEL_DATE_TOLERANCE_DAYS = 20;
 const GLOBAL_DATE_START = "2001-01-01";
 const PRODUCT_DOC_URL = "https://docs.google.com/document/d/1b8n4UQ1XYDd_llw2nO0yPj-pN8Ar0BUjXGQiM-G6CvY/edit?usp=sharing";
 const DETAIL_TABS = [
-  ["information", "Information"],
   ["timeseries", "View timeseries"],
   ["download", "Download data"],
 ];
+const DATASET_SUMMARIES = {
+  [DEFAULT_DATASET_KEY]: "500m resolution, daily, begins 2001",
+  [SENTINEL_DATASET_KEY]: "250m resolution, 15-day temporal resolution, begins 2016",
+};
 
 function apiUrl(pathAndQuery) {
   const normalizedPath = pathAndQuery.startsWith("/") ? pathAndQuery : `/${pathAndQuery}`;
@@ -809,7 +812,7 @@ function App() {
   const [isMapLoading, setIsMapLoading] = useState(false);
   const [isPointLoading, setIsPointLoading] = useState(false);
   const [isPointHistoryLoading, setIsPointHistoryLoading] = useState(false);
-  const [activeDetailTab, setActiveDetailTab] = useState("information");
+  const [activeDetailTab, setActiveDetailTab] = useState("timeseries");
 
   const dates = manifest?.dates ?? [];
   const selectedDate = dates[dateIndex] ?? "NA";
@@ -1919,10 +1922,93 @@ function App() {
         <div className="date-bar-main">
           <div className="viewer-title-block">
             <h1>Live Fuel Moisture Content Products from Stanford's Remote Sensing Ecohydrology Group</h1>
+            <p className="viewer-intro">
+              Live fuel moisture content (LFMC) is the mass of water in vegetation normalized by dry biomass, and
+              is an important indicator for wildland fire risk. You can choose between two datasets. We present a
+              MODIS-based dataset, which provides a long historical record beginning in 2001 at 500 m and daily
+              resolution, but updates only annually and can be uncertain in some evergreen forests. Alternatively,
+              we also present a Sentinel-1 based dataset, which provides a shorter historical record beginning in
+              2016 at 250 m and 15-day resolution, but updates with approximately 10-day latency and is more
+              skillful in evergreen forests. You can view absolute LFMC or LFMC anomaly, where anomaly shows
+              whether vegetation is wetter or drier than typical for that calendar day. For guidance on choosing
+              the appropriate dataset, performance metrics, and download instructions, please see{" "}
+              <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
+                this documentation
+              </a>
+              .
+            </p>
           </div>
+          <section className="header-dataset-selector" aria-label="Dataset selector">
+            <div className="panel-label">Dataset</div>
+            <div className="dataset-toggle-row dataset-toggle-row-header">
+              {datasetKeys.map((datasetKey) => {
+                const runtimeManifest = datasetManifests[datasetKey];
+                const label = metadata?.datasets?.[datasetKey]?.dataset_label ?? formatLabel(datasetKey);
+                return (
+                  <button
+                    key={datasetKey}
+                    type="button"
+                    className={`toggle-button dataset-toggle-button dataset-toggle-button-header ${activeDatasetKey === datasetKey ? "toggle-button-active" : ""}`}
+                    disabled={!runtimeManifest}
+                    onClick={() => requestDatasetDate(datasetKey, selectedDate, "nearest", { forceDataset: true })}
+                  >
+                    <span className="dataset-toggle-label">{label}</span>
+                    <span className="dataset-toggle-summary">{DATASET_SUMMARIES[datasetKey] ?? ""}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
         </div>
       </header>
       <aside className="control-rail">
+        <section className="rail-card rail-card-layer">
+          <div className="panel-label">Map Layer</div>
+          <div className="legend-wrap legend-wrap-primary">
+            <div
+              className="legend-bar"
+              style={{ background: activeLayer ? legendGradient(activeLayer) : undefined }}
+            />
+            <div className="legend-axis">
+              {buildLegendTicks(activeLayer, activeLayerKey).map((tick) => (
+                <div
+                  key={`${tick.position}-${tick.label}`}
+                  className="legend-tick"
+                  style={{ left: `${tick.position}%` }}
+                >
+                  <span className="legend-tick-mark" />
+                  <span className="legend-tick-label">{tick.label}</span>
+                  {tick.subLabel ? <span className="legend-tick-sub-label">{tick.subLabel}</span> : null}
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="toggle-row layer-toggle-row" aria-label="Map layer selector">
+            {layerEntries.map(([layerKey, layer]) => {
+              const disabled = isAnomalyLayer(layerKey) && !supportsAnomaly;
+              return (
+                <button
+                  key={layerKey}
+                  type="button"
+                  className={`toggle-button layer-toggle-button ${activeLayerKey === layerKey ? "toggle-button-active" : ""}`}
+                  disabled={disabled}
+                  onClick={() => handleLayerChange(layerKey)}
+                >
+                  {layer.label ?? formatLabel(layerKey)}
+                </button>
+              );
+            })}
+            {!supportsAnomaly ? (
+              <button
+                type="button"
+                className="toggle-button layer-toggle-button"
+                disabled
+              >
+                LFMC anomaly
+              </button>
+            ) : null}
+          </div>
+        </section>
         <section className="rail-card">
           <div className="panel-label">Date</div>
           <div className="date-slider-control">
@@ -1984,107 +2070,22 @@ function App() {
             ))}
           </div>
         </section>
-        <section className="rail-card">
-          <div className="panel-label">Dataset</div>
-          <div className="dataset-toggle-row" aria-label="Dataset selector">
-            {datasetKeys.map((datasetKey) => {
-              const runtimeManifest = datasetManifests[datasetKey];
-              const label = metadata?.datasets?.[datasetKey]?.dataset_label ?? formatLabel(datasetKey);
-              return (
-                <button
-                  key={datasetKey}
-                  type="button"
-                  className={`toggle-button dataset-toggle-button ${activeDatasetKey === datasetKey ? "toggle-button-active" : ""}`}
-                  disabled={!runtimeManifest}
-                  onClick={() => requestDatasetDate(datasetKey, selectedDate, "nearest", { forceDataset: true })}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-        </section>
-        <section className="rail-card">
-          <div className="panel-label">Map Layer</div>
-          <div className="toggle-row layer-toggle-row" aria-label="Map layer selector">
-            {layerEntries.map(([layerKey, layer]) => {
-              const disabled = isAnomalyLayer(layerKey) && !supportsAnomaly;
-              return (
-                <button
-                  key={layerKey}
-                  type="button"
-                  className={`toggle-button layer-toggle-button ${activeLayerKey === layerKey ? "toggle-button-active" : ""}`}
-                  disabled={disabled}
-                  onClick={() => handleLayerChange(layerKey)}
-                >
-                  {layer.label ?? formatLabel(layerKey)}
-                </button>
-              );
-            })}
-            {!supportsAnomaly ? (
+        <section className="rail-card workflow-card">
+          <div className="detail-tabs" aria-label="Viewer detail panels">
+            {DETAIL_TABS.map(([tabKey, label]) => (
               <button
+                key={tabKey}
                 type="button"
-                className="toggle-button layer-toggle-button"
-                disabled
+                className={`detail-tab-button ${activeDetailTab === tabKey ? "detail-tab-button-active" : ""}`}
+                onClick={() => setActiveDetailTab(tabKey)}
               >
-                LFMC anomaly
+                {label}
               </button>
-            ) : null}
+            ))}
           </div>
-          <div className="legend-wrap">
-            <div
-              className="legend-bar"
-              style={{ background: activeLayer ? legendGradient(activeLayer) : undefined }}
-            />
-            <div className="legend-axis">
-              {buildLegendTicks(activeLayer, activeLayerKey).map((tick) => (
-                <div
-                  key={`${tick.position}-${tick.label}`}
-                  className="legend-tick"
-                  style={{ left: `${tick.position}%` }}
-                >
-                  <span className="legend-tick-mark" />
-                  <span className="legend-tick-label">{tick.label}</span>
-                  {tick.subLabel ? <span className="legend-tick-sub-label">{tick.subLabel}</span> : null}
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-      </aside>
-      <section className="detail-panel">
-        <div className="detail-tabs" aria-label="Viewer detail panels">
-          {DETAIL_TABS.map(([tabKey, label]) => (
-            <button
-              key={tabKey}
-              type="button"
-              className={`detail-tab-button ${activeDetailTab === tabKey ? "detail-tab-button-active" : ""}`}
-              onClick={() => setActiveDetailTab(tabKey)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <section className="panel-card information-card" hidden={activeDetailTab !== "information"}>
-          <div className="panel-label">Information about these products</div>
-          <p>
-            This viewer shows live fuel moisture content products from Stanford's Remote Sensing Ecohydrology
-            Group. Live fuel moisture content (LFMC) is the mass of water in vegetation normalized by dry biomass,
-            and is an important indicator for wildland fire risk. You can choose between two datasets: a
-            MODIS-based dataset, which provides a long historical record but updates annually, or a Sentinel-1
-            based dataset, which provides lower-latency updates and higher accuracy in evergreen forests. You can
-            view absolute LFMC or LFMC anomaly, where anomaly shows whether vegetation is wetter or drier than
-            typical for that calendar day. For guidance on choosing the appropriate dataset, performance metrics,
-            and download instructions, please see{" "}
-            <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
-              this documentation
-            </a>
-            .
-          </p>
-        </section>
 
-        <section className="detail-tab-content" hidden={activeDetailTab !== "timeseries"}>
-          <section className="panel-card">
+          <section className="detail-tab-content" hidden={activeDetailTab !== "timeseries"}>
+            <section className="workflow-section">
             <div className="panel-label">View timeseries</div>
             <div className="timeseries-shell">
               {isPointHistoryLoading ? (
@@ -2100,9 +2101,9 @@ function App() {
                 <div className="timeseries-play-overlay">will update after play</div>
               ) : null}
             </div>
-          </section>
+            </section>
 
-          <section className="panel-card">
+            <section className="workflow-section">
             <div className="panel-label">Clicked cell info</div>
             {pointInfo ? (
               <div className="stats-grid">
@@ -2130,9 +2131,9 @@ function App() {
             ) : (
               <p className="panel-note">Click the map to query a viewer grid cell.</p>
             )}
-          </section>
+            </section>
 
-          <section className="panel-card">
+            <section className="workflow-section">
             <div className="panel-label">Input a location</div>
             <form onSubmit={handleLocationSubmit}>
               <div className="location-grid">
@@ -2165,10 +2166,10 @@ function App() {
                 </button>
               </div>
             </form>
+            </section>
           </section>
-        </section>
 
-        <section className="panel-card" hidden={activeDetailTab !== "download"}>
+          <section className="workflow-section" hidden={activeDetailTab !== "download"}>
           <div className="panel-label">Download data</div>
           <p className="panel-note download-note">
             This tool downloads the currently selected LFMC dataset for up to 10 sites and up to three years at
@@ -2300,8 +2301,9 @@ function App() {
               {isDownloadingCsv ? "Preparing CSV..." : `Download ${manifest?.dataset_label ?? "LFMC"} CSV`}
             </button>
           </div>
+          </section>
         </section>
-      </section>
+      </aside>
 
       <main className="map-stage">
         <div className="map-frame">
