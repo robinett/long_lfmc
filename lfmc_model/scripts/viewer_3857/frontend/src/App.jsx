@@ -409,20 +409,26 @@ function configuredInitialDate(dates, initialDate) {
 
 function startupViewResolutions(manifestPayload, extent, mapElement) {
   const baseResolutions = manifestPayload.tiles.view_resolutions ?? manifestPayload.tiles.resolutions ?? [];
+  const mapPaddingPx = 48;
+  const minimumFullExtentWidth = 320;
+  const minimumFullExtentHeight = 360;
   const width = Math.max(mapElement?.clientWidth ?? 0, 1);
   const height = Math.max(mapElement?.clientHeight ?? 0, 1);
-  const fitResolution = Math.max(
-    (extent[2] - extent[0]) / width,
-    (extent[3] - extent[1]) / height,
-  );
-  if (!Number.isFinite(fitResolution) || fitResolution <= 0) {
-    return baseResolutions;
-  }
-  const maxExistingResolution = Math.max(...baseResolutions.map(Number).filter(Number.isFinite), 0);
-  if (fitResolution <= maxExistingResolution) {
-    return baseResolutions;
-  }
-  return [fitResolution, ...baseResolutions];
+  const fitResolutions = [
+    Math.max(
+      (extent[2] - extent[0]) / Math.max(width - mapPaddingPx, 1),
+      (extent[3] - extent[1]) / Math.max(height - mapPaddingPx, 1),
+    ),
+    Math.max(
+      (extent[2] - extent[0]) / minimumFullExtentWidth,
+      (extent[3] - extent[1]) / minimumFullExtentHeight,
+    ),
+  ].filter((resolution) => Number.isFinite(resolution) && resolution > 0);
+  const resolutions = [...baseResolutions, ...fitResolutions]
+    .map(Number)
+    .filter((resolution) => Number.isFinite(resolution) && resolution > 0)
+    .sort((a, b) => b - a);
+  return resolutions.filter((resolution, index) => index === 0 || Math.abs(resolution - resolutions[index - 1]) > 1e-6);
 }
 
 function showDatePicker(event) {
