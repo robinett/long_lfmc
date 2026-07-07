@@ -416,37 +416,20 @@ function manifestGridExtent(manifestPayload) {
   ];
 }
 
-function startupViewResolutions(manifestPayload, extent, mapElement) {
+function startupViewResolutionLimits(manifestPayload, extent) {
   const baseResolutions = manifestPayload.tiles.view_resolutions ?? manifestPayload.tiles.resolutions ?? [];
-  const mapPaddingPx = 48;
-  const minimumFullExtentWidth = 240;
-  const minimumFullExtentHeight = 240;
-  const overviewResolutionMultiplier = 1.35;
-  const width = Math.max(mapElement?.clientWidth ?? 0, 1);
-  const height = Math.max(mapElement?.clientHeight ?? 0, 1);
-  const currentFitResolution = Math.max(
-    (extent[2] - extent[0]) / Math.max(width - mapPaddingPx, 1),
-    (extent[3] - extent[1]) / Math.max(height - mapPaddingPx, 1),
-  );
-  const smallScreenFitResolution = Math.max(
-    (extent[2] - extent[0]) / minimumFullExtentWidth,
-    (extent[3] - extent[1]) / minimumFullExtentHeight,
-  );
-  const fullExtentResolution = Math.max(currentFitResolution, smallScreenFitResolution);
-  const fitResolutions = [
-    fullExtentResolution * overviewResolutionMultiplier,
-    currentFitResolution,
-    smallScreenFitResolution,
-    Math.max(
-      (extent[2] - extent[0]) / Math.max(width * 0.5, 1),
-      (extent[3] - extent[1]) / Math.max(height * 0.5, 1),
-    ),
-  ].filter((resolution) => Number.isFinite(resolution) && resolution > 0);
-  const resolutions = [...baseResolutions, ...fitResolutions]
+  const configuredResolutions = baseResolutions
     .map(Number)
     .filter((resolution) => Number.isFinite(resolution) && resolution > 0)
     .sort((a, b) => b - a);
-  return resolutions.filter((resolution, index) => index === 0 || Math.abs(resolution - resolutions[index - 1]) > 1e-6);
+  const maxDimension = Math.max(extent[2] - extent[0], extent[3] - extent[1]);
+  const overviewResolution = maxDimension / 96;
+  const maxResolution = Math.max(configuredResolutions[0] ?? 0, overviewResolution);
+  const configuredMinResolution = configuredResolutions[configuredResolutions.length - 1] ?? maxResolution / 2 ** 12;
+  return {
+    maxResolution,
+    minResolution: configuredMinResolution < maxResolution ? configuredMinResolution : maxResolution / 2 ** 12,
+  };
 }
 
 function showDatePicker(event) {
@@ -1643,18 +1626,30 @@ function App() {
   }, [datasetKeys.length]);
 
   useEffect(() => {
-    if (!mapRef.current) {
+    if (!mapRef.current || !mapContainerRef.current) {
       return undefined;
     }
-    const animationFrameId = window.requestAnimationFrame(() => {
+
+    const updateMapSize = () => {
       mapRef.current?.updateSize();
-    });
-    const timeoutId = window.setTimeout(() => {
-      mapRef.current?.updateSize();
-    }, 220);
+    };
+    const animationFrameId = window.requestAnimationFrame(updateMapSize);
+    const timeoutId = window.setTimeout(updateMapSize, 220);
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateMapSize);
+      return () => {
+        window.cancelAnimationFrame(animationFrameId);
+        window.clearTimeout(timeoutId);
+        window.removeEventListener("resize", updateMapSize);
+      };
+    }
+
+    const observer = new ResizeObserver(updateMapSize);
+    observer.observe(mapContainerRef.current);
     return () => {
       window.cancelAnimationFrame(animationFrameId);
       window.clearTimeout(timeoutId);
+      observer.disconnect();
     };
   }, [isIntroCollapsed, headerDatasetSelectorHeight]);
 
@@ -1675,11 +1670,13 @@ function App() {
       projection.setExtent(extent);
     }
 
+    const resolutionLimits = startupViewResolutionLimits(manifest, extent);
     const view = new View({
       projection,
       center: getCenter(extent),
-      resolutions: startupViewResolutions(manifest, extent, mapContainerRef.current),
-      constrainResolution: true,
+      maxResolution: resolutionLimits.maxResolution,
+      minResolution: resolutionLimits.minResolution,
+      constrainResolution: false,
       extent,
       showFullExtent: true,
       zoom: 0,
@@ -1741,6 +1738,17 @@ function App() {
       controls: defaultControls().extend([new ScaleLine()]),
     });
 
+    const updateMapSize = () => {
+      map.updateSize();
+    };
+    let mapResizeObserver = null;
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateMapSize);
+    } else {
+      mapResizeObserver = new ResizeObserver(updateMapSize);
+      mapResizeObserver.observe(mapContainerRef.current);
+    }
+
     const fitInitialFullExtent = () => {
       map.updateSize();
       map.getView().fit(extent, {
@@ -1775,6 +1783,11 @@ function App() {
       }
       window.cancelAnimationFrame(initialFitAnimationFrameId);
       window.clearTimeout(initialFitTimeoutId);
+      if (mapResizeObserver) {
+        mapResizeObserver.disconnect();
+      } else {
+        window.removeEventListener("resize", updateMapSize);
+      }
       map.setTarget(null);
       mapRef.current = null;
       rasterTileLayersRef.current = [];
