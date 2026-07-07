@@ -407,6 +407,15 @@ function configuredInitialDate(dates, initialDate) {
   return dates.includes(initialDate) ? initialDate : dates[dates.length - 1];
 }
 
+function manifestGridExtent(manifestPayload) {
+  return [
+    manifestPayload.grid_extent.west,
+    manifestPayload.grid_extent.south,
+    manifestPayload.grid_extent.east,
+    manifestPayload.grid_extent.north,
+  ];
+}
+
 function startupViewResolutions(manifestPayload, extent, mapElement) {
   const baseResolutions = manifestPayload.tiles.view_resolutions ?? manifestPayload.tiles.resolutions ?? [];
   const mapPaddingPx = 48;
@@ -1648,12 +1657,7 @@ function App() {
       return undefined;
     }
 
-    const extent = [
-      manifest.grid_extent.west,
-      manifest.grid_extent.south,
-      manifest.grid_extent.east,
-      manifest.grid_extent.north,
-    ];
+    const extent = manifestGridExtent(manifest);
     const projectionCode = manifest.grid_crs;
     const projection = getProjection(projectionCode);
     if (!projection) {
@@ -1731,7 +1735,17 @@ function App() {
       controls: defaultControls().extend([new ScaleLine()]),
     });
 
-    map.getView().fit(extent, { padding: [24, 24, 24, 24], duration: 0 });
+    const fitInitialFullExtent = () => {
+      map.updateSize();
+      map.getView().fit(extent, {
+        padding: [24, 24, 24, 24],
+        duration: 0,
+        nearest: false,
+      });
+    };
+    fitInitialFullExtent();
+    const initialFitAnimationFrameId = window.requestAnimationFrame(fitInitialFullExtent);
+    const initialFitTimeoutId = window.setTimeout(fitInitialFullExtent, 240);
 
     map.on("click", async (event) => {
       const currentManifest = manifestRef.current;
@@ -1753,6 +1767,8 @@ function App() {
         window.clearTimeout(playbackTimeoutRef.current);
         playbackTimeoutRef.current = null;
       }
+      window.cancelAnimationFrame(initialFitAnimationFrameId);
+      window.clearTimeout(initialFitTimeoutId);
       map.setTarget(null);
       mapRef.current = null;
       rasterTileLayersRef.current = [];
