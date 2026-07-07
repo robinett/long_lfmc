@@ -22,7 +22,7 @@ const EPSG5070_DEF =
 proj4.defs("EPSG:5070", EPSG5070_DEF);
 register(proj4);
 
-const DEFAULT_API_BASE_URL = "https://long-lfmc-api.onrender.com";
+const DEFAULT_API_BASE_URL = "https://long-lfmc.onrender.com";
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, "");
 const MAX_DOWNLOAD_YEARS = 3;
 const DEFAULT_DATASET_KEY = "modis";
