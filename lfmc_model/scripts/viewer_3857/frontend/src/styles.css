@@ -39,19 +39,75 @@ body {
   box-shadow: 0 14px 34px rgba(63, 46, 26, 0.12);
 }
 
+.app-shell-intro-collapsed .date-bar {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+
 .date-bar-main {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
-  gap: 20px;
+  grid-template-columns: minmax(0, 1fr) minmax(430px, 520px);
+  gap: 16px;
   align-items: stretch;
 }
 
+.viewer-title-block {
+  position: relative;
+  min-width: 0;
+}
+
+.viewer-title-block-collapsed {
+  overflow: hidden;
+}
+
+.viewer-title-block-collapsed::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 34px;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255, 251, 244, 0), rgba(246, 237, 221, 0.96));
+  content: "";
+}
+
+.viewer-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
 .viewer-title-block h1 {
+  flex: 1;
   margin: 0;
   color: #2a2119;
   font-size: clamp(1.35rem, 1.7vw, 2.05rem);
   font-weight: 700;
   line-height: 1.08;
+}
+
+.intro-toggle-button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  border: 1px solid rgba(114, 80, 51, 0.28);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: rgba(255, 251, 244, 0.84);
+  color: #5b3d27;
+  cursor: pointer;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.intro-toggle-button:hover,
+.intro-toggle-button:focus {
+  background: rgba(114, 80, 51, 0.94);
+  color: #fff5e9;
 }
 
 .viewer-intro {
@@ -72,10 +128,10 @@ body {
 .header-dataset-selector {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
-  padding: 12px;
-  border-radius: 16px;
+  padding: 9px 10px;
+  border-radius: 12px;
   background:
     linear-gradient(180deg, rgba(255, 251, 244, 0.92) 0%, rgba(239, 230, 214, 0.84) 100%);
   box-shadow:
@@ -196,7 +252,7 @@ body {
   align-items: stretch;
   grid-template-columns: 1fr;
   grid-template-rows: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 7px;
 }
 
 .dataset-toggle-button {
@@ -210,9 +266,9 @@ body {
   flex-direction: column;
   align-items: flex-start;
   justify-content: center;
-  gap: 7px;
-  border-radius: 12px;
-  padding: 13px 14px;
+  gap: 4px;
+  border-radius: 10px;
+  padding: 9px 11px;
   text-align: left;
   white-space: normal;
 }
@@ -225,8 +281,12 @@ body {
 
 .dataset-toggle-summary {
   color: #6b5c4c;
-  font-size: 0.72rem;
-  line-height: 1.22;
+  font-size: 0.68rem;
+  line-height: 1.15;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dataset-toggle-button-header.toggle-button-active .dataset-toggle-summary {
@@ -908,6 +968,14 @@ body {
   .date-bar-main {
     grid-template-columns: 1fr;
     gap: 14px;
+  }
+
+  .viewer-title-row {
+    align-items: flex-start;
+  }
+
+  .dataset-toggle-summary {
+    white-space: normal;
   }
 
   .control-rail {

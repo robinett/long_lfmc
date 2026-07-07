@@ -816,6 +816,7 @@ function App() {
   const noticeTimeoutRef = useRef(null);
   const pointQueryTokenRef = useRef(0);
   const selectedLocationRef = useRef(null);
+  const headerDatasetSelectorRef = useRef(null);
 
   const [metadata, setMetadata] = useState(null);
   const [datasetManifests, setDatasetManifests] = useState({});
@@ -837,6 +838,8 @@ function App() {
   const [isPointLoading, setIsPointLoading] = useState(false);
   const [isPointHistoryLoading, setIsPointHistoryLoading] = useState(false);
   const [activeDetailTab, setActiveDetailTab] = useState("timeseries");
+  const [isIntroCollapsed, setIsIntroCollapsed] = useState(false);
+  const [headerDatasetSelectorHeight, setHeaderDatasetSelectorHeight] = useState(0);
 
   const dates = manifest?.dates ?? [];
   const selectedDate = dates[dateIndex] ?? "NA";
@@ -1598,6 +1601,43 @@ function App() {
   }, [activeDownloadSiteIndex]);
 
   useEffect(() => {
+    const node = headerDatasetSelectorRef.current;
+    if (!node) {
+      return undefined;
+    }
+
+    const updateHeight = () => {
+      setHeaderDatasetSelectorHeight(Math.ceil(node.getBoundingClientRect().height));
+    };
+    updateHeight();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateHeight);
+      return () => window.removeEventListener("resize", updateHeight);
+    }
+
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [datasetKeys.length]);
+
+  useEffect(() => {
+    if (!mapRef.current) {
+      return undefined;
+    }
+    const animationFrameId = window.requestAnimationFrame(() => {
+      mapRef.current?.updateSize();
+    });
+    const timeoutId = window.setTimeout(() => {
+      mapRef.current?.updateSize();
+    }, 220);
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+      window.clearTimeout(timeoutId);
+    };
+  }, [isIntroCollapsed, headerDatasetSelectorHeight]);
+
+  useEffect(() => {
     if (!manifest || !mapContainerRef.current) {
       return undefined;
     }
@@ -1985,12 +2025,30 @@ function App() {
       ];
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isIntroCollapsed ? "app-shell-intro-collapsed" : ""}`}>
       <header className="date-bar">
         <div className="date-bar-main">
-          <div className="viewer-title-block">
-            <h1>Live Fuel Moisture Content Products from Stanford's Remote Sensing Ecohydrology Group</h1>
-            <p className="viewer-intro">
+          <div
+            className={`viewer-title-block ${isIntroCollapsed ? "viewer-title-block-collapsed" : ""}`}
+            style={
+              isIntroCollapsed && headerDatasetSelectorHeight > 0
+                ? { maxHeight: `${headerDatasetSelectorHeight}px` }
+                : undefined
+            }
+          >
+            <div className="viewer-title-row">
+              <h1>Live Fuel Moisture Content Products from Stanford's Remote Sensing Ecohydrology Group</h1>
+              <button
+                type="button"
+                className="intro-toggle-button"
+                aria-controls="viewer-intro"
+                aria-expanded={!isIntroCollapsed}
+                onClick={() => setIsIntroCollapsed((currentValue) => !currentValue)}
+              >
+                {isIntroCollapsed ? "Show more" : "Minimize"}
+              </button>
+            </div>
+            <p id="viewer-intro" className="viewer-intro">
               Live fuel moisture content (LFMC) is the mass of water in vegetation normalized by dry biomass, and
               is an important indicator for wildland fire risk. Because no single observing system captures all
               regions and time periods equally well, this viewer presents complementary LFMC products for different
@@ -2009,7 +2067,7 @@ function App() {
               .
             </p>
           </div>
-          <section className="header-dataset-selector" aria-label="Dataset selector">
+          <section ref={headerDatasetSelectorRef} className="header-dataset-selector" aria-label="Dataset selector">
             <div className="panel-label">Dataset selection</div>
             <div className="dataset-toggle-row dataset-toggle-row-header">
               {datasetKeys.map((datasetKey) => {
