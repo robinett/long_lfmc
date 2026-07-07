@@ -909,8 +909,7 @@ body {
   background: linear-gradient(180deg, #e7dfcf 0%, #d8ccb8 100%);
 }
 
-.map-notice,
-.map-loading {
+.map-notice {
   position: absolute;
   z-index: 3;
   right: 16px;
@@ -929,15 +928,6 @@ body {
   line-height: 1.35;
 }
 
-.map-loading {
-  bottom: 16px;
-  padding: 8px 11px;
-  background: rgba(42, 33, 25, 0.86);
-  color: #fff5e9;
-  font-size: 0.76rem;
-  text-transform: lowercase;
-}
-
 .map-container {
   width: 100%;
   height: 100%;
@@ -950,6 +940,12 @@ body {
 
 .map-container .ol-control button {
   background: rgba(114, 80, 51, 0.92);
+  color: #fff5e9;
+  text-shadow: none;
+}
+
+.map-container .ol-control button span {
+  color: inherit;
 }
 
 .map-container .ol-control button:hover,

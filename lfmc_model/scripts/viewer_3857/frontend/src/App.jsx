@@ -419,18 +419,27 @@ function manifestGridExtent(manifestPayload) {
 function startupViewResolutions(manifestPayload, extent, mapElement) {
   const baseResolutions = manifestPayload.tiles.view_resolutions ?? manifestPayload.tiles.resolutions ?? [];
   const mapPaddingPx = 48;
-  const minimumFullExtentWidth = 320;
-  const minimumFullExtentHeight = 360;
+  const minimumFullExtentWidth = 240;
+  const minimumFullExtentHeight = 240;
+  const overviewResolutionMultiplier = 1.35;
   const width = Math.max(mapElement?.clientWidth ?? 0, 1);
   const height = Math.max(mapElement?.clientHeight ?? 0, 1);
+  const currentFitResolution = Math.max(
+    (extent[2] - extent[0]) / Math.max(width - mapPaddingPx, 1),
+    (extent[3] - extent[1]) / Math.max(height - mapPaddingPx, 1),
+  );
+  const smallScreenFitResolution = Math.max(
+    (extent[2] - extent[0]) / minimumFullExtentWidth,
+    (extent[3] - extent[1]) / minimumFullExtentHeight,
+  );
+  const fullExtentResolution = Math.max(currentFitResolution, smallScreenFitResolution);
   const fitResolutions = [
+    fullExtentResolution * overviewResolutionMultiplier,
+    currentFitResolution,
+    smallScreenFitResolution,
     Math.max(
-      (extent[2] - extent[0]) / Math.max(width - mapPaddingPx, 1),
-      (extent[3] - extent[1]) / Math.max(height - mapPaddingPx, 1),
-    ),
-    Math.max(
-      (extent[2] - extent[0]) / minimumFullExtentWidth,
-      (extent[3] - extent[1]) / minimumFullExtentHeight,
+      (extent[2] - extent[0]) / Math.max(width * 0.5, 1),
+      (extent[3] - extent[1]) / Math.max(height * 0.5, 1),
     ),
   ].filter((resolution) => Number.isFinite(resolution) && resolution > 0);
   const resolutions = [...baseResolutions, ...fitResolutions]
@@ -849,7 +858,6 @@ function App() {
   const [pointInfo, setPointInfo] = useState(null);
   const [statusText, setStatusText] = useState("Loading viewer manifest...");
   const [noticeText, setNoticeText] = useState("");
-  const [isMapLoading, setIsMapLoading] = useState(false);
   const [isPointLoading, setIsPointLoading] = useState(false);
   const [isPointHistoryLoading, setIsPointHistoryLoading] = useState(false);
   const [activeDetailTab, setActiveDetailTab] = useState("timeseries");
@@ -1319,7 +1327,6 @@ function App() {
 
     tileSource.on("tileloadstart", () => {
       if (requestToken === transitionTokenRef.current) {
-        setIsMapLoading(true);
         setStatusText(`Loading ${layerConfig.label} tiles for ${targetDate}`);
       }
     });
@@ -1408,7 +1415,6 @@ function App() {
 
         setDateIndex(targetIndex);
         dateIndexRef.current = targetIndex;
-        setIsMapLoading(false);
         setStatusText(`Showing ${layerConfig.label} for ${targetDate}`);
         resolve(true);
       });
@@ -2455,7 +2461,6 @@ function App() {
       <main className="map-stage">
         <div className="map-frame">
           {noticeText ? <div className="map-notice">{noticeText}</div> : null}
-          {isMapLoading ? <div className="map-loading">loading</div> : null}
           <div ref={mapContainerRef} className="map-container" />
         </div>
       </main>
