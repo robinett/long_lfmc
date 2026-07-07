@@ -1931,9 +1931,9 @@ function App() {
               15-day resolution, but updates with approximately 10-day latency and is more
               skillful in evergreen forests. You can view absolute LFMC or LFMC anomaly, where anomaly shows
               whether vegetation is wetter or drier than typical for that calendar day. For guidance on choosing
-              the appropriate dataset, performance metrics, and download instructions, please see{" "}
+              the appropriate dataset, citing this data, performance metrics, and download instructions, please see{" "}
               <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
-                this documentation
+                this information document
               </a>
               .
             </p>
