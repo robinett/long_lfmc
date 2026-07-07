@@ -303,6 +303,30 @@ function findDateIndex(dates, targetDate, direction = "nearest") {
     : afterIdx;
 }
 
+function surroundingDateIndices(dates, targetDate) {
+  if (!dates.length || !targetDate) {
+    return { beforeIdx: -1, afterIdx: -1, exactIdx: -1 };
+  }
+  let low = 0;
+  let high = dates.length - 1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (dates[mid] === targetDate) {
+      return { beforeIdx: mid, afterIdx: mid, exactIdx: mid };
+    }
+    if (dates[mid] < targetDate) {
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return {
+    beforeIdx: high >= 0 ? high : -1,
+    afterIdx: low < dates.length ? low : -1,
+    exactIdx: -1,
+  };
+}
+
 function maxDownloadEndDate(startDate) {
   const parsed = parseDateString(startDate);
   if (!parsed) {
@@ -758,7 +782,7 @@ function TimeseriesChart({ pointInfo, mode, supportsAnomaly }) {
         {geometry.showSeasonalCycle ? (
           <div className="timeseries-legend-item">
             <span className="timeseries-legend-swatch timeseries-legend-swatch-seasonal" />
-            <span className="timeseries-legend-label">Seasonal cycle</span>
+            <span className="timeseries-legend-label">Average seasonal cycle</span>
           </div>
         ) : null}
         {geometry.showBand ? (
@@ -872,6 +896,59 @@ function App() {
     };
   }
 
+  function sentinelResolutionForInRange(targetDate) {
+    const targetManifest = datasetManifests[SENTINEL_DATASET_KEY];
+    const targetDates = targetManifest?.dates ?? [];
+    if (!targetDates.length || !targetDate) {
+      return { resolution: null, message: "" };
+    }
+    const { beforeIdx, afterIdx, exactIdx } = surroundingDateIndices(targetDates, targetDate);
+    if (exactIdx >= 0) {
+      return {
+        resolution: dateResolutionForDataset(SENTINEL_DATASET_KEY, targetDate, "nearest"),
+        message: "",
+      };
+    }
+    if (beforeIdx >= 0 && afterIdx >= 0) {
+      const previousDate = targetDates[beforeIdx];
+      const nextDate = targetDates[afterIdx];
+      if (dateDiffDays(nextDate, previousDate) > SENTINEL_DATE_TOLERANCE_DAYS) {
+        const nearestResolution = dateResolutionForDataset(SENTINEL_DATASET_KEY, targetDate, "nearest");
+        return {
+          resolution: nearestResolution,
+          message: nearestResolution
+            ? `Sentinel-1 data gap from ${previousDate} to ${nextDate}; switched to nearest available date ${nearestResolution.date}.`
+            : "",
+        };
+      }
+      return {
+        resolution: dateResolutionForDataset(SENTINEL_DATASET_KEY, nextDate, "nearest"),
+        message: "",
+      };
+    }
+    return {
+      resolution: dateResolutionForDataset(SENTINEL_DATASET_KEY, targetDate, "nearest"),
+      message: "",
+    };
+  }
+
+  function resolutionForRequest(datasetKey, targetDate, direction = "nearest") {
+    const targetManifest = datasetManifests[datasetKey];
+    const targetDates = targetManifest?.dates ?? [];
+    if (
+      datasetKey === SENTINEL_DATASET_KEY &&
+      targetDates.length &&
+      targetDate >= targetDates[0] &&
+      targetDate <= targetDates[targetDates.length - 1]
+    ) {
+      return sentinelResolutionForInRange(targetDate);
+    }
+    return {
+      resolution: dateResolutionForDataset(datasetKey, targetDate, direction),
+      message: "",
+    };
+  }
+
   function alternateDatasetKey(datasetKey) {
     return datasetKey === SENTINEL_DATASET_KEY ? DEFAULT_DATASET_KEY : SENTINEL_DATASET_KEY;
   }
@@ -930,47 +1007,38 @@ function App() {
     const targetStart = targetDates[0];
     const targetEnd = targetDates[targetDates.length - 1];
     if (targetDate < targetStart || targetDate > targetEnd) {
+      const rangeMessage = `${targetManifest.dataset_label} is only available from ${targetStart} to ${targetEnd}`;
       if (forceDataset) {
         const forcedResolution = dateResolutionForDataset(datasetKey, targetDate, "nearest");
         if (forcedResolution) {
           applyResolvedSelection(
             forcedResolution,
-            `${targetManifest.dataset_label} is unavailable on ${targetDate}; snapped to ${forcedResolution.date}.`,
+            `${rangeMessage}; switched to nearest available date ${forcedResolution.date}.`,
           );
         }
         return;
       }
       const alternateKey = alternateDatasetKey(datasetKey);
-      const alternateResolution = dateResolutionForDataset(alternateKey, targetDate, "nearest");
+      const { resolution: alternateResolution } = resolutionForRequest(alternateKey, targetDate, "nearest");
       if (canUseResolution(alternateResolution)) {
         applyResolvedSelection(
           alternateResolution,
-          `${targetManifest.dataset_label} is unavailable for ${targetDate}; switched to ${alternateResolution.manifest.dataset_label}.`,
+          `${rangeMessage}; switched to ${alternateResolution.manifest.dataset_label}.`,
         );
       }
       return;
     }
-    let targetIndex = findDateIndex(targetDates, targetDate, direction);
-    if (targetIndex < 0) {
+    const { resolution, message: resolvedMessage } = resolutionForRequest(datasetKey, targetDate, direction);
+    if (!resolution) {
       return;
     }
-    const resolvedDate = targetDates[targetIndex];
-    const distanceDays = dateDiffDays(resolvedDate, targetDate);
-    if (!forceDataset && datasetKey === SENTINEL_DATASET_KEY && distanceDays > SENTINEL_DATE_TOLERANCE_DAYS) {
-      const modisResolution = dateResolutionForDataset(DEFAULT_DATASET_KEY, targetDate);
-      if (modisResolution) {
-        applyResolvedSelection(
-          modisResolution,
-          `Sentinel-1 LFMC has no prediction within ${SENTINEL_DATE_TOLERANCE_DAYS} days of ${targetDate}; switched to MODIS-based LFMC.`,
-        );
-      }
-      return;
-    }
-    const message = resolvedDate !== targetDate
+    const targetIndex = resolution.index;
+    const resolvedDate = resolution.date;
+    const message = resolvedMessage || (resolvedDate !== targetDate && datasetKey !== SENTINEL_DATASET_KEY
       ? `${targetManifest.dataset_label} is only available on ${resolvedDate}; snapped from ${targetDate}.`
-      : "";
+      : "");
     if (datasetKey !== activeDatasetKeyRef.current) {
-      applyResolvedSelection({ datasetKey, manifest: targetManifest, index: targetIndex, date: resolvedDate }, message);
+      applyResolvedSelection(resolution, message);
       return;
     }
     if (message) {
@@ -1929,7 +1997,9 @@ function App() {
               resolution, but updates only annually and can be uncertain in some evergreen forests. Alternatively,
               a Sentinel-1 based dataset provides a shorter historical record beginning in 2016 at 250 m and
               15-day resolution, but updates with approximately 10-day latency and is more
-              skillful in evergreen forests. You can view absolute LFMC or LFMC anomaly, where anomaly shows
+              skillful in evergreen forests. Evergreen forest LFMC is lighter in the MODIS-based product because
+              it should be used with more caution due to site-specific performance, but is shown in full color in
+              Sentinel-1 due to generally better performance. You can view absolute LFMC or LFMC anomaly, where anomaly shows
               whether vegetation is wetter or drier than typical for that calendar day. For guidance on choosing
               the appropriate dataset, citing this data, performance metrics, and download instructions, please see{" "}
               <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
@@ -2112,20 +2182,16 @@ function App() {
                   <span className="stats-value">{formatMetricValue(pointInfo.lfmc_ens_mean, 1, true)}</span>
                 </div>
                 <div>
+                  <span className="stats-key">Average LFMC on this day of year (%)</span>
+                  <span className="stats-value">{formatMetricValue(pointInfo.lfmc_climatology_mean, 1, supportsClimatology)}</span>
+                </div>
+                <div>
                   <span className="stats-key">LFMC Anomaly (%)</span>
                   <span className="stats-value">{formatMetricValue(pointInfo.lfmc_anomaly, 1, supportsAnomaly)}</span>
                 </div>
                 <div>
-                  <span className="stats-key">Average LFMC on this date (%)</span>
-                  <span className="stats-value">{formatMetricValue(pointInfo.lfmc_climatology_mean, 1, supportsClimatology)}</span>
-                </div>
-                <div>
-                  <span className="stats-key">Land Cover</span>
+                  <span className="stats-key">Dominant land cover</span>
                   <span className="stats-value">{formatLabel(pointInfo.landcover_name)}</span>
-                </div>
-                <div>
-                  <span className="stats-key">Product Level</span>
-                  <span className="stats-value">{formatLabel(pointInfo.data_product_level)}</span>
                 </div>
               </div>
             ) : (
