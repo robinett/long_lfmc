@@ -239,25 +239,6 @@ function dateDiffDays(left, right) {
   return Math.round(Math.abs(leftDate - rightDate) / 86400000);
 }
 
-function shiftDateString(dateStr, amount, unit) {
-  const date = parseDateString(dateStr);
-  if (!date) {
-    return dateStr;
-  }
-  if (unit === "month") {
-    const originalDay = date.getUTCDate();
-    date.setUTCDate(1);
-    date.setUTCMonth(date.getUTCMonth() + amount);
-    const lastDayOfTargetMonth = new Date(
-      Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0),
-    ).getUTCDate();
-    date.setUTCDate(Math.min(originalDay, lastDayOfTargetMonth));
-  } else {
-    date.setUTCDate(date.getUTCDate() + amount);
-  }
-  return formatDateString(date);
-}
-
 function buildDailyDateRange(startDate, endDate) {
   const start = parseDateString(startDate);
   const end = parseDateString(endDate);
@@ -844,7 +825,7 @@ function App() {
   const [isPointLoading, setIsPointLoading] = useState(false);
   const [isPointHistoryLoading, setIsPointHistoryLoading] = useState(false);
   const [activeDetailTab, setActiveDetailTab] = useState("timeseries");
-  const [isIntroCollapsed, setIsIntroCollapsed] = useState(false);
+  const [isIntroCollapsed, setIsIntroCollapsed] = useState(true);
   const [headerDatasetSelectorHeight, setHeaderDatasetSelectorHeight] = useState(0);
 
   const dates = manifest?.dates ?? [];
@@ -1456,20 +1437,6 @@ function App() {
     requestDatasetDate(activeDatasetKeyRef.current, targetDate, direction);
   }
 
-  function handleDateStep(amount, unit) {
-    if (!dates.length || selectedDate === "NA") {
-      return;
-    }
-    if (activeDatasetKeyRef.current === SENTINEL_DATASET_KEY && unit === "day" && Math.abs(amount) === 15) {
-      const nextIndex = Math.max(0, Math.min(dates.length - 1, dateIndexRef.current + Math.sign(amount)));
-      requestDateTransition(nextIndex);
-      refreshSelectedLocation(dates[nextIndex]);
-      return;
-    }
-    const targetDate = shiftDateString(selectedDate, amount, unit);
-    requestDateValueTransition(targetDate, amount < 0 ? "backward" : "forward");
-  }
-
   function updateSelectionFeatures(payload) {
     const selectionSource = selectionSourceRef.current;
     if (!selectionSource) {
@@ -2047,24 +2014,6 @@ function App() {
     });
   }
 
-  const dateStepControls = activeDatasetKey === SENTINEL_DATASET_KEY
-    ? [
-        [-3, "month", "-3 months"],
-        [-1, "month", "-1 month"],
-        [-15, "day", "-15 days"],
-        [15, "day", "+15 days"],
-        [1, "month", "+1 month"],
-        [3, "month", "+3 months"],
-      ]
-    : [
-        [-3, "month", "-3 months"],
-        [-1, "month", "-1 month"],
-        [-1, "day", "-1 day"],
-        [1, "day", "+1 day"],
-        [1, "month", "+1 month"],
-        [3, "month", "+3 months"],
-      ];
-
   return (
     <div className={`app-shell ${isIntroCollapsed ? "app-shell-intro-collapsed" : ""}`}>
       <header className="date-bar">
@@ -2072,8 +2021,8 @@ function App() {
           <div
             className={`viewer-title-block ${isIntroCollapsed ? "viewer-title-block-collapsed" : ""}`}
             style={
-              isIntroCollapsed && headerDatasetSelectorHeight > 0
-                ? { maxHeight: `${headerDatasetSelectorHeight}px` }
+              isIntroCollapsed
+                ? { maxHeight: `${headerDatasetSelectorHeight || 96}px` }
                 : undefined
             }
           >
@@ -2086,22 +2035,22 @@ function App() {
                 aria-expanded={!isIntroCollapsed}
                 onClick={() => setIsIntroCollapsed((currentValue) => !currentValue)}
               >
-                {isIntroCollapsed ? "Show more" : "Minimize text"}
+                {isIntroCollapsed ? "Show More" : "Minimize text"}
               </button>
             </div>
             <p id="viewer-intro" className="viewer-intro">
               Live fuel moisture content (LFMC) is the mass of water in vegetation normalized by dry biomass, and
-              is an important indicator for wildland fire risk. Because no single observing system captures all
-              regions and time periods equally well, this viewer presents complementary LFMC products for different
-              use cases. You can choose between two datasets. First, a MODIS-based dataset provides a long
-              historical record beginning in 2001 at 500 m and daily resolution, but updates only annually and can
-              be uncertain in some evergreen forests. Alternatively, a Sentinel-1 based dataset provides a shorter
-              historical record beginning in 2016 at 250 m and 15-day resolution, but updates with approximately
-              10-day latency and is more skillful in evergreen forests. Given these performance differences, we
-              present MODIS-based LFMC in this map viewer with high opacity to note that, while usable in some
-              situations, it should be treated with caution. You can view absolute LFMC or LFMC anomaly, where anomaly shows
-              whether vegetation is wetter or drier than typical for that calendar day. For guidance on choosing
-              the appropriate dataset, citing this data, performance metrics, and download instructions, please see{" "}
+              is an important indicator for wildland fire risk. To the right, you can choose between two datasets
+              that use satellites to map LFMC. First, a MODIS-based dataset provides a long historical record
+              beginning in 2001 at 500 m and daily resolution, but updates only annually and can be uncertain in
+              some evergreen forests. Alternatively, a Sentinel-1 based dataset provides a shorter historical record
+              beginning in 2016 at 250 m and 15-day resolution, but updates with approximately 10-day latency and is
+              more skillful in evergreen forests. Given these performance differences, we present evergreen forest
+              LFMC in the MODIS-based product with reduced opacity to note that, while usable in some situations, it
+              should be treated with caution. The best dataset will depend on your use case. You can view absolute
+              LFMC or LFMC anomaly, where anomaly shows whether vegetation is wetter or drier than typical for that
+              calendar day. For guidance on choosing the appropriate dataset, citing this data, performance metrics,
+              and download instructions, please see{" "}
               <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
                 this information document
               </a>
@@ -2217,27 +2166,6 @@ function App() {
                 <span>{globalDates[globalDates.length - 1] ?? "--"}</span>
               </div>
             </div>
-          </div>
-          <button
-            type="button"
-            className={`toggle-button play-button ${isPlaying ? "toggle-button-active" : ""}`}
-            disabled={dates.length < 2}
-            onClick={() => setIsPlaying((currentValue) => !currentValue)}
-          >
-            {isPlaying ? "Pause" : "Play"}
-          </button>
-          <div className="date-step-controls" aria-label="Date step controls">
-            {dateStepControls.map(([amount, unit, label]) => (
-              <button
-                type="button"
-                className="toggle-button date-step-button"
-                disabled={!dates.length}
-                onClick={() => handleDateStep(amount, unit)}
-                key={`${amount}-${unit}-${label}`}
-              >
-                {label}
-              </button>
-            ))}
           </div>
         </section>
         <section className="rail-card workflow-card">

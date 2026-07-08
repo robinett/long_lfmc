@@ -73,13 +73,15 @@ body {
 
 .viewer-title-row {
   display: flex;
-  align-items: flex-start;
+  align-items: stretch;
   justify-content: space-between;
   gap: 12px;
   min-width: 0;
 }
 
 .viewer-title-block h1 {
+  display: flex;
+  align-items: center;
   flex: 1;
   margin: 0;
   color: #2a2119;
@@ -90,15 +92,15 @@ body {
 
 .intro-toggle-button {
   flex: 0 0 auto;
-  min-height: 30px;
+  min-height: 44px;
   border: 1px solid rgba(114, 80, 51, 0.28);
   border-radius: 999px;
-  padding: 6px 10px;
+  padding: 0 18px;
   background: rgba(255, 251, 244, 0.84);
   color: #5b3d27;
   cursor: pointer;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: 0.68rem;
+  font-size: 0.82rem;
   font-weight: 800;
   line-height: 1;
   white-space: nowrap;
@@ -316,19 +318,6 @@ body {
   min-width: 0;
 }
 
-.date-step-controls {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.date-step-button {
-  min-width: 0;
-  padding: 8px 8px;
-  font-size: 0.74rem;
-}
-
 .date-input-field {
   display: flex;
   align-items: center;
@@ -475,20 +464,6 @@ body {
 }
 
 .toggle-button-active {
-  background: #725033;
-  color: #fff5e9;
-}
-
-.play-button {
-  width: 100%;
-  margin-top: 10px;
-  min-width: 84px;
-  flex-shrink: 0;
-  background: #d3c6b5;
-  color: #493929;
-}
-
-.play-button.toggle-button-active {
   background: #725033;
   color: #fff5e9;
 }
@@ -967,7 +942,7 @@ body {
   }
 
   .viewer-title-row {
-    align-items: flex-start;
+    align-items: stretch;
   }
 
   .dataset-toggle-summary {
