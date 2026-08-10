@@ -2039,18 +2039,19 @@ function App() {
               </button>
             </div>
             <p id="viewer-intro" className="viewer-intro">
-              Live fuel moisture content (LFMC) is the mass of water in vegetation normalized by dry biomass, and
-              is an important indicator for wildland fire risk. To the right, you can choose between two datasets
-              that use satellites to map LFMC. First, a MODIS-based dataset provides a long historical record
-              beginning in 2001 at 500 m and daily resolution, but updates only annually and can be uncertain in
-              some evergreen forests. Alternatively, a Sentinel-1 based dataset provides a shorter historical record
-              beginning in 2016 at 250 m and 15-day resolution, but updates with approximately 10-day latency and is
-              more skillful in evergreen forests. Given these performance differences, we present evergreen forest
-              LFMC in the MODIS-based product with reduced opacity to note that, while usable in some situations, it
-              should be treated with caution. The best dataset will depend on your use case. You can view absolute
-              LFMC or LFMC anomaly, where anomaly shows whether vegetation is wetter or drier than typical for that
-              calendar day. For guidance on choosing the appropriate dataset, citing this data, performance metrics,
-              and download instructions, please see{" "}
+              Live fuel moisture content (LFMC) is the mass of water in vegetation normalized by dry biomass, and is 
+              an important indicator for wildland fire potential. To the right, you can choose between two datasets 
+              that use satellites to map LFMC. First, a MODIS-based dataset provides a long historical record beginning 
+              in 2001 at 500 m and daily resolution, but  can be uncertain in some evergreen forests. This dataset 
+              depends on inputs that are only available at long latency. As a result, it is currently only available 
+              until 2024. 2025 will be added soon. Alternatively, a Sentinel-1 based dataset provides a shorter 
+              historical record beginning in 2016 at 250 m and 15-day resolution, but updates with approximately 10-day 
+              latency. Given these performance differences, we present evergreen forest LFMC in the MODIS-based product 
+              with reduced opacity to note that, while usable in some situations, it should be treated with caution. 
+              For both datasets, fully white areas are those with missing data. The best dataset will depend on your 
+              use case. You can view absolute LFMC or LFMC anomaly, where anomaly shows whether vegetation is wetter 
+              or drier than typical for that calendar day (compared to a 2000-2024 average). For guidance on choosing 
+              the appropriate dataset, citing this data, performance metrics, and download instructions, please see{" "}
               <a href={PRODUCT_DOC_URL} target="_blank" rel="noreferrer">
                 this information document
               </a>
