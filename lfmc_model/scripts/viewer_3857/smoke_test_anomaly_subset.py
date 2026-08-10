@@ -287,11 +287,11 @@ def save_histogram(data: np.ndarray, path: Path) -> None:
 def color_ramp(values: np.ndarray, value_min: float, value_max: float) -> np.ndarray:
     palette = np.asarray(
         [
-            [65, 84, 139],
-            [181, 209, 224],
-            [247, 247, 241],
-            [230, 178, 122],
-            [132, 57, 43],
+            [44, 123, 182],
+            [171, 217, 233],
+            [255, 255, 191],
+            [253, 174, 97],
+            [215, 25, 28],
         ],
         dtype=np.float32,
     )
