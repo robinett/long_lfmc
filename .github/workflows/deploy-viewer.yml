@@ -63,4 +63,4 @@ jobs:
           path: lfmc_model/scripts/viewer_3857/frontend/dist/index.html
           destination: frontend-long-lfmc
           headers: |-
-            cache-control: 'no-store, max-age=0'
+            cache-control: no-store, max-age=0
