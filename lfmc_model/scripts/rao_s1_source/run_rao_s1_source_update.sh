@@ -129,6 +129,11 @@ else
     echo "[INFO] LFMC map already exists; generation step is not needed."
 fi
 
+if [[ "${dry_run}" -eq 0 && ! -s "${lfmc_map}" ]]; then
+    echo "[ERROR] Rao pipeline finished without a nonempty LFMC map: ${lfmc_map}" >&2
+    exit 1
+fi
+
 run_cmd python3 -u "${script_dir}/build_rao_s1_scientific_zarr.py" \
     --config "${config_path}" \
     --mode append \

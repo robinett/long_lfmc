@@ -6,6 +6,8 @@ script_dir="/home/users/trobinet/long_lfmc/lfmc_model/scripts/transfer_out"
 config_path="${script_dir}/source_coop_transfer_configs.yaml"
 product_prefix="rseg/sentinel1-lfmc/"
 env_path="/home/users/trobinet/uv_activations/activate_lfmc_model_py312.sh"
+render_refresh_token_file="${HOME}/.long_lfmc_render_refresh_token"
+api_refresh_url="${LONG_LFMC_API_REFRESH_URL:-https://long-lfmc.onrender.com/api/refresh}"
 dry_run=0
 target_date=""
 manifest_dir=""
@@ -41,6 +43,16 @@ fi
 
 cd "${script_dir}"
 source "${env_path}"
+
+if [[ "${dry_run}" -eq 0 && -z "${LONG_LFMC_API_REFRESH_TOKEN:-}" && -f "${render_refresh_token_file}" ]]; then
+    IFS= read -r LONG_LFMC_API_REFRESH_TOKEN < "${render_refresh_token_file}"
+    export LONG_LFMC_API_REFRESH_TOKEN
+    log "Loaded Render API refresh token from ${render_refresh_token_file}"
+fi
+if [[ "${dry_run}" -eq 0 && -z "${LONG_LFMC_API_REFRESH_TOKEN:-}" ]]; then
+    echo "[ERROR] LONG_LFMC_API_REFRESH_TOKEN is required to refresh the deployed viewer after upload" >&2
+    exit 1
+fi
 
 upload_dataset() {
     local dataset_key="$1"
@@ -98,5 +110,12 @@ log "Verifying Rao S1 Source products"
 python3 "${script_dir}/verify_remote_rao_s1_source_products.py" \
     --config_path "${config_path}" \
     --product_prefix "${product_prefix}"
+
+log "Refreshing deployed viewer API after Source upload"
+curl -fsS --max-time 120 \
+    -X POST \
+    -H "Authorization: Bearer ${LONG_LFMC_API_REFRESH_TOKEN}" \
+    "${api_refresh_url}"
+printf '\n'
 
 log "Finished uploading Rao S1 Source products"

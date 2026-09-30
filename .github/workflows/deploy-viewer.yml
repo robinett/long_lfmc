@@ -31,6 +31,8 @@ jobs:
 
       - name: Build
         working-directory: lfmc_model/scripts/viewer_3857/frontend
+        env:
+          VITE_CARTO_BASEMAP_KEY: ${{ secrets.VITE_CARTO_BASEMAP_KEY }}
         run: npm run build
 
       - name: Authenticate to Google Cloud

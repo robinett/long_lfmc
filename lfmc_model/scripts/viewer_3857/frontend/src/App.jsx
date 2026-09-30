@@ -24,6 +24,7 @@ register(proj4);
 
 const DEFAULT_API_BASE_URL = "https://long-lfmc.onrender.com";
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, "");
+const CARTO_BASEMAP_KEY = (import.meta.env.VITE_CARTO_BASEMAP_KEY || "").trim();
 const MAX_DOWNLOAD_YEARS = 3;
 const DEFAULT_DATASET_KEY = "modis";
 const SENTINEL_DATASET_KEY = "sentinel1";
@@ -1665,7 +1666,7 @@ function App() {
       layers.push(
         new TileLayer({
           source: new XYZ({
-            url: "https://{a-d}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
+            url: `https://basemaps.cartocdn.com/rastertiles/light_all/{z}/{x}/{y}.png?key=${encodeURIComponent(CARTO_BASEMAP_KEY)}`,
             attributions: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
             maxZoom: 20,
           }),
