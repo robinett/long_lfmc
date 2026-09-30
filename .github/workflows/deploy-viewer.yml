@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "lfmc_model/scripts/viewer_3857/**"
+      - ".github/workflows/deploy-viewer.yml"
   workflow_dispatch:
 
 jobs:
@@ -40,10 +41,26 @@ jobs:
         with:
           credentials_json: ${{ secrets.GOOGLE_CREDENTIALS }}
 
-      - name: Upload to GCS
+      - name: Hold index until assets are uploaded
+        working-directory: lfmc_model/scripts/viewer_3857/frontend
+        run: mv dist/index.html "${RUNNER_TEMP}/viewer-index.html"
+
+      - name: Upload assets to GCS
         uses: google-github-actions/upload-cloud-storage@v2
         with:
           path: lfmc_model/scripts/viewer_3857/frontend/dist
           destination: frontend-long-lfmc
           parent: false
           process_gcloudignore: false
+
+      - name: Restore index
+        working-directory: lfmc_model/scripts/viewer_3857/frontend
+        run: mv "${RUNNER_TEMP}/viewer-index.html" dist/index.html
+
+      - name: Upload index without caching
+        uses: google-github-actions/upload-cloud-storage@v2
+        with:
+          path: lfmc_model/scripts/viewer_3857/frontend/dist/index.html
+          destination: frontend-long-lfmc
+          headers: |-
+            cache-control: 'no-store, max-age=0'
