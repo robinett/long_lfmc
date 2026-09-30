@@ -4,7 +4,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
-#SBATCH --mail-type=FAIL
+#SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=trobinet@stanford.edu
 #SBATCH --output=/home/users/trobinet/long_lfmc/lfmc_model/scripts/rao_s1_source/logs/rao_s1_source_update_%j.out
 #SBATCH --error=/home/users/trobinet/long_lfmc/lfmc_model/scripts/rao_s1_source/logs/rao_s1_source_update_%j.err
